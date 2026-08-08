@@ -318,31 +318,36 @@ class SSAO(phi.Pass):
       hosted; runs `make native` always and `make wasm` when `emcc` is on
       `PATH`)
 
-**On the G-buffer/readPixels scope split:** WebGL1/GLES2 (the current wasm
-target) can't do multiple render targets, float textures, or integer
-textures — a faithful G-buffer needs the WebGL2 upgrade this table's
-"WebGL 2 from day one" row already calls for but the codebase hasn't done
-yet. Rather than block the deferred renderer on that separate, larger
-upgrade, `client/gbuffer.h`/`.c` implements the full layout from this
-section natively (`GL_RGBA8`/`GL_RGB10_A2`/`GL_R11F_G11F_B10F`/`GL_RG16F`/
+**On the G-buffer/readPixels scope split:** when this was built, wasm was
+still WebGL1/GLES2, which can't do multiple render targets, float
+textures, or integer textures — no faithful G-buffer possible there.
+Rather than block the deferred renderer on the separate WebGL2 upgrade,
+`client/gbuffer.h`/`.c` implemented the full layout from this section
+natively only (`GL_RGBA8`/`GL_RGB10_A2`/`GL_R11F_G11F_B10F`/`GL_RG16F`/
 `GL_R32UI`/`GL_DEPTH24_STENCIL8`, lighting pass to an `RGBA16F`
 accumulation buffer, tonemap pass to the default framebuffer,
-`gbuffer_pick_object_id` reading the object_id attachment) and wasm keeps
-its original forward path untouched. `material`/`emissive`/`velocity` are
-allocated per the layout above but not yet meaningfully populated — this
-renderer has no PBR params, no emissive surfaces, and no motion-vector
-tracking yet, so future work slots into the existing format rather than
-needing a G-buffer schema change. Shadow maps, transparency, TAA, bloom,
-FXAA, and the `@phi.render_pass` insertion-point system are all still
-unstarted — this is the minimum pipeline the rest builds on, not the
-finished thing.
+`gbuffer_pick_object_id` reading the object_id attachment), leaving wasm
+on its original forward path. **The wasm build has since been upgraded to
+WebGL2/GLES3** (`USE_WEBGL2=1`/`FULL_ES3=1`, GLSL ES 3.00 shaders) —
+matching this table's "WebGL 2 from day one" row — but the G-buffer
+itself was not yet extended to wasm; that MRT/FBO work is still native
+-only and is real, separate follow-on work now that the capability gap
+blocking it is closed. `material`/`emissive`/`velocity` are allocated per
+the layout above but not yet meaningfully populated — this renderer has
+no PBR params, no emissive surfaces, and no motion-vector tracking yet,
+so future work slots into the existing format rather than needing a
+G-buffer schema change. Shadow maps, transparency, TAA, bloom, FXAA, and
+the `@phi.render_pass` insertion-point system are all still unstarted —
+this is the minimum pipeline the rest builds on, not the finished thing.
 
-**Effort:** 5–7 weeks *(platform abstraction, native port, CI check, and a
-native-only deferred renderer/G-buffer core: done — see the scope-split
-note above for what "done" means here. Remaining: the wasm-side WebGL2
-upgrade needed before the G-buffer can extend there, and everything this
-phase's G-buffer enables but doesn't itself implement — shadows,
-transparency, TAA, bloom, FXAA, the `@phi.render_pass` insertion-point
+**Effort:** 5–7 weeks *(platform abstraction, native port — including a
+real native WebSocket client, not just an offline stub — CI check, the
+wasm WebGL2 upgrade, and a native-only deferred renderer/G-buffer core:
+done — see the scope-split note above for what "done" means here.
+Remaining: extending the G-buffer to wasm now that WebGL2 makes it
+possible, and everything this phase's G-buffer enables but doesn't
+itself implement — shadows, transparency, TAA, bloom, FXAA, the
+`@phi.render_pass` insertion-point
 system.)*
 
 ---
