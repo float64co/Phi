@@ -62,3 +62,13 @@
  * everywhere, not just wasm — used on all three targets for one consistent
  * config rather than forking it per platform. */
 #define MICROPY_GCREGS_SETJMP      (1)
+
+/* Float support is OFF by default in MicroPython regardless of ROM level
+ * (MICROPY_FLOAT_IMPL defaults to MICROPY_FLOAT_IMPL_NONE) — found the hard
+ * way, via a "decimal numbers not supported" SyntaxError on a plain `1.0`
+ * literal while prototyping @phi.node's socket-definition decorator
+ * (phi.md, Phase 6). Single-precision to match the engine's own float
+ * (not double) convention everywhere on the C side (renderer.c, gbuffer.c,
+ * meshobject.c, ...) — no reason for Python-side numbers to be a different
+ * width from the C values they end up feeding. */
+#define MICROPY_FLOAT_IMPL         (MICROPY_FLOAT_IMPL_FLOAT)

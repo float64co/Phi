@@ -983,6 +983,31 @@ project, but a smaller one than before)*
 
 ## Phase 5 — MicroPython Integration
 
+### Status: embedding + decorator-pattern prototyping done; real C API surface not started
+
+A bounded first slice is complete and build-verified on all three targets
+(native/win32/wasm): MicroPython itself is embedded (`client/micropython_embed/`,
+generated via MicroPython's own documented `ports/embed` workflow — see
+`client/mpconfigport.h` for config and regeneration instructions), a basic
+C↔Python round trip works (call Python from C with arguments and a return
+value; expose a C function to Python; an uncaught Python exception is caught
+and printed, not a crash or hang), and — the actual point of this slice —
+both decorator patterns Phase 1 and Phase 6 depend on are prototyped and
+confirmed working against real MicroPython. See the CRITICAL WARNING section
+below for exactly what was tested and what was found (including one real bug
+in MicroPython's own `ports/embed` — a false-positive recursion-depth
+exception from an unset stack limit — root-caused via `gdb`, worked around,
+documented at the fix site for when this needs to land in Phi's real
+MicroPython init path too).
+
+**Not started**: the actual C API surface (`phi.mesh_object`, `phi.raycast`,
+scene bindings, etc. — the "C API surface (initial)" section below is still
+a design sketch, not implemented against the embedding), and MicroPython
+isn't wired into the real game build (`phi_native`/`phi_win32`/`game.wasm`)
+at all yet — `client/mp_test_main.c` is a standalone self-test, deliberately
+kept separate so nothing about the shipped binary's size or behavior changes
+until the real API is designed.
+
 ### Embedding strategy
 
 MicroPython's C source is compiled directly into `engine.wasm` alongside the
@@ -993,7 +1018,7 @@ in-editor code pane, or from WebRTC data channel delivery from the host peer).
 MicroPython adds approximately 200–400 KB compressed to the WASM binary.
 `uasyncio` is included for async NPC behaviour (see Phase 7).
 
-### CRITICAL WARNING
+### CRITICAL WARNING — status: the two patterns below are now confirmed
 
 **ALL PYTHON API PATTERNS MUST BE VALIDATED AGAINST MICROPYTHON SPECIFICALLY
 BEFORE THE API IS FROZEN. MICROPYTHON SUPPORTS DECORATORS AND BASIC INHERITANCE
@@ -1007,6 +1032,45 @@ This applies directly to Phase 1's `@phi.panel` class-based panels and Phase 0's
 `@phi.render_pass` class-based passes — both use inheritance from a `phi.*` base
 class and must be prototyped in MicroPython specifically before Phase 1 UI work
 is considered final, not just designed against CPython semantics.
+
+**Update — both patterns prototyped against real MicroPython (not CPython) and
+confirmed working**, via a standalone embedding self-test
+(`client/mp_test_main.c`, `make mp_test`/`mp_test_win32`/`mp_test_wasm`,
+verified on all three targets):
+
+- **`@phi.panel`-style class decorator**: a plain-Python-base class,
+  subclassed, decorated to register it by name, instantiated from C, its
+  overridden method called from C, with real persistent instance state
+  (`self.call_count` surviving across calls, not re-evaluated fresh each
+  time). All of it worked exactly as sketched — no `__init_subclass__` or
+  other metaclass machinery was needed for this specific pattern (the
+  decorator does the registration from *outside* the class, not via a class-
+  side hook), so the warning above about metaclass gaps turned out not to
+  bite here. Confirmed empirically, not just because the pattern happens
+  not to need the risky features.
+- **`@phi.node`-style function decorator**: confirmed working, but **not**
+  via type-annotation introspection — MicroPython parses PEP 3107 annotation
+  syntax (`def f(x: int)`) but never stores it; there is no `__annotations__`
+  on function objects at all, confirmed by a direct empirical probe
+  (`AttributeError: 'function' object has no attribute '__annotations__'`).
+  This does NOT break the `@phi.node` design below, because — on close
+  re-reading — the code sketch never actually used annotations in the first
+  place: `inputs=[('mesh', Mesh), ('scale', float, 1.0)]` is passed as an
+  explicit decorator keyword argument, not derived from the wrapped
+  function's parameter annotations. The prose immediately below that sketch
+  ("The decorator reads type annotations...") was simply an inaccurate
+  description of its own code example — fixed now to describe what the code
+  actually does. Net effect: the real design was already annotation-free and
+  MicroPython-safe; only the documentation was wrong.
+
+One more finding from this same prototyping pass, unrelated to decorators but
+worth flagging since it'll bite anyone embedding MicroPython for Phi work:
+**float literals (`1.0`) raise `SyntaxError: decimal numbers not supported`
+unless `MICROPY_FLOAT_IMPL` is explicitly set** — it defaults to
+`MICROPY_FLOAT_IMPL_NONE` regardless of ROM level (not something
+`MICROPY_CONFIG_ROM_LEVEL_FULL_FEATURES` turns on for you). `client/
+mpconfigport.h` sets `MICROPY_FLOAT_IMPL_FLOAT` (single-precision, matching
+the engine's own `float` convention throughout the C side).
 
 ### C API surface (initial)
 
@@ -1074,9 +1138,14 @@ def noise_displace(mesh, scale):
     return mesh
 ```
 
-The decorator reads type annotations, creates socket definitions, and registers
-the node type in the editor palette. Built-in node types wrap C primitives for
-speed. Custom user nodes are pure Python. Same interface, different backing.
+The decorator takes `inputs=`/`outputs=` directly as arguments (plain Python
+lists of `(name, type)`/`(name, type, default)` tuples — not derived from the
+wrapped function's parameter annotations via `__annotations__`, which
+MicroPython doesn't support at runtime even though it parses the annotation
+syntax; see Phase 5's CRITICAL WARNING section for the empirical check), builds
+socket definitions from them, and registers the node type in the editor
+palette. Built-in node types wrap C primitives for speed. Custom user nodes
+are pure Python. Same interface, different backing.
 
 ### Node type introspection
 

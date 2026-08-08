@@ -13,11 +13,22 @@
  *      the C side actually ran (not just that the call didn't crash).
  *   3. an uncaught Python exception is caught and printed, not a process
  *      crash or hang.
+ *   4. the @phi.panel class-decorator pattern (phi.md Phase 1): a class
+ *      inheriting from a plain Python base, decorated to register it,
+ *      instantiated and its overridden method called from C, with real
+ *      persistent instance state (not re-evaluated fresh each call).
+ *   5. the @phi.node function-decorator pattern (phi.md Phase 6): a
+ *      decorator taking inputs=/outputs= socket-definition arguments,
+ *      registering the wrapped function, with the resulting registry
+ *      introspectable from C (phi.node_types()' actual mechanism) and the
+ *      node function itself callable from C during evaluation.
  */
 #include <stdio.h>
 #include <string.h>
 #include "port/micropython_embed.h"
 #include "py/obj.h"
+#include "py/objlist.h"
+#include "py/objtuple.h"
 #include "py/runtime.h"
 #include "py/compile.h"
 #include "py/gc.h"
@@ -102,6 +113,92 @@ int main(void) {
     int ok2 = call_py_add(bad_fn, 1, 2, &result2, &raised2);
     printf("[mp_test] bad(1,2) -> ok=%d raised=%d (expected ok=0 raised=1) -- process still alive\n", ok2, raised2);
     if (!(ok2 == 0 && raised2 == 1)) fail = 1;
+
+    printf("[mp_test] === 4: @phi.panel class-decorator pattern ===\n");
+    mp_embed_exec_str(
+        "_panel_registry = {}\n"
+        "class Panel:\n"
+        "    pass\n"
+        "def panel(name):\n"
+        "    def decorator(cls):\n"
+        "        _panel_registry[name] = cls\n"
+        "        return cls\n"
+        "    return decorator\n"
+        "@panel('Fracture Tools')\n"
+        "class FracturePanel(Panel):\n"
+        "    def __init__(self):\n"
+        "        self.call_count = 0\n"
+        "    def draw(self, ctx):\n"
+        "        self.call_count += 1\n"
+        "        return ctx * 2\n"
+    );
+    {
+        nlr_buf_t nlr;
+        if (nlr_push(&nlr) == 0) {
+            mp_obj_t registry = lookup_global("_panel_registry");
+            mp_obj_t cls = mp_obj_dict_get(registry, mp_obj_new_str("Fracture Tools", 14));
+            mp_obj_t instance = mp_call_function_n_kw(cls, 0, 0, NULL);
+            mp_obj_t draw_bound = mp_load_attr(instance, qstr_from_str("draw"));
+            mp_obj_t args[1] = { mp_obj_new_int(21) };
+            mp_obj_t result = mp_call_function_n_kw(draw_bound, 1, 0, args);
+            int result_val = mp_obj_get_int(result);
+            mp_obj_t call_count = mp_load_attr(instance, qstr_from_str("call_count"));
+            int cc = mp_obj_get_int(call_count);
+            printf("[mp_test] FracturePanel().draw(21) -> %d, call_count -> %d "
+                   "(expected 42, 1)\n", result_val, cc);
+            if (!(result_val == 42 && cc == 1)) fail = 1;
+            nlr_pop();
+        } else {
+            printf("[mp_test] EXCEPTION in step 4:\n");
+            mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
+            fail = 1;
+        }
+    }
+
+    printf("[mp_test] === 5: @phi.node function-decorator pattern ===\n");
+    /* Note: NOT __annotations__-based, deliberately -- see mpconfigport.h's
+     * comment. MicroPython parses PEP 3107 annotation syntax but never
+     * stores it (no __annotations__ on function objects at all, confirmed
+     * empirically), which would have broken phi.md's Phase 6 sketch if it
+     * had actually relied on that. It doesn't: the sketch already passes
+     * inputs=/outputs= as plain decorator keyword arguments, which is what
+     * this exercises. */
+    mp_embed_exec_str(
+        "_node_registry = {}\n"
+        "def node(inputs, outputs):\n"
+        "    def decorator(fn):\n"
+        "        _node_registry[fn.__name__] = {'inputs': inputs, 'outputs': outputs, 'fn': fn}\n"
+        "        return fn\n"
+        "    return decorator\n"
+        "@node(inputs=[('mesh', 'Mesh'), ('scale', 'float', 1.0)], outputs=[('mesh', 'Mesh')])\n"
+        "def noise_displace(mesh, scale):\n"
+        "    return mesh + scale\n"
+    );
+    {
+        nlr_buf_t nlr;
+        if (nlr_push(&nlr) == 0) {
+            mp_obj_t registry = lookup_global("_node_registry");
+            mp_obj_t entry = mp_obj_dict_get(registry, mp_obj_new_str("noise_displace", 14));
+            mp_obj_t inputs = mp_obj_dict_get(entry, mp_obj_new_str("inputs", 6));
+            size_t n_inputs; mp_obj_t *input_items;
+            mp_obj_list_get(inputs, &n_inputs, &input_items);
+            size_t n_fields; mp_obj_t *fields;
+            mp_obj_tuple_get(input_items[0], &n_fields, &fields);
+            const char *first_name = mp_obj_str_get_str(fields[0]);
+            mp_obj_t fn = mp_obj_dict_get(entry, mp_obj_new_str("fn", 2));
+            mp_obj_t args[2] = { mp_obj_new_int(10), mp_obj_new_int(5) };
+            mp_obj_t result = mp_call_function_n_kw(fn, 2, 0, args);
+            int result_val = mp_obj_get_int(result);
+            printf("[mp_test] node_types()['noise_displace'].inputs[0][0] -> '%s', "
+                   "fn(10,5) -> %d (expected 'mesh', 15)\n", first_name, result_val);
+            if (!(strcmp(first_name, "mesh") == 0 && n_inputs == 2 && result_val == 15)) fail = 1;
+            nlr_pop();
+        } else {
+            printf("[mp_test] EXCEPTION in step 5:\n");
+            mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
+            fail = 1;
+        }
+    }
 
     mp_embed_deinit();
 
