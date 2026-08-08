@@ -50,8 +50,10 @@
     X(PFNGLCHECKFRAMEBUFFERSTATUSPROC,   glCheckFramebufferStatus) \
     X(PFNGLDELETEFRAMEBUFFERSPROC,       glDeleteFramebuffers) \
     X(PFNGLACTIVETEXTUREPROC,            glActiveTexture) \
+    X(PFNGLUNIFORM1FPROC,                glUniform1f) \
     X(PFNGLUNIFORM1IPROC,                glUniform1i) \
     X(PFNGLUNIFORM1UIPROC,               glUniform1ui) \
+    X(PFNGLUNIFORM2FPROC,                glUniform2f) \
     X(PFNGLCLEARBUFFERUIVPROC,           glClearBufferuiv)
 
 #define X(type, name) extern type name##_native;
@@ -92,8 +94,10 @@ GL_NATIVE_PROC_LIST
 #define glCheckFramebufferStatus      glCheckFramebufferStatus_native
 #define glDeleteFramebuffers          glDeleteFramebuffers_native
 #define glActiveTexture               glActiveTexture_native
+#define glUniform1f                   glUniform1f_native
 #define glUniform1i                   glUniform1i_native
 #define glUniform1ui                  glUniform1ui_native
+#define glUniform2f                   glUniform2f_native
 #define glClearBufferuiv              glClearBufferuiv_native
 
 /* Fetches every pointer above via phi_gl_get_proc. Must run once, after the

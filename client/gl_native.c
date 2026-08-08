@@ -40,8 +40,10 @@
     X(PFNGLCHECKFRAMEBUFFERSTATUSPROC,   glCheckFramebufferStatus) \
     X(PFNGLDELETEFRAMEBUFFERSPROC,       glDeleteFramebuffers) \
     X(PFNGLACTIVETEXTUREPROC,            glActiveTexture) \
+    X(PFNGLUNIFORM1FPROC,                glUniform1f) \
     X(PFNGLUNIFORM1IPROC,                glUniform1i) \
     X(PFNGLUNIFORM1UIPROC,               glUniform1ui) \
+    X(PFNGLUNIFORM2FPROC,                glUniform2f) \
     X(PFNGLCLEARBUFFERUIVPROC,           glClearBufferuiv)
 
 #define X(type, name) type name##_native = 0;
