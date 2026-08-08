@@ -218,10 +218,15 @@ static void main_loop(void *userdata) {
     editor_render(&g_ed, g_renderer);
 
 #ifndef __EMSCRIPTEN__
-    /* [geometry] done — resolve [lighting] (G-buffer -> HDR) and [tonemap]
-     * (HDR -> default framebuffer), per phi.md's deferred pipeline. */
+    /* [geometry] done — [shadow] (world mesh, depth-only, from the
+     * light's POV), then resolve [lighting] (G-buffer -> HDR, shadow-
+     * mapped) and [tonemap] (HDR -> default framebuffer), per phi.md's
+     * deferred pipeline. */
     static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
-    gbuffer_resolve(g_gbuf, light_dir, sky);
+    gbuffer_render_shadow_map(g_gbuf, g_mesh, light_dir);
+    float inv_vp[16];
+    renderer_get_inverse_view_proj(g_renderer, inv_vp);
+    gbuffer_resolve(g_gbuf, light_dir, sky, inv_vp);
 #endif
 
     /* HUD */
@@ -241,7 +246,7 @@ static void main_loop(void *userdata) {
      * geometry does — either way, proof the frame isn't just black/garbage. */
     static int s_frame = 0;
     ++s_frame;
-    if (s_frame == 30) {
+    if (s_frame == 30 || s_frame % 120 == 0) {
         unsigned char px[3];
         glReadPixels(cw / 2, ch / 2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, px);
         printf("[main] frame %d center pixel RGB = (%d,%d,%d)\n", s_frame, px[0], px[1], px[2]);

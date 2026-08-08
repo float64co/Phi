@@ -53,6 +53,13 @@ void renderer_get_sky_color(float *out3);  /* out3[0..2] = r,g,b — see gbuffer
 /* Set camera from local player */
 void renderer_set_camera(Renderer *r, const Player *p);
 
+/* Inverse of the current camera view-projection matrix — native only
+ * (used by gbuffer.c's lighting pass to reconstruct world-space position
+ * from G-buffer depth, e.g. for shadow-map sampling). Returns 1 on
+ * success, 0 if the matrix was singular (shouldn't happen for a valid
+ * camera, but checked rather than assumed). */
+int renderer_get_inverse_view_proj(const Renderer *r, float *out16);
+
 /* For future picking/editor use (Phase 1) — the built-in draw_* calls
  * already set sensible per-object ids internally; this is for callers
  * that want to override that. No-op on wasm (see Renderer.u_object_id). */

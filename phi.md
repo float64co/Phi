@@ -360,9 +360,29 @@ blocking it is closed. `material`/`emissive`/`velocity` are allocated per
 the layout above but not yet meaningfully populated — this renderer has
 no PBR params, no emissive surfaces, and no motion-vector tracking yet,
 so future work slots into the existing format rather than needing a
-G-buffer schema change. Shadow maps, transparency, TAA, bloom, FXAA, and
-the `@phi.render_pass` insertion-point system are all still unstarted —
-this is the minimum pipeline the rest builds on, not the finished thing.
+G-buffer schema change. **Shadow maps have since landed** (native only,
+both Linux and Windows — `gbuffer_render_shadow_map` renders the world
+mesh depth-only from a fixed directional light's point of view into a
+`DEPTH_COMPONENT32F` map; the lighting pass reconstructs each fragment's
+world position from G-buffer depth via the camera's inverse view-
+projection, projects it into light space, and dims the diffuse term
+when occluded). Scoped narrowly: only the static world mesh casts/
+receives shadows (not players/rockets), the light-space ortho volume is
+a fixed box hand-picked to cover the default arena rather than fitting
+itself to whatever's actually built (editor-built geometry far outside
+that footprint won't shadow correctly), and there's no PCF/soft edges —
+a first pass the rest of shadowing can build on, not the finished thing.
+Verified two ways: the matrix math (a general 4x4 inverse, needed for
+world-position reconstruction) was checked numerically in isolation
+first (`VP · VP⁻¹` = identity, a world point round-trips exactly through
+clip space and back) before it was trusted in the shader; and the
+resulting shadow map's depth values were read back directly and found
+genuinely varied (not degenerate/uniform) — `0.3093 1.0000 1.0000 0.3850
+0.3854` across 5 sample points, **identical** on Linux (Mesa/llvmpipe)
+and Windows (Intel Arc Pro Graphics), the same cross-platform-identical
+pattern already established for the rest of the G-buffer pipeline.
+Transparency, TAA, bloom, FXAA, and the `@phi.render_pass` insertion-
+point system are all still unstarted.
 
 **Effort:** 5–7 weeks *(platform abstraction across three targets
 (wasm/Linux-native/Windows-native) — all with real input and real

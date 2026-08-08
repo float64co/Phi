@@ -4,6 +4,60 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
+
+/* ---- Small matrix helpers for the shadow pass's light-space camera.
+ * Deliberately not shared with renderer.c (kept self-contained, same
+ * reasoning as the shader-compile helpers below) except for the
+ * cross-product convention, which is copied exactly from
+ * renderer.c's mat4_look_rotation/mat4_look_dir — that convention was
+ * fixed once already after a real handedness bug there (see its
+ * comments), so this reuses it rather than re-deriving and risking the
+ * same mistake twice. ---- */
+
+static void mat4_mul(float *out, const float *a, const float *b) {
+    float tmp[16];
+    for (int col = 0; col < 4; col++)
+    for (int row = 0; row < 4; row++) {
+        float s = 0;
+        for (int k = 0; k < 4; k++) s += a[k*4+row] * b[col*4+k];
+        tmp[col*4+row] = s;
+    }
+    memcpy(out, tmp, sizeof(tmp));
+}
+
+static void mat4_ortho(float *m, float left, float right, float bottom, float top,
+                        float near_, float far_) {
+    memset(m, 0, 16 * sizeof(float));
+    m[0]  = 2.0f / (right - left);
+    m[5]  = 2.0f / (top - bottom);
+    m[10] = -2.0f / (far_ - near_);
+    m[12] = -(right + left) / (right - left);
+    m[13] = -(top + bottom) / (top - bottom);
+    m[14] = -(far_ + near_) / (far_ - near_);
+    m[15] = 1.0f;
+}
+
+static void mat4_look_at(float *m, float ex, float ey, float ez,
+                          float tx, float ty, float tz) {
+    float fx = tx - ex, fy = ty - ey, fz = tz - ez;
+    float flen = sqrtf(fx*fx + fy*fy + fz*fz);
+    fx /= flen; fy /= flen; fz /= flen;
+
+    float upx = 0.0f, upy = 1.0f, upz = 0.0f;
+    if (fabsf(fx*upx + fy*upy + fz*upz) > 0.999f) { upx = 1.0f; upy = 0.0f; upz = 0.0f; }
+
+    float rx = fy*upz - fz*upy, ry = fz*upx - fx*upz, rz = fx*upy - fy*upx;
+    float rl = sqrtf(rx*rx + ry*ry + rz*rz);
+    rx /= rl; ry /= rl; rz /= rl;
+
+    float ux = ry*fz - rz*fy, uy = rz*fx - rx*fz, uz = rx*fy - ry*fx;
+
+    m[0] = rx;  m[4] = ry;  m[8]  = rz;  m[12] = -(rx*ex + ry*ey + rz*ez);
+    m[1] = ux;  m[5] = uy;  m[9]  = uz;  m[13] = -(ux*ex + uy*ey + uz*ez);
+    m[2] = -fx; m[6] = -fy; m[10] = -fz; m[14] =  (fx*ex + fy*ey + fz*ez);
+    m[3] = 0.0f; m[7] = 0.0f; m[11] = 0.0f; m[15] = 1.0f;
+}
 
 static void gl_check(const char *where) {
     GLenum e = glGetError();
@@ -72,6 +126,9 @@ static const char *LIGHTING_FRAG_SRC =
     "uniform sampler2D u_albedo;\n"
     "uniform sampler2D u_normal;\n"
     "uniform sampler2D u_depth;\n"
+    "uniform sampler2D u_shadow_map;\n"
+    "uniform mat4 u_inv_view_proj;\n"
+    "uniform mat4 u_light_vp;\n"
     "uniform vec3 u_light_dir;\n"
     "uniform vec3 u_sky_color;\n"
     "out vec4 out_hdr;\n"
@@ -86,7 +143,36 @@ static const char *LIGHTING_FRAG_SRC =
     "  vec3 n = texture(u_normal, v_uv).rgb * 2.0 - 1.0;\n"
     "  float diff = max(dot(n, u_light_dir), 0.0);\n"
     "  float ambient = 0.3;\n"
-    "  out_hdr = vec4(albedo * (ambient + diff * 0.7), 1.0);\n"
+    /* Reconstruct world-space position from this pixel's UV + depth via
+     * the camera's inverse view-projection (both stored in [0,1]/depth-
+     * buffer ranges, remapped to NDC's [-1,1] before unprojecting). */
+    "  vec4 clip = vec4(v_uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);\n"
+    "  vec4 world = u_inv_view_proj * clip;\n"
+    "  world /= world.w;\n"
+    /* Project into the shadow map's light space to look up occluder depth. */
+    "  vec4 lclip = u_light_vp * world;\n"
+    "  vec3 lndc = lclip.xyz / lclip.w;\n"
+    "  vec3 lsc = lndc * 0.5 + 0.5;\n"
+    "  float shadow = 1.0;\n"
+    "  if (lsc.x >= 0.0 && lsc.x <= 1.0 && lsc.y >= 0.0 && lsc.y <= 1.0 && lsc.z <= 1.0) {\n"
+    "    float occluder_depth = texture(u_shadow_map, lsc.xy).r;\n"
+    "    float bias = 0.002;\n"   /* tuned to avoid acne on this scene's scale; may need revisiting once seen visually */
+    "    if (lsc.z - bias > occluder_depth) shadow = 0.3;\n"  /* in shadow: dim, not black — crude, no PCF/soft edges yet */
+    "  }\n"
+    "  out_hdr = vec4(albedo * (ambient + diff * 0.7 * shadow), 1.0);\n"
+    "}\n";
+
+static const char *SHADOW_VERT_SRC =
+    "#version 330 core\n"
+    "layout(location=0) in vec3 a_pos;\n"
+    "uniform mat4 u_light_vp;\n"
+    "void main() {\n"
+    "  gl_Position = u_light_vp * vec4(a_pos, 1.0);\n"
+    "}\n";
+
+static const char *SHADOW_FRAG_SRC =
+    "#version 330 core\n"
+    "void main() {\n"
     "}\n";
 
 static const char *TONEMAP_FRAG_SRC =
@@ -140,6 +226,21 @@ GBuffer *gbuffer_create(int w, int h) {
     if (status != GL_FRAMEBUFFER_COMPLETE)
         printf("[gbuffer] HDR FBO incomplete: 0x%04x\n", status);
 
+    /* Shadow map: depth-only FBO, no color attachment at all (glDrawBuffer/
+     * glReadBuffer(GL_NONE) tell GL not to expect one — legal and standard
+     * for a depth-only render target). */
+    gb->shadow_size = 2048;
+    gb->shadow_tex = make_target(gb->shadow_size, gb->shadow_size,
+                                  GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT);
+    glGenFramebuffers(1, &gb->shadow_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, gb->shadow_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, gb->shadow_tex, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        printf("[gbuffer] shadow FBO incomplete: 0x%04x\n", status);
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     float quad[] = { -1,-1,  1,-1,  1,1,   -1,-1,  1,1,  -1,1 };
@@ -152,29 +253,39 @@ GBuffer *gbuffer_create(int w, int h) {
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
 
     gb->lighting_program = link(QUAD_VERT_SRC, LIGHTING_FRAG_SRC);
-    gb->light_u_albedo    = glGetUniformLocation(gb->lighting_program, "u_albedo");
-    gb->light_u_normal    = glGetUniformLocation(gb->lighting_program, "u_normal");
-    gb->light_u_depth     = glGetUniformLocation(gb->lighting_program, "u_depth");
-    gb->light_u_light_dir = glGetUniformLocation(gb->lighting_program, "u_light_dir");
-    gb->light_u_sky_color = glGetUniformLocation(gb->lighting_program, "u_sky_color");
+    gb->light_u_albedo        = glGetUniformLocation(gb->lighting_program, "u_albedo");
+    gb->light_u_normal        = glGetUniformLocation(gb->lighting_program, "u_normal");
+    gb->light_u_depth         = glGetUniformLocation(gb->lighting_program, "u_depth");
+    gb->light_u_light_dir     = glGetUniformLocation(gb->lighting_program, "u_light_dir");
+    gb->light_u_sky_color     = glGetUniformLocation(gb->lighting_program, "u_sky_color");
+    gb->light_u_inv_view_proj = glGetUniformLocation(gb->lighting_program, "u_inv_view_proj");
+    gb->light_u_light_vp      = glGetUniformLocation(gb->lighting_program, "u_light_vp");
+    gb->light_u_shadow_map    = glGetUniformLocation(gb->lighting_program, "u_shadow_map");
 
     gb->tonemap_program = link(QUAD_VERT_SRC, TONEMAP_FRAG_SRC);
     gb->tonemap_u_hdr = glGetUniformLocation(gb->tonemap_program, "u_hdr");
 
-    printf("[gbuffer] created %dx%d, lighting_prog=%u tonemap_prog=%u\n",
-           w, h, gb->lighting_program, gb->tonemap_program);
+    gb->shadow_program = link(SHADOW_VERT_SRC, SHADOW_FRAG_SRC);
+    gb->shadow_u_light_vp = glGetUniformLocation(gb->shadow_program, "u_light_vp");
+
+    printf("[gbuffer] created %dx%d, lighting_prog=%u tonemap_prog=%u shadow_prog=%u (%dx%d)\n",
+           w, h, gb->lighting_program, gb->tonemap_program, gb->shadow_program,
+           gb->shadow_size, gb->shadow_size);
     gl_check("gbuffer_create");
     return gb;
 }
 
 static void free_gl_resources(GBuffer *gb) {
     unsigned int texs[] = { gb->tex_albedo, gb->tex_normal, gb->tex_material, gb->tex_emissive,
-                             gb->tex_velocity, gb->tex_object_id, gb->tex_depth_stencil, gb->hdr_tex };
+                             gb->tex_velocity, gb->tex_object_id, gb->tex_depth_stencil, gb->hdr_tex,
+                             gb->shadow_tex };
     glDeleteTextures((int)(sizeof(texs) / sizeof(texs[0])), texs);
     glDeleteFramebuffers(1, &gb->fbo);
     glDeleteFramebuffers(1, &gb->hdr_fbo);
+    glDeleteFramebuffers(1, &gb->shadow_fbo);
     glDeleteProgram(gb->lighting_program);
     glDeleteProgram(gb->tonemap_program);
+    glDeleteProgram(gb->shadow_program);
 }
 
 void gbuffer_destroy(GBuffer *gb) {
@@ -206,7 +317,69 @@ void gbuffer_begin_geometry_pass(GBuffer *gb, const float *sky_color) {
     glClearBufferuiv(GL_COLOR, 5, &no_object);  /* draw-buffer index 5 = GL_COLOR_ATTACHMENT5 = object_id */
 }
 
-void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color) {
+void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light_dir) {
+    if (!mesh || mesh->count == 0) return;
+
+    /* Fixed light-space camera: sits back along light_dir from a point
+     * roughly in the middle of the default arena (world coords the whole
+     * codebase already spawns players at, see main.c) and looks back at
+     * it through a fixed ortho volume. See the struct comment in
+     * gbuffer.h for the scope limitation (doesn't fit itself to what's
+     * actually built). */
+    float scene_cx = 128.0f, scene_cy = 32.0f, scene_cz = 128.0f;
+    float dist = 600.0f;
+    float ex = scene_cx + light_dir[0] * dist;
+    float ey = scene_cy + light_dir[1] * dist;
+    float ez = scene_cz + light_dir[2] * dist;
+
+    float light_view[16], light_proj[16];
+    mat4_look_at(light_view, ex, ey, ez, scene_cx, scene_cy, scene_cz);
+    mat4_ortho(light_proj, -350.0f, 350.0f, -350.0f, 350.0f, 10.0f, 1200.0f);
+    mat4_mul(gb->light_vp, light_proj, light_view);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, gb->shadow_fbo);
+    glViewport(0, 0, gb->shadow_size, gb->shadow_size);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+
+    glUseProgram(gb->shadow_program);
+    glUniformMatrix4fv(gb->shadow_u_light_vp, 1, GL_FALSE, gb->light_vp);
+
+    /* Only need position (location 0) — reuse the quad VAO's binding
+     * slot, its own attribs get fully overridden below before drawing. */
+    glBindVertexArray(gb->quad_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, VERTEX_STRIDE * (int)sizeof(float), (void *)0);
+    glDrawArrays(GL_TRIANGLES, 0, mesh->count);
+    gl_check("gbuffer_render_shadow_map");
+
+    /* One-shot sanity check: sample a handful of shadow-map texels and
+     * confirm they actually vary — a degenerate render (nothing rasterized,
+     * or a broken light matrix putting everything outside the frustum)
+     * would read back as a uniform 1.0 (cleared-and-never-written) across
+     * every sample instead. */
+    static int s_checked = 0;
+    if (!s_checked) {
+        s_checked = 1;
+        int s = gb->shadow_size;
+        int px[5][2] = { {s/2,s/2}, {s/4,s/4}, {3*s/4,s/4}, {s/4,3*s/4}, {3*s/4,3*s/4} };
+        float depths[5];
+        for (int i = 0; i < 5; i++)
+            glReadPixels(px[i][0], px[i][1], 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depths[i]);
+        printf("[gbuffer] shadow map sample depths (center,4 quadrants): "
+               "%.4f %.4f %.4f %.4f %.4f\n",
+               depths[0], depths[1], depths[2], depths[3], depths[4]);
+    }
+
+    /* Restore the quad's own attrib binding for the lighting/tonemap
+     * passes that follow — same VAO, different vertex data. */
+    glBindBuffer(GL_ARRAY_BUFFER, gb->quad_vbo);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+}
+
+void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color,
+                      const float *inv_view_proj) {
     /* ---- Lighting: G-buffer -> HDR ---- */
     glBindFramebuffer(GL_FRAMEBUFFER, gb->hdr_fbo);
     glViewport(0, 0, gb->w, gb->h);
@@ -218,9 +391,15 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glUniform1i(gb->light_u_normal, 1);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gb->tex_depth_stencil);
     glUniform1i(gb->light_u_depth, 2);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gb->shadow_tex);
+    glUniform1i(gb->light_u_shadow_map, 3);
     glUniform3fv(gb->light_u_light_dir, 1, light_dir);
     glUniform3fv(gb->light_u_sky_color, 1, sky_color);
+    glUniformMatrix4fv(gb->light_u_inv_view_proj, 1, GL_FALSE, inv_view_proj);
+    glUniformMatrix4fv(gb->light_u_light_vp, 1, GL_FALSE, gb->light_vp);
     glBindVertexArray(gb->quad_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, gb->quad_vbo);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     gl_check("gbuffer_resolve/lighting");
 
