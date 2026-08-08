@@ -551,7 +551,11 @@ implementation:
   just via the build succeeding) by running the actual embedded-FS + cgltf
   path under Node with the environment restriction temporarily lifted, since
   a plain text search of the minified output isn't a reliable way to confirm
-  embedded binary data is really there.
+  embedded binary data is really there. **Confirmed end-to-end in a real
+  browser**: the embedded asset loads, the object-id readback finds the
+  cube genuinely rasterized on screen (10609 hits at one checked frame),
+  and the whole session runs GL-errorless — same real-browser verification
+  standard as every render-pipeline feature in Phase 0.
 
 **Not started**: the native UI system (DNA/RNA property system, SDF font
 widget rendering, panel layout — see below), transform gizmos, ray-vs-mesh
