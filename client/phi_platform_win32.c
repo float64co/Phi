@@ -1,4 +1,6 @@
 #include "phi_platform.h"
+#include "phi_platform_win32.h"
+#include "input.h"
 
 #include <windows.h>
 #include <GL/gl.h>
@@ -11,14 +13,14 @@
  * needs its own windowing (Win32) and GL context API (WGL vs GLX), so this
  * is a separate implementation, same role.
  *
- * Scoped minimally for now: window + OpenGL 3.3 core context + proc
- * loading, enough to prove the existing gl_native.h/gbuffer.c/renderer.c
- * GL 3.3 core path (already written against the portable phi_gl_get_proc
- * abstraction) actually works on real Windows/WGL — that's Phase 0's
- * "glext.h GL loading verified on Windows" deliverable. Input (Win32
- * keyboard/mouse) and networking (Winsock) are NOT wired here — separate,
- * later work, matching how Linux native got a windowing-only milestone
- * first before X11 input and the BSD-socket WebSocket client landed. */
+ * Windowing + OpenGL 3.3 core context + proc loading (proved the existing
+ * gl_native.h/gbuffer.c/renderer.c GL 3.3 core path — already written
+ * against the portable phi_gl_get_proc abstraction — works on real
+ * Windows/WGL, satisfying Phase 0's "glext.h GL loading verified on
+ * Windows" deliverable) plus WndProc forwarding keyboard/mouse messages
+ * into input.c's Win32 branch via input_native_handle_event, mirroring
+ * how phi_platform_native.c's X11 event pump forwards to the X11 branch.
+ * Winsock networking is NOT wired here — separate, later work. */
 
 static HWND  s_hwnd = NULL;
 static HDC   s_hdc  = NULL;
@@ -41,6 +43,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpara
         s_w = LOWORD(lparam);
         s_h = HIWORD(lparam);
         return 0;
+
+    /* Forwarded to input.c's Win32 branch — same role as
+     * phi_platform_native.c's X11 event pump forwarding to
+     * input_native_handle_event, just message-driven instead of
+     * pumped. Still falls through to DefWindowProcA below; none of
+     * these need to be "consumed" to keep default window behavior
+     * correct (unlike WM_CLOSE above). */
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_CHAR:
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_MOUSEWHEEL:
+    case WM_KILLFOCUS: {
+        MSG synthetic;
+        synthetic.hwnd    = hwnd;
+        synthetic.message = msg;
+        synthetic.wParam  = wparam;
+        synthetic.lParam  = lparam;
+        input_native_handle_event(&synthetic);
+        return DefWindowProcA(hwnd, msg, wparam, lparam);
+    }
+
     default:
         return DefWindowProcA(hwnd, msg, wparam, lparam);
     }
@@ -180,3 +208,5 @@ void phi_platform_shutdown(void) {
     if (s_hdc && s_hwnd) ReleaseDC(s_hwnd, s_hdc);
     if (s_hwnd) DestroyWindow(s_hwnd);
 }
+
+HWND phi_platform_win32_window(void) { return s_hwnd; }
