@@ -173,6 +173,16 @@ void input_set_pointer_locked(int locked) {
     }
 }
 
+#elif defined(_WIN32)
+/* Win32 keyboard/mouse input isn't wired yet — phi_platform_win32.c is
+ * scoped to windowing + GL context for now (see its header comment).
+ * Real input lands the same way X11 input did: a WndProc hook forwarding
+ * to input_native_handle_event, and the mirrored key_down/key_up/
+ * mouse_move logic the X11 branch below already has a working template for. */
+void input_install_callbacks(InputState *inp) { (void)inp; }
+void input_set_pointer_locked(int locked)      { (void)locked; }
+void input_native_handle_event(void *msg)      { (void)msg; }
+
 #else
 #include "phi_platform.h"
 #include "phi_platform_native.h"

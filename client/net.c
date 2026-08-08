@@ -62,6 +62,20 @@ static void ws_send_binary(const uint8_t *data, int len) {
         emscripten_websocket_send_binary(s_ws, (void *)data, len);
 }
 
+#elif defined(_WIN32)
+/* Winsock WebSocket client isn't wired yet — real native networking on
+ * Windows needs its own port of ws_client_native.c (Winsock2 instead of
+ * BSD sockets: WSAStartup, SOCKET instead of int, closesocket instead of
+ * close, ioctlsocket instead of fcntl(O_NONBLOCK) — same RFC 6455
+ * handshake/framing logic, different socket API underneath). Stubbed for
+ * now, same shape as the original pre-ws_client_native.c Linux stub. */
+static void ws_send_binary(const uint8_t *data, int len) { (void)data; (void)len; }
+void net_connect(NetState *ns, const char *url) {
+    strncpy(ns->ws_url, url, sizeof(ns->ws_url)-1);
+    printf("[net] Native Windows networking not implemented yet: %s\n", url);
+}
+void net_poll_native(void) { }
+
 #else
 #include "ws_client_native.h"
 
@@ -353,6 +367,8 @@ void net_on_message(GameState *gs, NetState *ns,
 void net_set_game_state(GameState *gs) {
 #ifdef __EMSCRIPTEN__
     s_gs = gs;
+#elif defined(_WIN32)
+    (void)gs;  /* native Windows networking not implemented yet, see above */
 #else
     s_gs_native = gs;
 #endif

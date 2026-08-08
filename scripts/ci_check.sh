@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Phase 0 "WASM cadence" check (phi.md): build both targets and confirm
-# they link. Doesn't run either binary — that needs a browser (wasm) or a
-# display (native) neither of which a CI runner necessarily has. Run this
+# Phase 0 "WASM cadence" check (phi.md): build every target this machine
+# can and confirm they link. Doesn't run any of them — that needs a
+# browser (wasm), a display (native), or (win32) actually being under
+# WSL with the Windows-side MinGW-w64 toolchain from phi.md's Windows
+# verification note, none of which a CI runner necessarily has. Run this
 # after any change that touches client/, before moving on to the next
 # milestone, to catch GL-feature or platform-abstraction drift early.
 #
 # Usage: scripts/ci_check.sh
-# Exit status: 0 if both targets build, non-zero otherwise.
+# Exit status: 0 if every attempted target builds, non-zero otherwise.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -32,6 +34,19 @@ if command -v emcc >/dev/null 2>&1; then
     fi
 else
     echo "wasm: SKIPPED (emcc not on PATH — source emsdk_env.sh first)"
+fi
+
+echo
+echo "== make win32 =="
+if [ -x /mnt/c/msys64/mingw64/bin/gcc.exe ]; then
+    if make win32; then
+        echo "win32: OK ($(du -h build/phi_win32.exe | cut -f1))"
+    else
+        echo "win32: FAILED"
+        fail=1
+    fi
+else
+    echo "win32: SKIPPED (not under WSL with MinGW-w64 at /mnt/c/msys64/mingw64 — expected on other machines)"
 fi
 
 echo

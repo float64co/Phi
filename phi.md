@@ -310,7 +310,25 @@ class SSAO(phi.Pass):
       round-trip, and a 100KB+ `PKT_MAP_FULL` correctly received. wss://
       (TLS) isn't implemented — `ws://` only, matching what the local dev
       server itself speaks.
-- [ ] `glext.h` GL loading verified on Linux, Windows, macOS — Linux only so far
+- [x] `glext.h` GL loading verified on Linux and Windows — **macOS
+      explicitly out of scope for now** (no access to a Mac in this
+      environment; not attempted). Windows verification runs through
+      `client/phi_platform_win32.c` (Win32/WGL, a third `phi_platform.h`
+      implementation — the existing "native" backend is Xlib/GLX,
+      Linux/X11-specific, not portable, despite the name), built with a
+      Windows-side MinGW-w64 toolchain invoked via WSL interop
+      (`make win32` — see the Makefile). Verified against **real
+      hardware**, not a software rasterizer: `GL_RENDERER=Intel(R)
+      Arc(TM) Pro Graphics`, `GL_VERSION=3.3.0`. The G-buffer/lighting/
+      tonemap pipeline (`gbuffer.c`, already written purely against the
+      portable `phi_gl_get_proc` abstraction, no Linux-specific code)
+      worked with zero changes, and the center-pixel readback came back
+      pixel-identical to the Linux native build — `(90,90,99)` on both,
+      despite running on entirely different OS/GPU/driver stacks. Scoped
+      to windowing + GL context + rendering only, matching how the Linux
+      native backend also got a rendering-only milestone before input/
+      networking followed — Win32 keyboard/mouse (WndProc) and Winsock
+      networking are separate, unstarted follow-on work.
 - [x] Deferred renderer with G-buffer writing and basic lighting pass —
       **native only** (see below); wasm still renders forward, unaffected
 - [x] `readPixels` object ID selection working — **native only** (see below)
@@ -340,15 +358,16 @@ G-buffer schema change. Shadow maps, transparency, TAA, bloom, FXAA, and
 the `@phi.render_pass` insertion-point system are all still unstarted —
 this is the minimum pipeline the rest builds on, not the finished thing.
 
-**Effort:** 5–7 weeks *(platform abstraction, native port — including a
-real native WebSocket client, not just an offline stub — CI check, the
-wasm WebGL2 upgrade, and a native-only deferred renderer/G-buffer core:
-done — see the scope-split note above for what "done" means here.
-Remaining: extending the G-buffer to wasm now that WebGL2 makes it
-possible, and everything this phase's G-buffer enables but doesn't
-itself implement — shadows, transparency, TAA, bloom, FXAA, the
-`@phi.render_pass` insertion-point
-system.)*
+**Effort:** 5–7 weeks *(platform abstraction across three targets
+(wasm/Linux-native/Windows-native), real networking on Linux native, the
+wasm WebGL2 upgrade, CI check, and a native-only (Linux + Windows)
+deferred renderer/G-buffer core: done — see the scope-split note above
+for what "done" means here. Remaining: Win32 input + Winsock networking
+(Windows native is windowing/rendering-only so far), extending the
+G-buffer to wasm now that WebGL2 makes it possible, macOS (explicitly
+deferred, no access), and everything this phase's G-buffer enables but
+doesn't itself implement — shadows, transparency, TAA, bloom, FXAA, the
+`@phi.render_pass` insertion-point system.)*
 
 ---
 

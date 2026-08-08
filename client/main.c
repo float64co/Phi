@@ -262,6 +262,14 @@ static void main_loop(void *userdata) {
 
 /* ---- Entry point ---- */
 int main(void) {
+#ifdef _WIN32
+    /* Windows console stdout is fully buffered when not attached to a
+     * real console (e.g. redirected to a file for headless verification)
+     * — without this, output is lost whenever the process is killed
+     * rather than exited normally, which it always is here since
+     * phi_platform_set_main_loop() only returns on a window-close message. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+#endif
     printf("[main] Initialising octree world...\n");
 
     /* World */

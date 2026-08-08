@@ -1,10 +1,14 @@
-# Phi — dual-target build (Phase 0: platform abstraction)
-# Requires: emcc (Emscripten SDK) for wasm, gcc + X11/GLX dev headers for native
+# Phi — multi-target build (Phase 0: platform abstraction)
+# Requires: emcc (Emscripten SDK) for wasm, gcc + X11/GLX dev headers for
+# native, and (only under WSL, for the win32 target) a Windows-side
+# MinGW-w64 toolchain reachable via WSL interop.
 #
 # Usage:
 #   make wasm     — build www/game.js + www/game.wasm via emcc
 #   make native   — build build/phi_native (Xlib/GLX, OpenGL 3.3 core)
-#   make          — both
+#   make win32    — build build/phi_win32.exe (Win32/WGL, OpenGL 3.3 core;
+#                    windowing+rendering only — no input/networking yet)
+#   make          — wasm + native (not win32 — opt-in, needs WSL + MinGW)
 #   make run      — build wasm, then start the Python server
 #   make clean    — remove build artifacts
 #   make watch    — rebuild wasm on source change (requires inotifywait)
@@ -110,8 +114,34 @@ $(OUT_NATIVE): $(NATIVE_SRCS) $(HDRS) | $(BUILDDIR)
 	@echo "native build complete -> $(OUT_NATIVE)"
 
 # ---------------------------------------------------------------
+# Win32 (WGL, OpenGL 3.3 core) — built via a Windows-side MinGW-w64
+# toolchain reached through WSL interop; produces a real Windows .exe.
+# Windowing + GL context + rendering only for now — no Win32 input or
+# Winsock networking yet (see phi_platform_win32.c's header comment).
+# ---------------------------------------------------------------
+WIN32_CC   := /mnt/c/msys64/mingw64/bin/gcc.exe
+WIN32_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_win32.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c
+
+WIN32_CFLAGS := \
+	-O2 \
+	-Wall \
+	-Wextra \
+	-I$(SRCDIR)
+
+WIN32_LDFLAGS := -lopengl32 -lgdi32 -luser32 -lkernel32
+
+OUT_WIN32 := $(BUILDDIR)/phi_win32.exe
+
+win32: $(OUT_WIN32)
+
+$(OUT_WIN32): $(WIN32_SRCS) $(HDRS) | $(BUILDDIR)
+	$(WIN32_CC) $(WIN32_CFLAGS) $(WIN32_SRCS) -o $(OUT_WIN32) $(WIN32_LDFLAGS)
+	chmod +x $(OUT_WIN32)
+	@echo "win32 build complete -> $(OUT_WIN32)"
+
+# ---------------------------------------------------------------
 clean:
-	rm -f $(OUT_JS) $(OUT_WASM) $(WWWDIR)/game.wasm.map $(OUT_NATIVE)
+	rm -f $(OUT_JS) $(OUT_WASM) $(WWWDIR)/game.wasm.map $(OUT_NATIVE) $(OUT_WIN32)
 
 watch:
 	@echo "Watching for changes..."
