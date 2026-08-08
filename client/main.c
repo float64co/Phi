@@ -8,6 +8,8 @@
 #include "editor.h"
 #include "console.h"
 #include "phi_platform.h"
+#include "halfedge_gltf.h"
+#include "meshobject.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,15 @@ static RenderMesh  *g_mesh     = NULL;
 static Renderer    *g_renderer = NULL;
 static GBuffer      *g_gbuf     = NULL;  /* deferred renderer, see gbuffer.h — both build targets now */
 static GameState    g_gs       = {0};
+
+/* Phase 1 foundation test object: loads assets/cube.gltf (a hand-authored
+ * unit cube, see the asset's own generator script) through the glTF ->
+ * half-edge -> RenderMesh pipeline (halfedge_gltf.c, meshobject.c) at
+ * startup and renders it as a fixed, static, non-interactive object —
+ * proving the data actually flows into the live scene. No editor
+ * interaction, UI, or physics yet; see phi.md's Phase 1 section. */
+static MeshObject   g_test_mesh_object = {0};
+static int          g_test_mesh_loaded = 0;
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
 static EditorState  g_ed       = {0};
@@ -203,10 +214,32 @@ static void main_loop(void *userdata) {
         renderer_set_camera(g_renderer, local);
     }
 
+    /* One-shot diagnostic camera override, native testing only in
+     * practice (no automated screenshot tooling on either target — see
+     * the comment further down): the real gameplay camera's position/yaw
+     * at any given frame depends on physics (free-fall to the floor) and
+     * possibly server-driven state, so it can't be relied on to actually
+     * be looking at the Phase 1 test MeshObject. Point the camera
+     * directly at it for exactly this one frame instead, to get a
+     * deterministic visibility check — next frame's renderer_set_camera
+     * call above overwrites this back to the real player camera, no
+     * explicit restore needed. */
+    static int s_cam_diag_frame = 0;
+    ++s_cam_diag_frame;
+    int mesh_obj_diag_frame = g_test_mesh_loaded && s_cam_diag_frame == 30;
+    if (mesh_obj_diag_frame) {
+        g_renderer->cam_pos[0] = g_test_mesh_object.position.x;
+        g_renderer->cam_pos[1] = g_test_mesh_object.position.y;
+        g_renderer->cam_pos[2] = g_test_mesh_object.position.z + 30.0f;
+        g_renderer->cam_yaw = 0.0f;
+        g_renderer->cam_pitch = 0.0f;
+    }
+
     renderer_draw_world(g_renderer, g_mesh);
     renderer_draw_ground_plane(g_renderer);
     renderer_draw_players(g_renderer, &g_gs, g_ns.local_id);
     renderer_draw_rockets(g_renderer, &g_gs);
+    if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
     editor_render(&g_ed, g_renderer);
 
     /* Snapshot this frame's vp for next frame's velocity buffer (TAA) —
@@ -266,6 +299,31 @@ static void main_loop(void *userdata) {
                s_frame, local->pos.x, local->pos.y, local->pos.z, local->yaw);
     }
 
+    /* One-shot: confirm the Phase 1 test MeshObject (object_id 4001, see
+     * g_test_mesh_object) is genuinely rasterized SOMEWHERE on screen, not
+     * just loaded into memory — a coarse full-framebuffer object-id scan
+     * rather than relying on the center pixel happening to land on it. */
+    static int s_mesh_obj_checked = 0;
+    if (g_test_mesh_loaded && !s_mesh_obj_checked && s_frame == 30) {
+        s_mesh_obj_checked = 1;
+        int found = 0, min_x = -1, max_x = -1, min_y = -1, max_y = -1;
+        for (int y = 0; y < ch; y += 4) {
+            for (int x = 0; x < cw; x += 4) {
+                unsigned int id = gbuffer_pick_object_id(g_gbuf, x, y);
+                if (id == 4000u + (unsigned int)g_test_mesh_object.id) {
+                    found++;
+                    if (min_x < 0 || x < min_x) min_x = x;
+                    if (x > max_x) max_x = x;
+                    if (min_y < 0 || y < min_y) min_y = y;
+                    if (y > max_y) max_y = y;
+                }
+            }
+        }
+        printf("[main] MeshObject visibility scan: %d/4-stride hits, bbox x=[%d,%d] y=[%d,%d] "
+               "(0 hits means not currently visible from spawn — may need camera/position adjustment)\n",
+               found, min_x, max_x, min_y, max_y);
+    }
+
     phi_platform_swap();
 }
 
@@ -298,6 +356,41 @@ int main(void) {
     g_mesh = mesh_create();
     mesh_rebuild(g_mesh, g_world);
     mesh_upload(g_mesh);
+
+    /* Phase 1 foundation test object — see g_test_mesh_object's comment. */
+    {
+        HalfEdgeMesh *hem = halfedge_load_gltf("assets/cube.gltf");
+        if (hem) {
+            g_test_mesh_object.id = 1;
+            /* Elevated well above normal bot/player ground-level traffic
+             * (~y=16 floor) — early native testing found bots occasionally
+             * standing directly in the diagnostic camera's line of sight
+             * at ground-level test positions, an environmental occlusion
+             * artifact from the live multiplayer arena, not a rendering
+             * bug (confirmed via debug output: identical camera/MVP math
+             * every run, only the object-id readback outcome varied, and
+             * the occluding pixel's object_id matched a player/bot). */
+            g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
+            g_test_mesh_object.orientation = quat_identity();
+            g_test_mesh_object.is_static = 1;
+            g_test_mesh_object.render_mesh = mesh_create();
+            /* assets/cube.gltf is a unit cube (half-extent 0.5) — scaled
+             * up 16x here by baking the scale directly into the flattened
+             * vertex positions (no scale field on MeshObject yet, see
+             * meshobject.h) so it's a visible size next to the arena's
+             * world-unit scale, rather than a barely-visible 1-unit cube. */
+            for (int i = 0; i < hem->vert_count; i++)
+                for (int a = 0; a < 3; a++)
+                    hem->verts[i].pos[a] *= 16.0f;
+            meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, hem, 4.0f);
+            halfedge_destroy(hem);
+            g_test_mesh_loaded = 1;
+            printf("[main] loaded assets/cube.gltf as MeshObject: %d triangles\n",
+                   g_test_mesh_object.render_mesh->count / 3);
+        } else {
+            printf("[main] failed to load assets/cube.gltf — MeshObject test skipped\n");
+        }
+    }
 
     /* Add local player immediately at ID=1 so camera works before server ACKs */
     g_ns.local_id = 1;

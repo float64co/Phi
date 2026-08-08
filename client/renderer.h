@@ -2,6 +2,7 @@
 #include "octree.h"
 #include "octree_render.h"
 #include "physics.h"
+#include "meshobject.h"
 
 typedef struct {
     /* WebGL program */
@@ -88,6 +89,10 @@ void renderer_set_object_id(Renderer *r, unsigned int id);
 
 /* Draw world mesh */
 void renderer_draw_world(Renderer *r, RenderMesh *mesh);
+
+/* Phase 1 foundation: draw a single MeshObject at its own position/
+ * orientation transform (see meshobject.h). */
+void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj);
 
 /* Draw all players (simple box) */
 void renderer_draw_players(Renderer *r, const GameState *gs, int local_id);

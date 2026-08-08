@@ -1,5 +1,6 @@
 #include "renderer.h"
 #include "octree_render.h"
+#include "meshobject.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -547,6 +548,58 @@ void renderer_draw_world(Renderer *r, RenderMesh *mesh) {
 
     glDrawArrays(GL_TRIANGLES, 0, mesh->count);
     gl_check("draw_world");
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(2);
+}
+
+/* Phase 1 foundation: draws a MeshObject (glTF-sourced, via the half-edge
+ * structure — see meshobject.h/halfedge_gltf.c) through the same shader/
+ * pipeline as everything else, just with its own position+orientation
+ * model transform. Same VERTEX_STRIDE=7 (pos,normal,mat_id) layout
+ * renderer_draw_world already uses, since meshobject_build_render_mesh_
+ * from_halfedge produces exactly that shape. */
+void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
+    if (!obj->render_mesh || obj->render_mesh->count == 0) return;
+
+    mesh_upload(obj->render_mesh);
+    if (!obj->render_mesh->vbo) return;
+
+    float vp[16]; build_vp(r, vp);
+    float rot[16], t[16], model[16], mvp[16], prev_mvp[16];
+    quat_to_mat4(&obj->orientation, rot);
+    mat4_translate(t, obj->position.x, obj->position.y, obj->position.z);
+    mat4_mul(model, t, rot);
+    mat4_mul(mvp, vp, model);
+    /* Camera-motion-only velocity scope, same reasoning as draw_box/
+     * draw_box_oriented — a static MeshObject's own transform doesn't
+     * change frame to frame anyway (is_static), so this is exact for
+     * static objects specifically, not just an approximation. */
+    mat4_mul(prev_mvp, r->prev_vp, model);
+
+    r->cur_object_id = 4000u + (unsigned int)obj->id;
+
+    glUseProgram(r->program);
+    bind_renderer_vao(r);
+    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, prev_mvp);
+    float ld[3] = {0.577f, 0.577f, 0.577f};
+    glUniform3fv(r->u_light_dir, 1, ld);
+    glUniform3f(r->u_mat_color, 0.75f, 0.35f, 0.85f);  /* distinct purple, not used by any existing draw call */
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+
+    glBindBuffer(GL_ARRAY_BUFFER, obj->render_mesh->vbo);
+    int stride = VERTEX_STRIDE * (int)sizeof(float);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));
+
+    glDrawArrays(GL_TRIANGLES, 0, obj->render_mesh->count);
+    gl_check("draw_mesh_object");
 
     glDisableVertexAttribArray(0);
     glDisableVertexAttribArray(1);

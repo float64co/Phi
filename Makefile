@@ -30,7 +30,10 @@ COMMON_SRCS := \
 	$(SRCDIR)/net.c           \
 	$(SRCDIR)/input.c         \
 	$(SRCDIR)/editor.c        \
-	$(SRCDIR)/console.c
+	$(SRCDIR)/console.c       \
+	$(SRCDIR)/halfedge.c      \
+	$(SRCDIR)/halfedge_gltf.c \
+	$(SRCDIR)/meshobject.c
 
 .PHONY: all wasm native run clean debug watch
 
@@ -63,6 +66,7 @@ EMFLAGS := \
 	-s MODULARIZE=0 \
 	-s ENVIRONMENT=web \
 	--js-library $(SRCDIR)/library_ws_stub.js \
+	--embed-file assets@assets \
 	-lGL \
 	-lwebsocket.js \
 	-lm
@@ -78,7 +82,7 @@ wasm: $(WWWDIR) $(OUT_JS)
 $(WWWDIR):
 	mkdir -p $(WWWDIR)
 
-$(OUT_JS): $(WASM_SRCS) $(HDRS) | $(WWWDIR)
+$(OUT_JS): $(WASM_SRCS) $(HDRS) assets/cube.gltf assets/cube.bin | $(WWWDIR)
 	$(WASM_CC) $(WASM_CFLAGS) $(EMFLAGS) $(WASM_SRCS) -o $(OUT_JS)
 	@echo "wasm build complete -> $(OUT_JS) + $(OUT_WASM)"
 
