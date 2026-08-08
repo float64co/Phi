@@ -120,7 +120,7 @@ $(OUT_NATIVE): $(NATIVE_SRCS) $(HDRS) | $(BUILDDIR)
 # Winsock networking yet (see phi_platform_win32.c's header comment).
 # ---------------------------------------------------------------
 WIN32_CC   := /mnt/c/msys64/mingw64/bin/gcc.exe
-WIN32_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_win32.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c
+WIN32_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_win32.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_win32.c
 
 WIN32_CFLAGS := \
 	-O2 \
@@ -128,7 +128,7 @@ WIN32_CFLAGS := \
 	-Wextra \
 	-I$(SRCDIR)
 
-WIN32_LDFLAGS := -lopengl32 -lgdi32 -luser32 -lkernel32
+WIN32_LDFLAGS := -lopengl32 -lgdi32 -luser32 -lkernel32 -lws2_32 -lbcrypt
 
 OUT_WIN32 := $(BUILDDIR)/phi_win32.exe
 

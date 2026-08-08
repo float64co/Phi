@@ -63,18 +63,44 @@ static void ws_send_binary(const uint8_t *data, int len) {
 }
 
 #elif defined(_WIN32)
-/* Winsock WebSocket client isn't wired yet — real native networking on
- * Windows needs its own port of ws_client_native.c (Winsock2 instead of
- * BSD sockets: WSAStartup, SOCKET instead of int, closesocket instead of
- * close, ioctlsocket instead of fcntl(O_NONBLOCK) — same RFC 6455
- * handshake/framing logic, different socket API underneath). Stubbed for
- * now, same shape as the original pre-ws_client_native.c Linux stub. */
-static void ws_send_binary(const uint8_t *data, int len) { (void)data; (void)len; }
+#include "ws_client_win32.h"
+
+static GameState *s_gs_native = NULL;
+static NetState   *s_ns_native = NULL;
+
+static void ws_send_binary(const uint8_t *data, int len) {
+    ws_client_send_binary(data, len);
+}
+
 void net_connect(NetState *ns, const char *url) {
     strncpy(ns->ws_url, url, sizeof(ns->ws_url)-1);
-    printf("[net] Native Windows networking not implemented yet: %s\n", url);
+    s_ns_native = ns;
+    ns->connected = 0;
+    if (ws_client_connect(url) == 0) {
+        ns->connected = 1;
+        printf("[net] WebSocket connected (native)\n");
+        net_send_hello(ns, "player");
+    } else {
+        printf("[net] WebSocket connect failed: %s\n", url);
+    }
 }
-void net_poll_native(void) { }
+
+static void on_native_ws_message(void *user, const uint8_t *data, int len) {
+    (void)user;
+    if (s_gs_native && s_ns_native) net_on_message(s_gs_native, s_ns_native, data, len);
+}
+
+void net_poll_native(void) {
+    if (!s_ns_native) return;
+    if (!ws_client_connected()) {
+        if (s_ns_native->connected) {
+            s_ns_native->connected = 0;
+            printf("[net] WebSocket disconnected\n");
+        }
+        return;
+    }
+    ws_client_poll(on_native_ws_message, NULL);
+}
 
 #else
 #include "ws_client_native.h"
@@ -368,7 +394,7 @@ void net_set_game_state(GameState *gs) {
 #ifdef __EMSCRIPTEN__
     s_gs = gs;
 #elif defined(_WIN32)
-    (void)gs;  /* native Windows networking not implemented yet, see above */
+    s_gs_native = gs;
 #else
     s_gs_native = gs;
 #endif
