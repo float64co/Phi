@@ -237,8 +237,17 @@ static void main_loop(void *userdata) {
     static int s_frame = 0;
     ++s_frame;
     if (s_frame == 30 || s_frame % 120 == 0) {
-        unsigned char px[3];
-        glReadPixels(cw / 2, ch / 2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, px);
+        /* GL_RGBA, not GL_RGB — WebGL2's readPixels only guarantees
+         * RGBA/UNSIGNED_BYTE as a legal format/type combination for an
+         * arbitrary framebuffer; GL_RGB raised INVALID_OPERATION there
+         * (desktop GL accepts it fine, which is why this went unnoticed
+         * until an actual browser test caught it). A failed readPixels
+         * doesn't write its output buffer at all, so px[] was silently
+         * returning stale stack contents every time, not a real sample —
+         * this is what looked like "rendering frozen" during the last
+         * verification pass. */
+        unsigned char px[4];
+        glReadPixels(cw / 2, ch / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
         printf("[main] frame %d center pixel RGB = (%d,%d,%d)\n", s_frame, px[0], px[1], px[2]);
         /* readPixels object-id selection (Phase 0 deliverable): pick the
          * center pixel's object id from the G-buffer's object_id target. */
