@@ -1078,6 +1078,30 @@ The decorator reads type annotations, creates socket definitions, and registers
 the node type in the editor palette. Built-in node types wrap C primitives for
 speed. Custom user nodes are pure Python. Same interface, different backing.
 
+### Node type introspection
+
+```python
+>>> phi.node_types()
+{
+    'noise_displace': {
+        'inputs':  [('mesh', 'Mesh'), ('scale', 'float', 1.0)],
+        'outputs': [('mesh', 'Mesh')],
+        'category': 'geometry',
+    },
+    ...
+}
+```
+
+Every registered node type — built-in or user-defined via `@phi.node` — is
+queryable this way, not just invokable. This exists specifically so a script
+(or an LLM working in a running instance) can discover what's actually
+available before calling `graph.add_node(type_name, ...)`, rather than
+needing to already know the full node registry from memory: list what
+exists, read each type's socket signature, then build. Without this, whole-
+graph programmatic authoring (see "Graph ownership" below) degrades to
+guessing type names and parameter shapes — this is what keeps it reliable
+instead.
+
 ### The Script Node
 
 A special node type with an inline Python body and user-defined sockets, written
