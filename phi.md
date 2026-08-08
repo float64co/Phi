@@ -439,19 +439,48 @@ by reading the HDR center pixel immediately before and after the blend
 within the same frame (so scene content is identical between the two
 reads) and confirming the result matches the standard over-blend
 equation exactly: `bg=(0.2998,0.5000,0.7998) expected=(0.6499,0.2500,
-0.3999) actual=(0.6499,0.2500,0.3999)`. TAA and the `@phi.render_pass`
-insertion-point system are still unstarted.
+0.3999) actual=(0.6499,0.2500,0.3999)`.
+
+**TAA has since landed too** (native/win32/wasm build-confirmed),
+completing everything in this set that doesn't need MicroPython — only
+the `@phi.render_pass` insertion-point system is still unstarted, and
+deliberately so (Phase 5). Scoped-down first pass, stated plainly rather
+than overclaimed: the velocity buffer (`renderer.c`'s new `u_prev_mvp`
+uniform, `Renderer.prev_vp` snapshotted once per frame by the new
+`renderer_end_frame()`) captures **camera motion only** — every draw
+call reuses its own current-frame model matrix for the "previous"
+reprojection too, so a fast-moving player/rocket's own motion isn't
+captured, only the parallax from camera movement. The resolve pass
+(`gbuffer.c`'s `taa_tex_a`/`taa_tex_b` ping-pong pair, between tonemap
+and FXAA) reprojects a history buffer via that velocity, clamps it
+against a 4-tap cross neighborhood AABB (a cheaper variant of the
+standard neighborhood-clamping anti-ghosting technique) to guard against
+ghosting, and blends 90% history / 10% current — matching the shadow
+map's "static-only" precedent for a correct, first-pass scope rather
+than the finished thing. Verified on native by reconstructing the exact
+same neighborhood-clamp-and-blend arithmetic on the CPU from raw texel
+reads (ldr_tex's center + 4 neighbors, the reprojected history texel via
+NEAREST sampling, tex_velocity) and comparing bit-exact against the
+GPU's actual output — done twice, once with the trivial zero-velocity
+case (camera not yet moved) and once with genuine non-zero velocity
+(`vel=(0.00001,0.01775)`, driven by a real X11 synthetic-input test, the
+same `XSendEvent`-based harness used earlier in this phase for input
+verification) — both matched exactly. Honest limit, stated rather than
+glossed over: whether the result is actually ghosting-free in practice
+is a visual judgment call that can't be fully proven headlessly: the
+mechanical parts (velocity values, history read/write, clamp/blend math)
+are what's numerically verified here, not the subjective visual outcome.
 
 **Effort:** 5–7 weeks *(platform abstraction across all three targets
 (wasm/Linux-native/Windows-native) — all with real input and real
 networking now, not just Linux — the wasm WebGL2 upgrade, CI check, and
-the deferred renderer/G-buffer/shadow-map/FXAA/bloom/transparency
+the deferred renderer/G-buffer/shadow-map/FXAA/bloom/transparency/TAA
 pipeline (all confirmed building on wasm, Linux native, and Windows
 native alike, FXAA+bloom additionally confirmed GL-errorless in a real
 browser): done — see the scope-split note above for what "done" means
 and how each platform was actually verified, not just built. Remaining:
-macOS (explicitly deferred, no access), and what's left of this phase's
-G-buffer scope — TAA, the `@phi.render_pass` insertion-point system.)*
+macOS (explicitly deferred, no access), and the `@phi.render_pass`
+insertion-point system (deliberately deferred to Phase 5/MicroPython).)*
 
 ---
 
