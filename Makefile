@@ -35,7 +35,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/halfedge_gltf.c \
 	$(SRCDIR)/meshobject.c
 
-.PHONY: all wasm native run clean debug watch
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm
 
 all: wasm native
 
@@ -144,8 +144,52 @@ $(OUT_WIN32): $(WIN32_SRCS) $(HDRS) | $(BUILDDIR)
 	@echo "win32 build complete -> $(OUT_WIN32)"
 
 # ---------------------------------------------------------------
+# MicroPython embedding self-test (Phase 5 first slice) — NOT part of the
+# game build. client/micropython_embed/ is generated output from
+# MicroPython's own ports/embed tooling (see client/mpconfigport.h's header
+# comment); client/mp_port.c and client/mp_test_main.c are hand-written.
+# Exists to prove the embedding + decorator patterns phi.md's Phase 1/6
+# design depends on actually work in real MicroPython, independent of the
+# game loop, before any of that gets built into the shipped binary.
+# ---------------------------------------------------------------
+MP_EMBED_DIR  := $(SRCDIR)/micropython_embed
+MP_EMBED_SRCS := $(wildcard $(MP_EMBED_DIR)/*/*.c) $(wildcard $(MP_EMBED_DIR)/*/*/*.c)
+MP_TEST_SRCS  := $(SRCDIR)/mp_test_main.c $(SRCDIR)/mp_port.c $(MP_EMBED_SRCS)
+MP_TEST_CFLAGS := -O1 -Wall -Wno-unused-parameter -I$(SRCDIR) -I$(MP_EMBED_DIR) -I$(MP_EMBED_DIR)/port
+
+OUT_MP_TEST := $(BUILDDIR)/mp_test
+
+mp_test: $(OUT_MP_TEST)
+
+$(OUT_MP_TEST): $(MP_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_TEST_SRCS) -o $(OUT_MP_TEST) -lm
+	@echo "mp_test build complete -> $(OUT_MP_TEST)"
+
+OUT_MP_TEST_WIN32 := $(BUILDDIR)/mp_test_win32.exe
+
+mp_test_win32: $(OUT_MP_TEST_WIN32)
+
+$(OUT_MP_TEST_WIN32): $(MP_TEST_SRCS) | $(BUILDDIR)
+	$(WIN32_CC) $(MP_TEST_CFLAGS) $(MP_TEST_SRCS) -o $(OUT_MP_TEST_WIN32) -lm
+	chmod +x $(OUT_MP_TEST_WIN32)
+	@echo "mp_test_win32 build complete -> $(OUT_MP_TEST_WIN32)"
+
+# No -s ENVIRONMENT=web here (unlike the real wasm target) — this is a
+# self-test artifact, run under `node` for fast local verification, not
+# something shipped to a browser. The real game's wasm build stays
+# browser-only; this one deliberately doesn't, so it stays runnable without
+# a browser in this environment.
+OUT_MP_TEST_WASM := $(BUILDDIR)/mp_test_wasm.js
+
+mp_test_wasm: $(OUT_MP_TEST_WASM)
+
+$(OUT_MP_TEST_WASM): $(MP_TEST_SRCS) | $(BUILDDIR)
+	$(WASM_CC) $(MP_TEST_CFLAGS) $(MP_TEST_SRCS) -o $(OUT_MP_TEST_WASM) -lm
+	@echo "mp_test_wasm build complete -> $(OUT_MP_TEST_WASM) (run with: node $(OUT_MP_TEST_WASM))"
+
+# ---------------------------------------------------------------
 clean:
-	rm -f $(OUT_JS) $(OUT_WASM) $(WWWDIR)/game.wasm.map $(OUT_NATIVE) $(OUT_WIN32)
+	rm -f $(OUT_JS) $(OUT_WASM) $(WWWDIR)/game.wasm.map $(OUT_NATIVE) $(OUT_WIN32) $(OUT_MP_TEST) $(OUT_MP_TEST_WIN32) $(OUT_MP_TEST_WASM) $(BUILDDIR)/mp_test_wasm.wasm
 
 watch:
 	@echo "Watching for changes..."

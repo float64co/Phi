@@ -21,3 +21,7 @@ tdf.md
 
 # Claude Code harness state
 .claude/
+
+# Temporary read-only reference tree (separate CAD software) — never
+# modified, never committed, will be removed from this directory later
+zenith_reference/
