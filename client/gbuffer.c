@@ -399,14 +399,22 @@ GBuffer *gbuffer_create(int w, int h) {
     glGenFramebuffers(1, &gb->hdr_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, gb->hdr_fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gb->hdr_tex, 0);
-    /* Share the opaque G-buffer's depth texture here too (a texture can be
-     * attached to more than one FBO at once) — the transparency pass in
-     * gbuffer_resolve draws into hdr_fbo and needs to depth-TEST against
-     * the already-rendered opaque scene (with writes disabled, via
-     * glDepthMask(GL_FALSE)) so transparent geometry is correctly hidden
-     * behind opaque geometry without being able to occlude other
-     * transparent draws. */
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, gb->tex_depth_stencil, 0);
+    /* NOT permanently attaching tex_depth_stencil here, even though the
+     * transparency pass in gbuffer_resolve needs to depth-test against it
+     * while hdr_fbo is bound (a texture CAN be attached to more than one
+     * FBO). Tried that first and it broke on WebGL2/ANGLE: the LIGHTING
+     * pass also binds hdr_fbo and SAMPLES tex_depth_stencil (as u_depth,
+     * for world-position reconstruction) — with it permanently attached,
+     * that's a feedback loop (same texture simultaneously bound as the
+     * active framebuffer's attachment and as a sampled texture), which
+     * desktop GL/Mesa tolerated silently but WebGL2/ANGLE correctly
+     * rejects (GL_INVALID_OPERATION, confirmed by the user's browser
+     * console: "Feedback loop formed between Framebuffer and active
+     * Texture" — this is what silently broke lighting entirely, wasm-only,
+     * caught only by real browser testing exactly like the two readPixels
+     * bugs earlier in this phase). Fixed by attaching/detaching it around
+     * only the transparency draw itself, which doesn't sample this
+     * texture (fixed-function depth test only) — see gbuffer_resolve. */
     GLenum hdr_buf = GL_COLOR_ATTACHMENT0;
     glDrawBuffers(1, &hdr_buf);
     status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -781,15 +789,26 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glDisable(GL_BLEND);
 
     /* ---- Transparency: forward-blended pass into hdr_fbo, depth-tested
-     * against the opaque scene (hdr_fbo shares tex_depth_stencil with the
-     * G-buffer's own fbo, see gbuffer_create) but not depth-writing, so
-     * transparent draws are correctly hidden behind opaque geometry
-     * without occluding each other or the opaque pass. Still targeting
-     * hdr_fbo (already bound from the bloom composite step above), so no
-     * extra glBindFramebuffer/glViewport needed. See TRANSPARENT_TEST_VERT_SRC's
+     * against the opaque scene but not depth-writing, so transparent draws
+     * are correctly hidden behind opaque geometry without occluding each
+     * other or the opaque pass. Still targeting hdr_fbo (already bound
+     * from the bloom composite step above), so no extra
+     * glBindFramebuffer/glViewport needed. See TRANSPARENT_TEST_VERT_SRC's
      * comment for why this is a fixed NDC-space probe quad rather than
      * real world content — there's nothing transparent in the game yet to
-     * exercise this with. ---- */
+     * exercise this with.
+     *
+     * tex_depth_stencil is attached to hdr_fbo ONLY for this draw, not
+     * permanently (see gbuffer_create's comment on hdr_tex) — the lighting
+     * pass earlier in this function also binds hdr_fbo and SAMPLES this
+     * same texture, which is an illegal feedback loop if it's attached at
+     * that point (WebGL2/ANGLE correctly rejects it; desktop GL/Mesa
+     * silently tolerated it, which is how this shipped once already and
+     * broke lighting only in a real browser — see the user-reported "scene
+     * is blank" bug this fixes). Detached again immediately after so
+     * neither this frame's tonemap/fxaa nor next frame's lighting pass see
+     * it attached. */
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, gb->tex_depth_stencil, 0);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     glDepthMask(GL_FALSE);
@@ -842,6 +861,7 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
     glDisable(GL_DEPTH_TEST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
     /* ---- Tonemap: HDR -> intermediate LDR texture (not the default
      * framebuffer directly — fxaa below needs to read the tonemapped
