@@ -66,21 +66,42 @@ static const char *VERT_SRC =
     "  v_mat_id  = a_mat_id;\n"
     "}\n";
 
+/* Geometry-pass output — writes the G-buffer (see gbuffer.h) instead of a
+ * lit color directly. Lighting moves to gbuffer.c's separate lighting pass,
+ * which reads out_albedo/out_normal back as textures. The other three
+ * targets (material/emissive/velocity) get honest defaults: this renderer
+ * has no PBR material params, no emissive surfaces, and no motion-vector
+ * tracking yet, so those channels are allocated (future work slots in
+ * without a G-buffer format change) but not yet meaningfully populated. */
 static const char *FRAG_SRC =
     "#version 330 core\n"
     "in vec3  v_normal;\n"
     "in float v_mat_id;\n"
-    "uniform vec3  u_light_dir;\n"
     "uniform vec3  u_mat_color;\n"
-    "out vec4 frag_color;\n"
+    "uniform uint  u_object_id;\n"
+    "layout(location=0) out vec4 out_albedo;\n"
+    "layout(location=1) out vec4 out_normal;\n"
+    "layout(location=2) out vec4 out_material;\n"
+    "layout(location=3) out vec4 out_emissive;\n"
+    "layout(location=4) out vec4 out_velocity;\n"
+    "layout(location=5) out uint out_object_id;\n"
     "void main() {\n"
     "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
-    "  float diff    = max(dot(n, u_light_dir), 0.0);\n"
-    "  float ambient = 0.3;\n"
-    "  vec3 color    = u_mat_color * (ambient + diff * 0.7);\n"
-    "  frag_color    = vec4(color, 1.0);\n"
+    "  out_albedo    = vec4(u_mat_color, 1.0);\n"
+    "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
+    "  out_material  = vec4(0.5, 0.0, 0.0, 0.0);\n"
+    "  out_emissive  = vec4(0.0);\n"
+    "  out_velocity  = vec4(0.0);\n"
+    "  out_object_id = u_object_id;\n"
     "}\n";
 #endif
+
+/* Mirrors whatever was last passed to glClearColor by renderer_create /
+ * renderer_set_sky_color — glClearColor itself is opaque GL state with no
+ * getter, but gbuffer.c's lighting pass needs the actual current sky color
+ * (not a hardcoded guess) to paint background pixels, since the deferred
+ * path no longer relies on glClearColor's implicit background-fill. */
+static float s_sky_color[3] = {0.3f, 0.5f, 0.8f};
 
 /* ===========================================================
  * Column-major mat4  (OpenGL convention)
@@ -145,6 +166,20 @@ static void gl_check(const char *where) {
     GLenum e = glGetError();
     if (e != GL_NO_ERROR)
         printf("[GL] error 0x%04x at %s\n", e, where);
+}
+
+/* Re-binds this renderer's VAO before every draw rather than trusting it to
+ * stay bound (GLES2/WebGL1 has no VAO concept, so this is a no-op there).
+ * It's NOT safe to assume "bind once at renderer_create and never again" on
+ * native: gbuffer.c's fullscreen-quad passes bind their own VAO every frame
+ * for the lighting/tonemap draws, which otherwise silently steals the
+ * binding out from under the next frame's geometry-pass draw calls. */
+static void bind_renderer_vao(const Renderer *r) {
+#ifndef __EMSCRIPTEN__
+    glBindVertexArray(r->vao);
+#else
+    (void)r;
+#endif
 }
 
 /* ---- Shader compilation ---- */
@@ -281,12 +316,14 @@ Renderer *renderer_create(int width, int height) {
      * behind/inside geometry and bot boxes (impossible in normal collided
      * play), so both winding directions of every triangle must rasterize
      * or those faces just vanish from certain angles. */
-    glClearColor(0.3f, 0.5f, 0.8f, 1.0f);
+    glClearColor(s_sky_color[0], s_sky_color[1], s_sky_color[2], 1.0f);
 
     r->program     = link_program(VERT_SRC, FRAG_SRC);
     r->u_mvp       = glGetUniformLocation(r->program, "u_mvp");
     r->u_light_dir = glGetUniformLocation(r->program, "u_light_dir");
     r->u_mat_color = glGetUniformLocation(r->program, "u_mat_color");
+    r->u_object_id = glGetUniformLocation(r->program, "u_object_id");
+    r->cur_object_id = 0;
     r->a_pos    = 0;
     r->a_normal = 1;
     r->a_mat_id = 2;
@@ -312,7 +349,12 @@ void renderer_set_fov(Renderer *r, float degrees) {
 }
 
 void renderer_set_sky_color(float r, float g, float b) {
+    s_sky_color[0] = r; s_sky_color[1] = g; s_sky_color[2] = b;
     glClearColor(r, g, b, 1.0f);
+}
+
+void renderer_get_sky_color(float *out3) {
+    out3[0] = s_sky_color[0]; out3[1] = s_sky_color[1]; out3[2] = s_sky_color[2];
 }
 
 void renderer_resize(Renderer *r, int w, int h) {
@@ -327,6 +369,10 @@ void renderer_set_camera(Renderer *r, const Player *p) {
     r->cam_pos[2] = p->pos.z;
     r->cam_yaw    = p->yaw;
     r->cam_pitch  = p->pitch;
+}
+
+void renderer_set_object_id(Renderer *r, unsigned int id) {
+    r->cur_object_id = id;
 }
 
 static void build_vp(const Renderer *r, float *vp) {
@@ -349,11 +395,20 @@ void renderer_draw_world(Renderer *r, RenderMesh *mesh) {
     float vp[16];
     build_vp(r, vp);
 
+    r->cur_object_id = 0;
+
     glUseProgram(r->program);
+    bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
     glUniform3f(r->u_mat_color, 0.50f, 0.50f, 0.55f);
+#ifndef __EMSCRIPTEN__
+    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
+     * no uint type) — not just a location==-1 no-op like the other
+     * per-draw uniform sets, an actual missing symbol at compile time. */
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+#endif
 
     glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
     int stride = VERTEX_STRIDE * (int)sizeof(float);
@@ -382,10 +437,17 @@ static void draw_box(const Renderer *r, unsigned int vbo,
     mat4_mul(mvp, vp, t);
 
     glUseProgram(r->program);
+    bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
+#ifndef __EMSCRIPTEN__
+    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
+     * no uint type) — not just a location==-1 no-op like the other
+     * per-draw uniform sets, an actual missing symbol at compile time. */
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+#endif
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     int stride = 6 * (int)sizeof(float);
@@ -446,10 +508,17 @@ static void draw_box_oriented(const Renderer *r, unsigned int vbo,
     mat4_mul(mvp, vp, model);
 
     glUseProgram(r->program);
+    bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
+#ifndef __EMSCRIPTEN__
+    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
+     * no uint type) — not just a location==-1 no-op like the other
+     * per-draw uniform sets, an actual missing symbol at compile time. */
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+#endif
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     int stride = 6 * (int)sizeof(float);
@@ -478,6 +547,7 @@ void renderer_draw_players(Renderer *r, const GameState *gs, int local_id) {
         float cr = p->is_bot ? 1.0f : 0.8f;
         float cg = p->is_bot ? 0.5f : 0.2f;
         float cb = p->is_bot ? 0.1f : 0.2f;
+        r->cur_object_id = 1000u + p->id;
         draw_box(r, s_player_vbo, p->pos.x, p->pos.y, p->pos.z, cr, cg, cb, vp);
     }
 }
@@ -487,6 +557,7 @@ void renderer_draw_rockets(Renderer *r, const GameState *gs) {
     for (int i = 0; i < MAX_ROCKETS; i++) {
         const Rocket *rk = &gs->rockets[i];
         if (!rk->active) continue;
+        r->cur_object_id = 2000u + (unsigned int)i;
         draw_box_oriented(r, r->rocket_vbo,
                  rk->pos.x, rk->pos.y, rk->pos.z,
                  rk->vel.x, rk->vel.y, rk->vel.z,
@@ -521,12 +592,21 @@ void renderer_draw_ground_plane(Renderer *r) {
         glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
     }
 
+    r->cur_object_id = 1;
+
     float vp[16]; build_vp(r, vp);
     glUseProgram(r->program);
+    bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
     glUniform3f(r->u_mat_color, 0.78f, 0.78f, 0.80f);   /* light grey */
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
+#ifndef __EMSCRIPTEN__
+    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
+     * no uint type) — not just a location==-1 no-op like the other
+     * per-draw uniform sets, an actual missing symbol at compile time. */
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+#endif
 
     glBindBuffer(GL_ARRAY_BUFFER, s_ground_vbo);
     int stride = 6 * (int)sizeof(float);
@@ -575,12 +655,21 @@ void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
     glBindBuffer(GL_ARRAY_BUFFER, s_wire_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
 
+    r->cur_object_id = 3;
+
     float vp[16]; build_vp(r, vp);
     glUseProgram(r->program);
+    bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
+#ifndef __EMSCRIPTEN__
+    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
+     * no uint type) — not just a location==-1 no-op like the other
+     * per-draw uniform sets, an actual missing symbol at compile time. */
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+#endif
 
     int stride = 6 * (int)sizeof(float);
     glEnableVertexAttribArray(0);

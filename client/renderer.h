@@ -13,6 +13,14 @@ typedef struct {
     int u_normal_mat;
     int u_light_dir;
     int u_mat_color;
+    int u_object_id;   /* native G-buffer geometry pass only; -1 (safe no-op
+                         * uniform location) on wasm, whose shader doesn't
+                         * declare it */
+
+    /* Set by each draw_* call before drawing (world=0, ground=1,
+     * players=1000+id, rockets=2000+slot) — read by the geometry-pass
+     * shader's u_object_id uniform. Meaningless on wasm (see above). */
+    unsigned int cur_object_id;
 
     /* Attribute locations */
     int a_pos;
@@ -40,9 +48,15 @@ void      renderer_resize(Renderer *r, int w, int h);
 /* Console 'fov'/'skybox' commands */
 void renderer_set_fov(Renderer *r, float degrees);
 void renderer_set_sky_color(float r, float g, float b);
+void renderer_get_sky_color(float *out3);  /* out3[0..2] = r,g,b — see gbuffer.c's lighting pass */
 
 /* Set camera from local player */
 void renderer_set_camera(Renderer *r, const Player *p);
+
+/* For future picking/editor use (Phase 1) — the built-in draw_* calls
+ * already set sensible per-object ids internally; this is for callers
+ * that want to override that. No-op on wasm (see Renderer.u_object_id). */
+void renderer_set_object_id(Renderer *r, unsigned int id);
 
 /* Draw world mesh */
 void renderer_draw_world(Renderer *r, RenderMesh *mesh);

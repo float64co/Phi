@@ -42,7 +42,17 @@
     X(PFNGLDISABLEVERTEXATTRIBARRAYPROC, glDisableVertexAttribArray) \
     X(PFNGLVERTEXATTRIB1FPROC,           glVertexAttrib1f) \
     X(PFNGLGENVERTEXARRAYSPROC,          glGenVertexArrays) \
-    X(PFNGLBINDVERTEXARRAYPROC,          glBindVertexArray)
+    X(PFNGLBINDVERTEXARRAYPROC,          glBindVertexArray) \
+    X(PFNGLGENFRAMEBUFFERSPROC,          glGenFramebuffers) \
+    X(PFNGLBINDFRAMEBUFFERPROC,          glBindFramebuffer) \
+    X(PFNGLFRAMEBUFFERTEXTURE2DPROC,     glFramebufferTexture2D) \
+    X(PFNGLDRAWBUFFERSPROC,              glDrawBuffers) \
+    X(PFNGLCHECKFRAMEBUFFERSTATUSPROC,   glCheckFramebufferStatus) \
+    X(PFNGLDELETEFRAMEBUFFERSPROC,       glDeleteFramebuffers) \
+    X(PFNGLACTIVETEXTUREPROC,            glActiveTexture) \
+    X(PFNGLUNIFORM1IPROC,                glUniform1i) \
+    X(PFNGLUNIFORM1UIPROC,               glUniform1ui) \
+    X(PFNGLCLEARBUFFERUIVPROC,           glClearBufferuiv)
 
 #define X(type, name) extern type name##_native;
 GL_NATIVE_PROC_LIST
@@ -75,6 +85,16 @@ GL_NATIVE_PROC_LIST
 #define glVertexAttrib1f              glVertexAttrib1f_native
 #define glGenVertexArrays             glGenVertexArrays_native
 #define glBindVertexArray             glBindVertexArray_native
+#define glGenFramebuffers             glGenFramebuffers_native
+#define glBindFramebuffer             glBindFramebuffer_native
+#define glFramebufferTexture2D        glFramebufferTexture2D_native
+#define glDrawBuffers                 glDrawBuffers_native
+#define glCheckFramebufferStatus      glCheckFramebufferStatus_native
+#define glDeleteFramebuffers          glDeleteFramebuffers_native
+#define glActiveTexture               glActiveTexture_native
+#define glUniform1i                   glUniform1i_native
+#define glUniform1ui                  glUniform1ui_native
+#define glClearBufferuiv              glClearBufferuiv_native
 
 /* Fetches every pointer above via phi_gl_get_proc. Must run once, after the
  * GL context is current and before any of the calls above — renderer_create()

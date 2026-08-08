@@ -32,7 +32,17 @@
     X(PFNGLDISABLEVERTEXATTRIBARRAYPROC, glDisableVertexAttribArray) \
     X(PFNGLVERTEXATTRIB1FPROC,           glVertexAttrib1f) \
     X(PFNGLGENVERTEXARRAYSPROC,          glGenVertexArrays) \
-    X(PFNGLBINDVERTEXARRAYPROC,          glBindVertexArray)
+    X(PFNGLBINDVERTEXARRAYPROC,          glBindVertexArray) \
+    X(PFNGLGENFRAMEBUFFERSPROC,          glGenFramebuffers) \
+    X(PFNGLBINDFRAMEBUFFERPROC,          glBindFramebuffer) \
+    X(PFNGLFRAMEBUFFERTEXTURE2DPROC,     glFramebufferTexture2D) \
+    X(PFNGLDRAWBUFFERSPROC,              glDrawBuffers) \
+    X(PFNGLCHECKFRAMEBUFFERSTATUSPROC,   glCheckFramebufferStatus) \
+    X(PFNGLDELETEFRAMEBUFFERSPROC,       glDeleteFramebuffers) \
+    X(PFNGLACTIVETEXTUREPROC,            glActiveTexture) \
+    X(PFNGLUNIFORM1IPROC,                glUniform1i) \
+    X(PFNGLUNIFORM1UIPROC,               glUniform1ui) \
+    X(PFNGLCLEARBUFFERUIVPROC,           glClearBufferuiv)
 
 #define X(type, name) type name##_native = 0;
 GL_NATIVE_PROC_LIST

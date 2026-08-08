@@ -19,12 +19,16 @@
 #include <GLES2/gl2.h>
 #else
 #include <GL/gl.h>
+#include "gbuffer.h"
 #endif
 
 /* ---- Global state ---- */
 static Octree      *g_world    = NULL;
 static RenderMesh  *g_mesh     = NULL;
 static Renderer    *g_renderer = NULL;
+#ifndef __EMSCRIPTEN__
+static GBuffer      *g_gbuf     = NULL;  /* deferred renderer — native only, see gbuffer.h */
+#endif
 static GameState    g_gs       = {0};
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
@@ -184,10 +188,20 @@ static void main_loop(void *userdata) {
     /* --- Render --- */
     int cw, ch;
     phi_platform_get_window_size(&cw, &ch);
-    if (cw != g_renderer->vp_w || ch != g_renderer->vp_h)
+    if (cw != g_renderer->vp_w || ch != g_renderer->vp_h) {
         renderer_resize(g_renderer, cw, ch);
+#ifndef __EMSCRIPTEN__
+        gbuffer_resize(g_gbuf, cw, ch);
+#endif
+    }
 
+    float sky[3];
+    renderer_get_sky_color(sky);
+#ifndef __EMSCRIPTEN__
+    gbuffer_begin_geometry_pass(g_gbuf, sky);
+#else
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+#endif
 
     if (local && local->alive) {
         renderer_set_camera(g_renderer, local);
@@ -198,6 +212,13 @@ static void main_loop(void *userdata) {
     renderer_draw_players(g_renderer, &g_gs, g_ns.local_id);
     renderer_draw_rockets(g_renderer, &g_gs);
     editor_render(&g_ed, g_renderer);
+
+#ifndef __EMSCRIPTEN__
+    /* [geometry] done — resolve [lighting] (G-buffer -> HDR) and [tonemap]
+     * (HDR -> default framebuffer), per phi.md's deferred pipeline. */
+    static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
+    gbuffer_resolve(g_gbuf, light_dir, sky);
+#endif
 
     /* HUD */
     int bots_alive = 0;
@@ -220,6 +241,11 @@ static void main_loop(void *userdata) {
         unsigned char px[3];
         glReadPixels(cw / 2, ch / 2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, px);
         printf("[main] frame %d center pixel RGB = (%d,%d,%d)\n", s_frame, px[0], px[1], px[2]);
+        /* readPixels object-id selection (Phase 0 deliverable): pick the
+         * center pixel's object id from the G-buffer's object_id target. */
+        unsigned int picked = gbuffer_pick_object_id(g_gbuf, cw / 2, ch / 2);
+        printf("[main] frame %d center pixel object_id = %u (0xFFFFFFFF = nothing drawn there)\n",
+               s_frame, picked);
     }
     if (local && s_frame % 120 == 0) {
         printf("[main] frame %d pos=(%.1f,%.1f,%.1f) yaw=%.3f\n",
@@ -245,6 +271,9 @@ int main(void) {
     int w, h;
     phi_platform_get_window_size(&w, &h);
     g_renderer = renderer_create(w, h);
+#ifndef __EMSCRIPTEN__
+    g_gbuf = gbuffer_create(w, h);
+#endif
 
     /* Build mesh NOW that GL context exists */
     g_mesh = mesh_create();

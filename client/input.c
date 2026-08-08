@@ -177,6 +177,7 @@ void input_set_pointer_locked(int locked) {
 #include "phi_platform.h"
 #include "phi_platform_native.h"
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>   /* XLookupString */
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
 
