@@ -353,9 +353,13 @@ accumulation buffer, tonemap pass to the default framebuffer,
 `gbuffer_pick_object_id` reading the object_id attachment), leaving wasm
 on its original forward path. **The wasm build has since been upgraded to
 WebGL2/GLES3** (`USE_WEBGL2=1`/`FULL_ES3=1`, GLSL ES 3.00 shaders) —
-matching this table's "WebGL 2 from day one" row — but the G-buffer
-itself was not yet extended to wasm; that MRT/FBO work is still native
--only and is real, separate follow-on work now that the capability gap
+matching this table's "WebGL 2 from day one" row, and **confirmed working
+in a real browser** (the user loaded it over the network, played a full
+session — movement, rockets, live octree editing synced over the
+network, multiple map swaps — and shared the console log: clean shader
+link, zero WebGL2/GL errors) — but the G-buffer itself was not yet
+extended to wasm; that MRT/FBO work is still native-only and is real,
+separate follow-on work now that the capability gap
 blocking it is closed. `material`/`emissive`/`velocity` are allocated per
 the layout above but not yet meaningfully populated — this renderer has
 no PBR params, no emissive surfaces, and no motion-vector tracking yet,
