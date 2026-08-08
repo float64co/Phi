@@ -336,66 +336,91 @@ class SSAO(phi.Pass):
       the real server the same way as Linux) have both landed** — Windows
       native now has input/rendering/networking parity with Linux native.
 - [x] Deferred renderer with G-buffer writing and basic lighting pass —
-      **native only** (see below); wasm still renders forward, unaffected
-- [x] `readPixels` object ID selection working — **native only** (see below)
+      **wasm and native, both confirmed working** (see below)
+- [x] `readPixels` object ID selection working — **wasm and native**
 - [x] CI builds for both targets — `scripts/ci_check.sh` (local script, not
       hosted; runs `make native` always and `make wasm` when `emcc` is on
       `PATH`)
 
-**On the G-buffer/readPixels scope split:** when this was built, wasm was
-still WebGL1/GLES2, which can't do multiple render targets, float
-textures, or integer textures — no faithful G-buffer possible there.
-Rather than block the deferred renderer on the separate WebGL2 upgrade,
-`client/gbuffer.h`/`.c` implemented the full layout from this section
-natively only (`GL_RGBA8`/`GL_RGB10_A2`/`GL_R11F_G11F_B10F`/`GL_RG16F`/
-`GL_R32UI`/`GL_DEPTH24_STENCIL8`, lighting pass to an `RGBA16F`
-accumulation buffer, tonemap pass to the default framebuffer,
-`gbuffer_pick_object_id` reading the object_id attachment), leaving wasm
-on its original forward path. **The wasm build has since been upgraded to
-WebGL2/GLES3** (`USE_WEBGL2=1`/`FULL_ES3=1`, GLSL ES 3.00 shaders) —
-matching this table's "WebGL 2 from day one" row, and **confirmed working
-in a real browser** (the user loaded it over the network, played a full
-session — movement, rockets, live octree editing synced over the
-network, multiple map swaps — and shared the console log: clean shader
-link, zero WebGL2/GL errors) — but the G-buffer itself was not yet
-extended to wasm; that MRT/FBO work is still native-only and is real,
-separate follow-on work now that the capability gap
-blocking it is closed. `material`/`emissive`/`velocity` are allocated per
+**On the G-buffer/readPixels scope split (now closed):** when this was
+first built, wasm was still WebGL1/GLES2, which can't do multiple render
+targets, float textures, or integer textures — no faithful G-buffer
+possible there. Rather than block the deferred renderer on the separate
+WebGL2 upgrade, `client/gbuffer.h`/`.c` implemented the full layout from
+this section natively only (`GL_RGBA8`/`GL_RGB10_A2`/
+`GL_R11F_G11F_B10F`/`GL_RG16F`/`GL_R32UI`/`GL_DEPTH24_STENCIL8`, lighting
+pass to an `RGBA16F` accumulation buffer, tonemap pass to the default
+framebuffer, `gbuffer_pick_object_id` reading the object_id attachment),
+leaving wasm on its original forward path. **wasm was then upgraded to
+WebGL2/GLES3** (`USE_WEBGL2=1`/`FULL_ES3=1`, GLSL ES 3.00 shaders,
+confirmed working in a real browser by the user), **and the G-buffer
+itself has since been extended there too** — `gbuffer.c` now compiles
+and runs on both targets from the same source (Emscripten declares
+`glGenFramebuffers`/`glDrawBuffers`/`glGenVertexArrays`/
+`glClearBufferuiv` etc. as directly-linkable GLES3 functions, no
+proc-fetching shim needed there unlike native's GL 3.3 core path), with
+`EXT_color_buffer_float` explicitly enabled for the float-format
+targets. Verified end-to-end by the user running the actual browser
+build over the network, across three rounds — the first two surfaced
+real, WebGL2-specific bugs neither of us could have caught without a
+live browser: (1) `gbuffer.c`'s own fullscreen-quad VAO silently
+stealing the vertex-attribute binding away from the world-mesh draw
+call, an exact repeat of a bug already fixed on native once, that
+resurfaced on wasm the moment it started sharing `gbuffer.c` too —
+fixed by making the defensive per-draw VAO rebind unconditional on both
+targets instead of native-only; (2) two separate illegal `readPixels`
+format/type combinations that desktop GL accepts but WebGL2/ANGLE
+rejects outright (`GL_DEPTH_COMPONENT`/`GL_FLOAT` against a depth-only
+FBO, and plain `GL_RGB`/`GL_UNSIGNED_BYTE` instead of the universally-
+legal `GL_RGBA`) — the first guarded to native-only, the second fixed
+to use the portable format; a failed `readPixels` call doesn't write
+its output buffer at all, which is why one of these read back as a
+stuck, unchanging value across ~2000 frames and briefly looked like
+rendering itself had frozen, when the real bug was just in how the
+diagnostic sampled it. Third round: GL-errorless, center-pixel samples
+now visibly vary with the player's real position and view direction.
+`material`/`emissive`/`velocity` are allocated per
 the layout above but not yet meaningfully populated — this renderer has
 no PBR params, no emissive surfaces, and no motion-vector tracking yet,
 so future work slots into the existing format rather than needing a
-G-buffer schema change. **Shadow maps have since landed** (native only,
-both Linux and Windows — `gbuffer_render_shadow_map` renders the world
-mesh depth-only from a fixed directional light's point of view into a
+G-buffer schema change. **Shadow maps have since landed on all three
+targets** — `gbuffer_render_shadow_map` renders the world mesh
+depth-only from a fixed directional light's point of view into a
 `DEPTH_COMPONENT32F` map; the lighting pass reconstructs each fragment's
 world position from G-buffer depth via the camera's inverse view-
 projection, projects it into light space, and dims the diffuse term
-when occluded). Scoped narrowly: only the static world mesh casts/
+when occluded. Scoped narrowly: only the static world mesh casts/
 receives shadows (not players/rockets), the light-space ortho volume is
 a fixed box hand-picked to cover the default arena rather than fitting
 itself to whatever's actually built (editor-built geometry far outside
 that footprint won't shadow correctly), and there's no PCF/soft edges —
 a first pass the rest of shadowing can build on, not the finished thing.
-Verified two ways: the matrix math (a general 4x4 inverse, needed for
-world-position reconstruction) was checked numerically in isolation
-first (`VP · VP⁻¹` = identity, a world point round-trips exactly through
-clip space and back) before it was trusted in the shader; and the
-resulting shadow map's depth values were read back directly and found
-genuinely varied (not degenerate/uniform) — `0.3093 1.0000 1.0000 0.3850
-0.3854` across 5 sample points, **identical** on Linux (Mesa/llvmpipe)
-and Windows (Intel Arc Pro Graphics), the same cross-platform-identical
-pattern already established for the rest of the G-buffer pipeline.
+Verified on native two ways: the matrix math (a general 4x4 inverse,
+needed for world-position reconstruction) was checked numerically in
+isolation first (`VP · VP⁻¹` = identity, a world point round-trips
+exactly through clip space and back) before it was trusted in the
+shader; and the shadow map's depth values were read back directly and
+found genuinely varied (not degenerate/uniform) — `0.3093 1.0000 1.0000
+0.3850 0.3854` across 5 sample points, **identical** on Linux
+(Mesa/llvmpipe) and Windows (Intel Arc Pro Graphics). That specific
+depth-readback diagnostic doesn't run on wasm (`GL_DEPTH_COMPONENT`/
+`GL_FLOAT` isn't a legal WebGL2 `readPixels` combination — see below),
+but the shadow map itself is built and sampled through ordinary texture
+sampling in the shader there, a fully portable code path unrelated to
+that restriction, and the user confirmed a GL-errorless, correctly-
+updating browser session after the wasm G-buffer extension landed.
 Transparency, TAA, bloom, FXAA, and the `@phi.render_pass` insertion-
 point system are all still unstarted.
 
-**Effort:** 5–7 weeks *(platform abstraction across three targets
+**Effort:** 5–7 weeks *(platform abstraction across all three targets
 (wasm/Linux-native/Windows-native) — all with real input and real
 networking now, not just Linux — the wasm WebGL2 upgrade, CI check, and
-a native-only (Linux + Windows) deferred renderer/G-buffer core: done —
-see the scope-split note above for what "done" means here. Remaining:
-extending the G-buffer to wasm now that WebGL2 makes it possible, macOS (explicitly
+the deferred renderer/G-buffer/shadow-map pipeline (all confirmed
+working on wasm, Linux native, and Windows native alike): done — see
+the scope-split note above for what "done" means and how each platform
+was actually verified, not just built. Remaining: macOS (explicitly
 deferred, no access), and everything this phase's G-buffer enables but
-doesn't itself implement — shadows, transparency, TAA, bloom, FXAA, the
+doesn't itself implement — transparency, TAA, bloom, FXAA, the
 `@phi.render_pass` insertion-point system.)*
 
 ---
