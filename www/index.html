@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qek</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+    color: #e0e0e0;
+  }
+  #canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    cursor: crosshair;
+  }
+  #overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.82);
+    z-index: 10;
+    gap: 18px;
+  }
+  #overlay h1 {
+    font-size: 3rem;
+    letter-spacing: 0.25em;
+    color: #ff6a00;
+    text-shadow: 0 0 30px #ff6a0088;
+  }
+  #overlay p {
+    font-size: 1rem;
+    opacity: 0.7;
+    text-align: center;
+    line-height: 1.8;
+  }
+  #overlay button {
+    padding: 12px 36px;
+    background: #ff6a00;
+    border: none;
+    color: #fff;
+    font-size: 1.1rem;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: background 0.15s;
+  }
+  #overlay button:hover { background: #ff8c00; }
+  #hud {
+    position: fixed;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.55);
+    padding: 6px 20px;
+    border-radius: 3px;
+    font-size: 0.85rem;
+    letter-spacing: 0.08em;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #crosshair {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%,-50%);
+    width: 14px; height: 14px;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #crosshair::before,
+  #crosshair::after {
+    content: '';
+    position: absolute;
+    background: rgba(255,255,255,0.85);
+  }
+  #crosshair::before { width: 2px; height: 100%; left: 50%; transform: translateX(-50%); }
+  #crosshair::after  { height: 2px; width: 100%; top: 50%;  transform: translateY(-50%); }
+  #editor-status {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.55);
+    padding: 5px 16px;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+    pointer-events: none;
+    z-index: 5;
+    color: #7cfc9a;
+    display: none;
+  }
+  #console {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    background: rgba(8,8,12,0.92);
+    border-bottom: 2px solid #ff6a00;
+    padding: 10px 16px 8px;
+    z-index: 30;
+    display: none;
+    font-family: 'Courier New', monospace;
+    font-size: 0.82rem;
+    pointer-events: none;
+  }
+  #console-log {
+    white-space: pre-wrap;
+    max-height: 220px;
+    overflow-y: auto;
+    opacity: 0.9;
+    margin-bottom: 6px;
+  }
+  #console-input {
+    color: #ffaa44;
+    border-top: 1px solid rgba(255,255,255,0.15);
+    padding-top: 6px;
+  }
+  #loading {
+    position: fixed;
+    inset: 0;
+    background: #0a0a0f;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    gap: 28px;
+  }
+  #loading-title {
+    font-size: 2.8rem;
+    letter-spacing: 0.35em;
+    color: #ff6a00;
+    text-shadow: 0 0 40px #ff6a0066;
+    user-select: none;
+  }
+  #loading-bar-wrap {
+    width: min(420px, 72vw);
+    height: 6px;
+    background: #1a1a22;
+    border-radius: 3px;
+    overflow: hidden;
+    box-shadow: 0 0 0 1px #ff6a0033;
+  }
+  #loading-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #ff6a00, #ffaa44);
+    border-radius: 3px;
+    transition: width 0.18s ease-out;
+    box-shadow: 0 0 10px #ff6a0088;
+  }
+  #loading-status {
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    color: #ff6a00;
+    opacity: 0.55;
+    min-height: 1em;
+    text-transform: uppercase;
+  }
+  .controls-table {
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+  .controls-table td {
+    padding: 2px 14px;
+    opacity: 0.75;
+  }
+  .controls-table td:first-child {
+    color: #ff6a00;
+    font-weight: bold;
+    text-align: right;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div id="loading-title">QEK</div>
+  <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+  <div id="loading-status">Initialising...</div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<div id="overlay" style="display:none">
+  <h1>QEK</h1>
+  <p>Sauerbraten-style octree arena · Rocket jumping · WebAssembly</p>
+  <table class="controls-table">
+    <tr><td>WASD</td><td>Move</td></tr>
+    <tr><td>SPACE</td><td>Jump</td></tr>
+    <tr><td>C</td><td>Crouch (rocket-jump aim)</td></tr>
+    <tr><td>MOUSE</td><td>Look</td></tr>
+    <tr><td>LMB</td><td>Fire rocket</td></tr>
+    <tr><td>F4</td><td>Export map as STL</td></tr>
+    <tr><td>E</td><td>Toggle octree editor</td></tr>
+    <tr><td>`</td><td>Toggle console</td></tr>
+    <tr><td colspan="2" style="text-align:center; opacity:0.6; padding-top:6px;">
+      in editor: LMB build &middot; RMB carve &middot; M+LMB paint &middot; [ ]/wheel grid &middot; , . material &middot; X/Z fly
+    </td></tr>
+  </table>
+  <button id="play-btn">CLICK TO PLAY</button>
+</div>
+
+<div id="crosshair"></div>
+<div id="hud">HP: 100 &nbsp;|&nbsp; Connecting...</div>
+<div id="editor-status"></div>
+<div id="console">
+  <div id="console-log"></div>
+  <div id="console-input"></div>
+</div>
+
+<script>
+// Resize canvas to window
+function resizeCanvas() {
+  var c = document.getElementById('canvas');
+  c.width  = window.innerWidth;
+  c.height = window.innerHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+
+// Play button → request pointer lock
+document.getElementById('play-btn').addEventListener('click', function() {
+  document.getElementById('overlay').style.display = 'none';
+  document.getElementById('canvas').requestPointerLock();
+});
+
+// Click canvas directly to re-lock if focus is lost
+document.getElementById('canvas').addEventListener('click', function() {
+  if (document.pointerLockElement !== document.getElementById('canvas')) {
+    document.getElementById('canvas').requestPointerLock();
+  }
+});
+
+// RMB is used by the editor to carve — suppress the browser context menu
+document.getElementById('canvas').addEventListener('contextmenu', function(e) {
+  e.preventDefault();
+});
+
+// Pointer lock state → tell C code
+document.addEventListener('pointerlockchange', function() {
+  var locked = document.pointerLockElement === document.getElementById('canvas');
+  if (Module._input_set_pointer_locked) {
+    Module._input_set_pointer_locked(locked ? 1 : 0);
+  }
+  if (!locked) {
+    document.getElementById('overlay').style.display = 'flex';
+  }
+});
+
+// Loading bar helpers
+var _loadBar    = null;
+var _loadStatus = null;
+function _setLoadProgress(pct, text) {
+  if (!_loadBar)    _loadBar    = document.getElementById('loading-bar');
+  if (!_loadStatus) _loadStatus = document.getElementById('loading-status');
+  if (_loadBar)    _loadBar.style.width = Math.min(100, pct) + '%';
+  if (_loadStatus) _loadStatus.textContent = text || '';
+}
+
+// Emscripten module config
+var Module = {
+  canvas: (function() { return document.getElementById('canvas'); })(),
+
+  // Called by Emscripten with human-readable status strings during load
+  setStatus: function(text) {
+    if (!text) return;
+    // Emscripten emits strings like "Downloading data... (x/y)"
+    var match = text.match(/\((\d+)\/(\d+)\)/);
+    if (match) {
+      var pct = Math.round(parseInt(match[1]) / parseInt(match[2]) * 90);
+      _setLoadProgress(pct, text.replace(/\s*\(.*\)/, '').trim());
+    } else {
+      _setLoadProgress(null, text);  // keep bar where it is, just update text
+    }
+  },
+
+  // Called as async dependencies resolve (compilation, wasm instantiation, etc.)
+  monitorRunDependencies: function(left) {
+    // left counts down to 0 as deps finish; map to 90–99% range
+    if (left === 0) {
+      _setLoadProgress(99, 'Starting...');
+    } else {
+      // nudge bar forward while deps drain
+      var bar = document.getElementById('loading-bar');
+      if (bar) {
+        var cur = parseFloat(bar.style.width) || 0;
+        // advance at most 2% per dep resolved, stay ≤ 90
+        _setLoadProgress(Math.min(90, cur + 2), 'Compiling...');
+      }
+    }
+  },
+
+  onRuntimeInitialized: function() {
+    _setLoadProgress(100, 'Ready');
+    setTimeout(function() {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('overlay').style.display = 'flex';
+    }, 320);
+    // WebSocket connection is initiated from C (main.c EM_ASM block)
+  },
+  print:    function(t) { console.log('[wasm]', t); },
+  printErr: function(t) { console.warn('[wasm]', t); },
+  locateFile: function(path) { return '/' + path; }
+};
+</script>
+<script src="/game.js"></script>
+
+</body>
+</html>

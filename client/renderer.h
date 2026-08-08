@@ -1,0 +1,70 @@
+#pragma once
+#include "octree.h"
+#include "octree_render.h"
+#include "physics.h"
+
+typedef struct {
+    /* WebGL program */
+    unsigned int program;
+    unsigned int vao;       /* not used in WebGL/GLES2, just for compat */
+
+    /* Uniforms */
+    int u_mvp;
+    int u_normal_mat;
+    int u_light_dir;
+    int u_mat_color;
+
+    /* Attribute locations */
+    int a_pos;
+    int a_normal;
+    int a_mat_id;
+
+    /* Camera */
+    float cam_pos[3];
+    float cam_yaw;
+    float cam_pitch;
+    float fov_y;
+    int   vp_w, vp_h;
+
+    /* Rocket billboard mesh */
+    unsigned int rocket_vbo;
+
+    /* Flat-shade color palette (one vec3 per material id 0..255) */
+    float palette[256][3];
+} Renderer;
+
+Renderer *renderer_create(int width, int height);
+void      renderer_destroy(Renderer *r);
+void      renderer_resize(Renderer *r, int w, int h);
+
+/* Console 'fov'/'skybox' commands */
+void renderer_set_fov(Renderer *r, float degrees);
+void renderer_set_sky_color(float r, float g, float b);
+
+/* Set camera from local player */
+void renderer_set_camera(Renderer *r, const Player *p);
+
+/* Draw world mesh */
+void renderer_draw_world(Renderer *r, RenderMesh *mesh);
+
+/* Draw all players (simple box) */
+void renderer_draw_players(Renderer *r, const GameState *gs, int local_id);
+
+/* Draw all active rockets */
+void renderer_draw_rockets(Renderer *r, const GameState *gs);
+
+/* Light-grey reference floor at y=15.5, spanning the world footprint —
+ * physics.c hard-clamps every player to y>=16 regardless of octree content,
+ * so this keeps that implicit ground visible/paintable even where the
+ * octree itself has been carved fully empty. Depth-tests normally, so real
+ * (carved/built) geometry at y=16 always draws over it. */
+void renderer_draw_ground_plane(Renderer *r);
+
+/* Editor: draw a full-bright wireframe box in world space (hover/selection highlight) */
+void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
+                            float cr, float cg, float cb);
+
+/* Math helpers exposed for main.c */
+void mat4_perspective(float *m, float fovy, float aspect, float near, float far);
+void mat4_mul(float *out, const float *a, const float *b);
+void mat4_identity(float *m);
