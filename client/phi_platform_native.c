@@ -1,4 +1,5 @@
 #include "phi_platform.h"
+#include "phi_platform_native.h"
 #include "input.h"
 
 #include <X11/Xlib.h>
@@ -107,6 +108,7 @@ void phi_platform_init(const PhiPlatformConfig *cfg) {
     printf("[phi_platform_native] GL_VERSION=%s GL_RENDERER=%s\n",
            (const char *)glGetString(GL_VERSION),
            (const char *)glGetString(GL_RENDERER));
+    printf("[phi_platform_native] window=0x%lx\n", (unsigned long)s_win);
 }
 
 static void pump_events(void) {
@@ -163,6 +165,9 @@ int phi_platform_should_close(void) {
 void *phi_gl_get_proc(const char *name) {
     return (void *)glXGetProcAddressARB((const GLubyte *)name);
 }
+
+Display *phi_platform_native_display(void) { return s_dpy; }
+Window   phi_platform_native_window(void)  { return s_win; }
 
 void phi_platform_shutdown(void) {
     if (!s_dpy) return;

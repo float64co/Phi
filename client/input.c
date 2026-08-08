@@ -174,11 +174,172 @@ void input_set_pointer_locked(int locked) {
 }
 
 #else
-void input_install_callbacks(InputState *inp) { (void)inp; }
-void input_set_pointer_locked(int locked)      { (void)locked; }
-/* Real key/mouse translation lands with native input support; until then
- * the native build renders with a stationary, uncontrollable camera. */
-void input_native_handle_event(void *xevent) { (void)xevent; }
+#include "phi_platform.h"
+#include "phi_platform_native.h"
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+#include <X11/XKBlib.h>
+
+/* Mirrors the Emscripten key_down/key_up/mouse_move/mouse_down/mouse_up/
+ * wheel_move functions above, one XEvent at a time, driven by
+ * phi_platform_native.c's event pump via input_native_handle_event().
+ *
+ * Known gap: the console `bind` system's pressed_codes[] (browser KeyboardEvent
+ * .code strings like "KeyG") is left empty here — `bind` is a no-op on native
+ * for now rather than half-mapping keysyms to those string names. */
+
+static InputState *s_inp = NULL;
+static Display     *s_dpy = NULL;
+static Window        s_win;
+static int           s_key_down[256];       /* indexed by raw X11 keycode */
+static int           s_ignore_next_motion = 0;
+
+static void reset_held_keys_native(InputState *inp) {
+    inp->forward = inp->back = inp->left = inp->right = 0;
+    inp->jump = inp->up = inp->down = inp->paint_mod = inp->shift = inp->crouch = 0;
+    inp->fire = inp->fire_held = 0;
+    inp->lmb_down = inp->rmb_down = 0;
+}
+
+static void warp_to_center(void) {
+    int w, h; phi_platform_get_window_size(&w, &h);
+    XWarpPointer(s_dpy, None, s_win, 0, 0, 0, 0, w / 2, h / 2);
+    s_ignore_next_motion = 1;
+}
+
+void input_install_callbacks(InputState *inp) {
+    s_inp = inp;
+    s_dpy = phi_platform_native_display();
+    s_win = phi_platform_native_window();
+    memset(s_key_down, 0, sizeof(s_key_down));
+
+    /* Without this, X sends a synthetic KeyRelease before every repeated
+     * KeyPress while a key is held, making held-key state indistinguishable
+     * from a real release+press — breaks WASD and edge-detection alike. */
+    XkbSetDetectableAutoRepeat(s_dpy, True, NULL);
+
+    /* Fully transparent 1x1 cursor, hides the system cursor while grabbed —
+     * matches the browser's pointer-lock look. Native has no click-to-engage
+     * gesture like pointer lock requires, so the window just owns input
+     * unconditionally once it has focus. */
+    char blankdata[1] = {0};
+    Pixmap blank = XCreateBitmapFromData(s_dpy, s_win, blankdata, 1, 1);
+    XColor black; memset(&black, 0, sizeof(black));
+    Cursor invisible = XCreatePixmapCursor(s_dpy, blank, blank, &black, &black, 0, 0);
+    XDefineCursor(s_dpy, s_win, invisible);
+    XFreePixmap(s_dpy, blank);
+    XFreeCursor(s_dpy, invisible);
+
+    XGrabPointer(s_dpy, s_win, True,
+                 PointerMotionMask | ButtonPressMask | ButtonReleaseMask,
+                 GrabModeAsync, GrabModeAsync, s_win, None, CurrentTime);
+    inp->pointer_locked = 1;
+    warp_to_center();
+}
+
+void input_set_pointer_locked(int locked) {
+    if (s_inp) {
+        s_inp->pointer_locked = locked;
+        if (!locked) reset_held_keys_native(s_inp);
+    }
+}
+
+static void handle_key(XKeyEvent *e, int down) {
+    InputState *inp = s_inp;
+    if (!inp) return;
+    unsigned int kc = e->keycode & 0xFF;
+    int edge = down && !s_key_down[kc];
+    s_key_down[kc] = down;
+
+    KeySym ks = XLookupKeysym(e, 0);
+
+    /* ---- Console text entry: captured unconditionally ---- */
+    if (down) {
+        char buf[8]; KeySym dummy;
+        int n = XLookupString(e, buf, sizeof(buf) - 1, &dummy, NULL);
+        if (n == 1 && buf[0] >= 32 && buf[0] < 127 && inp->typed_count < TYPED_CHAR_QUEUE_SIZE)
+            inp->typed_chars[inp->typed_count++] = buf[0];
+
+        if (edge) {
+            if (ks == XK_grave)                       inp->console_toggle = 1;
+            if (ks == XK_Return || ks == XK_KP_Enter)  inp->enter_edge    = 1;
+            if (ks == XK_Escape)                       inp->escape_edge   = 1;
+            if (ks == XK_Up)                            inp->histup_edge   = 1;
+            if (ks == XK_Down)                          inp->histdown_edge = 1;
+        }
+        if (ks == XK_BackSpace) inp->backspace_edge = 1;  /* natural OS repeat-delete */
+    }
+
+    /* ---- Game / editor bindings: suppressed while typing ---- */
+    if (!inp->console_open) {
+        int state = down ? 1 : 0;
+        if (ks==XK_w || ks==XK_W || ks==XK_Up)    inp->forward = state;
+        if (ks==XK_s || ks==XK_S || ks==XK_Down)  inp->back    = state;
+        if (ks==XK_a || ks==XK_A || ks==XK_Left)  inp->left    = state;
+        if (ks==XK_d || ks==XK_D || ks==XK_Right) inp->right   = state;
+        if (ks==XK_space)                         inp->jump    = state;
+        if (ks==XK_x || ks==XK_X)                 inp->up      = state;
+        if (ks==XK_z || ks==XK_Z)                 inp->down    = state;
+        if (ks==XK_m || ks==XK_M)                 inp->paint_mod = state;
+        if (ks==XK_Shift_L || ks==XK_Shift_R)     inp->shift   = state;
+        if (ks==XK_c || ks==XK_C)                 inp->crouch  = state;
+        if (down && ks==XK_F4)                    inp->export_stl = 1;
+
+        if (edge) {
+            if (ks==XK_e || ks==XK_E)   inp->edit_toggle = 1;
+            if (ks==XK_bracketleft)     inp->grid_dec    = 1;
+            if (ks==XK_bracketright)    inp->grid_inc    = 1;
+            if (ks==XK_comma)           inp->mat_dec     = 1;
+            if (ks==XK_period)          inp->mat_inc     = 1;
+        }
+    }
+}
+
+static void handle_motion(XMotionEvent *e) {
+    InputState *inp = s_inp;
+    if (!inp) return;
+    if (s_ignore_next_motion) { s_ignore_next_motion = 0; return; }
+
+    int w, h; phi_platform_get_window_size(&w, &h);
+    int dx = e->x - w / 2, dy = e->y - h / 2;
+    if (dx == 0 && dy == 0) return;
+
+    inp->yaw   -= (float)dx * inp->sensitivity;
+    inp->pitch -= (float)dy * inp->sensitivity;
+    float limit = 89.0f * (float)M_PI / 180.0f;
+    if (inp->pitch >  limit) inp->pitch =  limit;
+    if (inp->pitch < -limit) inp->pitch = -limit;
+
+    warp_to_center();
+}
+
+static void handle_button(XButtonEvent *e, int down) {
+    InputState *inp = s_inp;
+    if (!inp || inp->console_open) return;
+    if (e->button == Button1) {
+        if (down) { if (!inp->fire_held) { inp->fire = 1; inp->fire_held = 1; } inp->lmb_down = 1; }
+        else      { inp->fire_held = 0; inp->lmb_down = 0; }
+    } else if (e->button == Button3) {
+        inp->rmb_down = down;
+    } else if (down && e->button == Button4) {
+        inp->grid_inc = 1;   /* scroll up — same convention as wheel_move */
+    } else if (down && e->button == Button5) {
+        inp->grid_dec = 1;   /* scroll down */
+    }
+}
+
+void input_native_handle_event(void *xevent) {
+    XEvent *ev = (XEvent *)xevent;
+    switch (ev->type) {
+        case KeyPress:      handle_key(&ev->xkey, 1);    break;
+        case KeyRelease:    handle_key(&ev->xkey, 0);    break;
+        case MotionNotify:  handle_motion(&ev->xmotion);  break;
+        case ButtonPress:   handle_button(&ev->xbutton, 1); break;
+        case ButtonRelease: handle_button(&ev->xbutton, 0); break;
+        case FocusOut:      if (s_inp) reset_held_keys_native(s_inp); break;
+        default: break;
+    }
+}
 #endif
 
 void input_init(InputState *inp) {

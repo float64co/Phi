@@ -215,10 +215,15 @@ static void main_loop(void *userdata) {
      * happens to not cover the exact center pixel, or a different color if
      * geometry does — either way, proof the frame isn't just black/garbage. */
     static int s_frame = 0;
-    if (++s_frame == 30) {
+    ++s_frame;
+    if (s_frame == 30) {
         unsigned char px[3];
         glReadPixels(cw / 2, ch / 2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, px);
         printf("[main] frame %d center pixel RGB = (%d,%d,%d)\n", s_frame, px[0], px[1], px[2]);
+    }
+    if (local && s_frame % 120 == 0) {
+        printf("[main] frame %d pos=(%.1f,%.1f,%.1f) yaw=%.3f\n",
+               s_frame, local->pos.x, local->pos.y, local->pos.z, local->yaw);
     }
 #endif
 
