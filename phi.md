@@ -307,19 +307,39 @@ class SSAO(phi.Pass):
       networking abstraction table) — no BSD-socket WebSocket client yet,
       so native play is single-player/bots-only for now.
 - [ ] `glext.h` GL loading verified on Linux, Windows, macOS — Linux only so far
-- [ ] Deferred renderer with G-buffer writing and basic lighting pass — not
-      started; current renderer on both targets is still the original
-      single-pass forward renderer
-- [ ] `readPixels` object ID selection working on both targets — not started;
-      there's a `glReadPixels` call on native today, but it's a one-shot
-      startup diagnostic (confirms the frame isn't black), not an
-      `gbuf.object_id`-backed picking feature
+- [x] Deferred renderer with G-buffer writing and basic lighting pass —
+      **native only** (see below); wasm still renders forward, unaffected
+- [x] `readPixels` object ID selection working — **native only** (see below)
 - [x] CI builds for both targets — `scripts/ci_check.sh` (local script, not
       hosted; runs `make native` always and `make wasm` when `emcc` is on
       `PATH`)
 
-**Effort:** 5–7 weeks *(platform abstraction + native port + CI check: done;
-deferred renderer/G-buffer, the largest remaining piece, not yet started)*
+**On the G-buffer/readPixels scope split:** WebGL1/GLES2 (the current wasm
+target) can't do multiple render targets, float textures, or integer
+textures — a faithful G-buffer needs the WebGL2 upgrade this table's
+"WebGL 2 from day one" row already calls for but the codebase hasn't done
+yet. Rather than block the deferred renderer on that separate, larger
+upgrade, `client/gbuffer.h`/`.c` implements the full layout from this
+section natively (`GL_RGBA8`/`GL_RGB10_A2`/`GL_R11F_G11F_B10F`/`GL_RG16F`/
+`GL_R32UI`/`GL_DEPTH24_STENCIL8`, lighting pass to an `RGBA16F`
+accumulation buffer, tonemap pass to the default framebuffer,
+`gbuffer_pick_object_id` reading the object_id attachment) and wasm keeps
+its original forward path untouched. `material`/`emissive`/`velocity` are
+allocated per the layout above but not yet meaningfully populated — this
+renderer has no PBR params, no emissive surfaces, and no motion-vector
+tracking yet, so future work slots into the existing format rather than
+needing a G-buffer schema change. Shadow maps, transparency, TAA, bloom,
+FXAA, and the `@phi.render_pass` insertion-point system are all still
+unstarted — this is the minimum pipeline the rest builds on, not the
+finished thing.
+
+**Effort:** 5–7 weeks *(platform abstraction, native port, CI check, and a
+native-only deferred renderer/G-buffer core: done — see the scope-split
+note above for what "done" means here. Remaining: the wasm-side WebGL2
+upgrade needed before the G-buffer can extend there, and everything this
+phase's G-buffer enables but doesn't itself implement — shadows,
+transparency, TAA, bloom, FXAA, the `@phi.render_pass` insertion-point
+system.)*
 
 ---
 
