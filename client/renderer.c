@@ -30,22 +30,39 @@ static const char *VERT_SRC =
     "in vec3 a_normal;\n"
     "in float a_mat_id;\n"
     "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_prev_mvp;\n"
     "out vec3 v_normal;\n"
     "out float v_mat_id;\n"
+    /* Un-divided clip xy + w for both this frame and the reprojected
+     * previous frame (see prev_mvp's comment in renderer.h) — .z carries
+     * clip.w, divided in the fragment shader rather than here so the
+     * rasterizer's perspective-correct interpolation reconstructs v_clip_curr
+     * exactly (its own w and gl_Position.w are the same value). v_clip_prev
+     * uses a different underlying w, so interpolating it against
+     * gl_Position.w's weighting is an approximation, not exact — acceptable
+     * for a first-pass velocity buffer, see gbuffer.h's TAA comment. */
+    "out vec3 v_clip_curr;\n"
+    "out vec3 v_clip_prev;\n"
     "void main() {\n"
-    "  gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
+    "  vec4 clip = u_mvp * vec4(a_pos, 1.0);\n"
+    "  gl_Position = clip;\n"
+    "  v_clip_curr = vec3(clip.xy, clip.w);\n"
+    "  vec4 clip_prev = u_prev_mvp * vec4(a_pos, 1.0);\n"
+    "  v_clip_prev = vec3(clip_prev.xy, clip_prev.w);\n"
     "  v_normal  = a_normal;\n"
     "  v_mat_id  = a_mat_id;\n"
     "}\n";
 
 /* Geometry-pass output — writes the G-buffer (see gbuffer.h) instead of a
  * lit color directly, same as the native variant below (see its comment
- * for why material/emissive/velocity aren't yet meaningfully populated). */
+ * for the material/emissive/velocity channel status). */
 static const char *FRAG_SRC =
     "#version 300 es\n"
     "precision mediump float;\n"
     "in vec3  v_normal;\n"
     "in float v_mat_id;\n"
+    "in vec3  v_clip_curr;\n"
+    "in vec3  v_clip_prev;\n"
     "uniform vec3  u_mat_color;\n"
     "uniform uint  u_object_id;\n"
     "layout(location=0) out vec4 out_albedo;\n"
@@ -60,7 +77,13 @@ static const char *FRAG_SRC =
     "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
     "  out_material  = vec4(0.5, 0.0, 0.0, 0.0);\n"
     "  out_emissive  = vec4(0.0);\n"
-    "  out_velocity  = vec4(0.0);\n"
+    /* Screen-space UV-space motion vector: current NDC minus reprojected-
+     * previous-frame NDC (see prev_mvp's comment in renderer.h — camera
+     * motion only, not per-object motion), scaled by 0.5 since NDC's
+     * [-1,1] range maps to UV's [0,1] range at half the extent. */
+    "  vec2 ndc_curr = v_clip_curr.xy / v_clip_curr.z;\n"
+    "  vec2 ndc_prev = v_clip_prev.xy / v_clip_prev.z;\n"
+    "  out_velocity  = vec4((ndc_curr - ndc_prev) * 0.5, 0.0, 0.0);\n"
     "  out_object_id = u_object_id;\n"
     "}\n";
 #else
@@ -70,25 +93,42 @@ static const char *VERT_SRC =
     "in vec3 a_normal;\n"
     "in float a_mat_id;\n"
     "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_prev_mvp;\n"
     "out vec3 v_normal;\n"
     "out float v_mat_id;\n"
+    /* Un-divided clip xy + w for both this frame and the reprojected
+     * previous frame (see prev_mvp's comment in renderer.h) — .z carries
+     * clip.w, divided in the fragment shader rather than here so the
+     * rasterizer's perspective-correct interpolation reconstructs v_clip_curr
+     * exactly (its own w and gl_Position.w are the same value). v_clip_prev
+     * uses a different underlying w, so interpolating it against
+     * gl_Position.w's weighting is an approximation, not exact — acceptable
+     * for a first-pass velocity buffer, see gbuffer.h's TAA comment. */
+    "out vec3 v_clip_curr;\n"
+    "out vec3 v_clip_prev;\n"
     "void main() {\n"
-    "  gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
+    "  vec4 clip = u_mvp * vec4(a_pos, 1.0);\n"
+    "  gl_Position = clip;\n"
+    "  v_clip_curr = vec3(clip.xy, clip.w);\n"
+    "  vec4 clip_prev = u_prev_mvp * vec4(a_pos, 1.0);\n"
+    "  v_clip_prev = vec3(clip_prev.xy, clip_prev.w);\n"
     "  v_normal  = a_normal;\n"
     "  v_mat_id  = a_mat_id;\n"
     "}\n";
 
 /* Geometry-pass output — writes the G-buffer (see gbuffer.h) instead of a
  * lit color directly. Lighting moves to gbuffer.c's separate lighting pass,
- * which reads out_albedo/out_normal back as textures. The other three
- * targets (material/emissive/velocity) get honest defaults: this renderer
- * has no PBR material params, no emissive surfaces, and no motion-vector
- * tracking yet, so those channels are allocated (future work slots in
- * without a G-buffer format change) but not yet meaningfully populated. */
+ * which reads out_albedo/out_normal back as textures. material/emissive
+ * still get honest placeholder defaults (no PBR params or emissive
+ * surfaces exist yet); velocity is now real (camera-motion-only, see
+ * v_clip_curr/v_clip_prev above and gbuffer.h's TAA comment for the
+ * per-object-motion caveat), used by gbuffer.c's TAA resolve pass. */
 static const char *FRAG_SRC =
     "#version 330 core\n"
     "in vec3  v_normal;\n"
     "in float v_mat_id;\n"
+    "in vec3  v_clip_curr;\n"
+    "in vec3  v_clip_prev;\n"
     "uniform vec3  u_mat_color;\n"
     "uniform uint  u_object_id;\n"
     "layout(location=0) out vec4 out_albedo;\n"
@@ -103,7 +143,13 @@ static const char *FRAG_SRC =
     "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
     "  out_material  = vec4(0.5, 0.0, 0.0, 0.0);\n"
     "  out_emissive  = vec4(0.0);\n"
-    "  out_velocity  = vec4(0.0);\n"
+    /* Screen-space UV-space motion vector: current NDC minus reprojected-
+     * previous-frame NDC (see prev_mvp's comment in renderer.h — camera
+     * motion only, not per-object motion), scaled by 0.5 since NDC's
+     * [-1,1] range maps to UV's [0,1] range at half the extent. */
+    "  vec2 ndc_curr = v_clip_curr.xy / v_clip_curr.z;\n"
+    "  vec2 ndc_prev = v_clip_prev.xy / v_clip_prev.z;\n"
+    "  out_velocity  = vec4((ndc_curr - ndc_prev) * 0.5, 0.0, 0.0);\n"
     "  out_object_id = u_object_id;\n"
     "}\n";
 #endif
@@ -311,6 +357,8 @@ static void init_palette(Renderer *r) {
     }
 }
 
+static void build_vp(const Renderer *r, float *vp);  /* defined below, needed by renderer_create/renderer_end_frame */
+
 /* ================================================================
  * Public API
  * ================================================================ */
@@ -347,6 +395,7 @@ Renderer *renderer_create(int width, int height) {
 
     r->program     = link_program(VERT_SRC, FRAG_SRC);
     r->u_mvp       = glGetUniformLocation(r->program, "u_mvp");
+    r->u_prev_mvp  = glGetUniformLocation(r->program, "u_prev_mvp");
     r->u_light_dir = glGetUniformLocation(r->program, "u_light_dir");
     r->u_mat_color = glGetUniformLocation(r->program, "u_mat_color");
     r->u_object_id = glGetUniformLocation(r->program, "u_object_id");
@@ -355,13 +404,21 @@ Renderer *renderer_create(int width, int height) {
     r->a_normal = 1;
     r->a_mat_id = 2;
 
-    printf("[renderer] prog=%u mvp=%d ldir=%d mcol=%d\n",
-           r->program, r->u_mvp, r->u_light_dir, r->u_mat_color);
+    printf("[renderer] prog=%u mvp=%d prev_mvp=%d ldir=%d mcol=%d\n",
+           r->program, r->u_mvp, r->u_prev_mvp, r->u_light_dir, r->u_mat_color);
 
     build_box_vbo_centered(&r->rocket_vbo, 3.0f, 3.0f, 12.0f);
     init_palette(r);
     renderer_resize(r, width, height);
+    /* Seed prev_vp with this frame's own vp — gives exactly zero velocity
+     * on the very first frame (nothing to compare against yet) rather than
+     * a garbage/zero-matrix reprojection. */
+    build_vp(r, r->prev_vp);
     return r;
+}
+
+void renderer_end_frame(Renderer *r) {
+    build_vp(r, r->prev_vp);
 }
 
 void renderer_destroy(Renderer *r) {
@@ -465,6 +522,10 @@ void renderer_draw_world(Renderer *r, RenderMesh *mesh) {
     glUseProgram(r->program);
     bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
+    /* World mesh vertices are already in world space (no model matrix), so
+     * the "previous frame" reprojection is just prev_vp directly — see
+     * prev_vp's comment in renderer.h. */
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
     glUniform3f(r->u_mat_color, 0.50f, 0.50f, 0.55f);
@@ -496,13 +557,19 @@ static void draw_box(const Renderer *r, unsigned int vbo,
                      float px, float py, float pz,
                      float cr, float cg, float cb,
                      const float *vp) {
-    float t[16], mvp[16];
+    float t[16], mvp[16], prev_mvp[16];
     mat4_translate(t, px, py, pz);
     mat4_mul(mvp, vp, t);
+    /* Camera-motion-only scope (see prev_vp's comment in renderer.h):
+     * reuses this frame's own (current) model matrix t for the "previous"
+     * reprojection too, so this object's own movement isn't captured, only
+     * parallax from camera motion. */
+    mat4_mul(prev_mvp, r->prev_vp, t);
 
     glUseProgram(r->program);
     bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, prev_mvp);
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
@@ -564,15 +631,19 @@ static void draw_box_oriented(const Renderer *r, unsigned int vbo,
                               float dx, float dy, float dz,
                               float cr, float cg, float cb,
                               const float *vp) {
-    float rot[16], t[16], model[16], mvp[16];
+    float rot[16], t[16], model[16], mvp[16], prev_mvp[16];
     mat4_look_rotation(rot, dx, dy, dz);
     mat4_translate(t, px, py, pz);
     mat4_mul(model, t, rot);
     mat4_mul(mvp, vp, model);
+    /* Camera-motion-only scope, same reasoning as draw_box above — reuses
+     * this frame's own model matrix for the "previous" reprojection. */
+    mat4_mul(prev_mvp, r->prev_vp, model);
 
     glUseProgram(r->program);
     bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, prev_mvp);
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
@@ -660,6 +731,7 @@ void renderer_draw_ground_plane(Renderer *r) {
     glUseProgram(r->program);
     bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);  /* world space, no model matrix — see draw_world */
     glUniform3f(r->u_mat_color, 0.78f, 0.78f, 0.80f);   /* light grey */
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
@@ -722,6 +794,7 @@ void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
     glUseProgram(r->program);
     bind_renderer_vao(r);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);  /* world space, no model matrix — see draw_world */
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);

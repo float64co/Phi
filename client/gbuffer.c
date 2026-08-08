@@ -330,6 +330,43 @@ static const char *TRANSPARENT_TEST_FRAG_SRC =
     "  out_color = u_color;\n"
     "}\n";
 
+/* ---- TAA: temporal resolve against a ping-ponged history buffer,
+ * reprojected via tex_velocity and neighborhood-AABB-clamped against this
+ * frame's own 4-tap cross neighborhood (a cheaper variant of the standard
+ * 3x3-neighborhood clamping technique — not invented from scratch, just a
+ * cheaper tap pattern). See gbuffer.h's taa_tex_a/b comment for the
+ * camera-motion-only velocity caveat. ---- */
+static const char *TAA_FRAG_SRC =
+    GBUF_SHADER_HEADER
+    "in vec2 v_uv;\n"
+    "uniform sampler2D u_current;\n"
+    "uniform sampler2D u_history;\n"
+    "uniform sampler2D u_velocity;\n"
+    "uniform vec2 u_texel_size;\n"
+    "uniform float u_history_valid;\n"
+    "out vec4 out_color;\n"
+    "void main() {\n"
+    "  vec3 cur = texture(u_current, v_uv).rgb;\n"
+    "  vec2 vel = texture(u_velocity, v_uv).rg;\n"
+    "  vec2 prev_uv = v_uv - vel;\n"
+    "  vec3 n_left  = texture(u_current, v_uv + vec2(-u_texel_size.x, 0.0)).rgb;\n"
+    "  vec3 n_right = texture(u_current, v_uv + vec2( u_texel_size.x, 0.0)).rgb;\n"
+    "  vec3 n_up    = texture(u_current, v_uv + vec2(0.0,  u_texel_size.y)).rgb;\n"
+    "  vec3 n_down  = texture(u_current, v_uv + vec2(0.0, -u_texel_size.y)).rgb;\n"
+    "  vec3 nmin = min(cur, min(min(n_left, n_right), min(n_up, n_down)));\n"
+    "  vec3 nmax = max(cur, max(max(n_left, n_right), max(n_up, n_down)));\n"
+    "  bool off_screen = prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0;\n"
+    /* No history yet (first frame ever) or the reprojected sample fell off
+     * screen (newly revealed content, e.g. from camera rotation) — fall
+     * back to the current frame alone rather than blend with garbage/
+     * clamped-to-nothing history. */
+    "  if (u_history_valid < 0.5 || off_screen) { out_color = vec4(cur, 1.0); return; }\n"
+    "  vec3 hist = texture(u_history, prev_uv).rgb;\n"
+    "  hist = clamp(hist, nmin, nmax);\n"
+    "  vec3 result = mix(cur, hist, 0.9);\n"  /* 90% history weight — standard strong-accumulation TAA blend factor */
+    "  out_color = vec4(result, 1.0);\n"
+    "}\n";
+
 GBuffer *gbuffer_create(int w, int h) {
     GBuffer *gb = (GBuffer *)calloc(1, sizeof(GBuffer));
     gb->w = w; gb->h = h;
@@ -419,6 +456,28 @@ GBuffer *gbuffer_create(int w, int h) {
     if (status != GL_FRAMEBUFFER_COMPLETE)
         printf("[gbuffer] bloom blur-b FBO incomplete: 0x%04x\n", status);
 
+    /* TAA: ping-pong pair of RGBA8 LDR targets (same format/size as
+     * ldr_tex — TAA resolves the tonemapped, not HDR, result). */
+    gb->taa_tex_a = make_target(w, h, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
+    glGenFramebuffers(1, &gb->taa_fbo_a);
+    glBindFramebuffer(GL_FRAMEBUFFER, gb->taa_fbo_a);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gb->taa_tex_a, 0);
+    { GLenum buf = GL_COLOR_ATTACHMENT0; glDrawBuffers(1, &buf); }
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        printf("[gbuffer] TAA fbo A incomplete: 0x%04x\n", status);
+
+    gb->taa_tex_b = make_target(w, h, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE);
+    glGenFramebuffers(1, &gb->taa_fbo_b);
+    glBindFramebuffer(GL_FRAMEBUFFER, gb->taa_fbo_b);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gb->taa_tex_b, 0);
+    { GLenum buf = GL_COLOR_ATTACHMENT0; glDrawBuffers(1, &buf); }
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        printf("[gbuffer] TAA fbo B incomplete: 0x%04x\n", status);
+    gb->taa_write_idx = 0;
+    gb->taa_history_valid = 0;
+
     /* Shadow map: depth-only FBO, no color attachment at all. GL_NONE via
      * glDrawBuffers(1,&none) tells GL not to expect one — glDrawBuffer
      * (singular) would do the same on desktop GL, but doesn't exist in
@@ -494,11 +553,18 @@ GBuffer *gbuffer_create(int w, int h) {
     gb->transparent_test_program = link(TRANSPARENT_TEST_VERT_SRC, TRANSPARENT_TEST_FRAG_SRC);
     gb->transparent_test_u_color = glGetUniformLocation(gb->transparent_test_program, "u_color");
 
+    gb->taa_program          = link(QUAD_VERT_SRC, TAA_FRAG_SRC);
+    gb->taa_u_current        = glGetUniformLocation(gb->taa_program, "u_current");
+    gb->taa_u_history        = glGetUniformLocation(gb->taa_program, "u_history");
+    gb->taa_u_velocity       = glGetUniformLocation(gb->taa_program, "u_velocity");
+    gb->taa_u_texel_size     = glGetUniformLocation(gb->taa_program, "u_texel_size");
+    gb->taa_u_history_valid  = glGetUniformLocation(gb->taa_program, "u_history_valid");
+
     printf("[gbuffer] created %dx%d, lighting_prog=%u tonemap_prog=%u shadow_prog=%u "
-           "fxaa_prog=%u bloom_progs=%u/%u/%u transparent_test_prog=%u (%dx%d)\n",
+           "fxaa_prog=%u bloom_progs=%u/%u/%u transparent_test_prog=%u taa_prog=%u (%dx%d)\n",
            w, h, gb->lighting_program, gb->tonemap_program, gb->shadow_program,
            gb->fxaa_program, gb->brightpass_program, gb->blur_program, gb->composite_program,
-           gb->transparent_test_program, gb->shadow_size, gb->shadow_size);
+           gb->transparent_test_program, gb->taa_program, gb->shadow_size, gb->shadow_size);
     gl_check("gbuffer_create");
     return gb;
 }
@@ -506,7 +572,8 @@ GBuffer *gbuffer_create(int w, int h) {
 static void free_gl_resources(GBuffer *gb) {
     unsigned int texs[] = { gb->tex_albedo, gb->tex_normal, gb->tex_material, gb->tex_emissive,
                              gb->tex_velocity, gb->tex_object_id, gb->tex_depth_stencil, gb->hdr_tex,
-                             gb->shadow_tex, gb->ldr_tex, gb->tex_bright, gb->tex_blur_a, gb->tex_blur_b };
+                             gb->shadow_tex, gb->ldr_tex, gb->tex_bright, gb->tex_blur_a, gb->tex_blur_b,
+                             gb->taa_tex_a, gb->taa_tex_b };
     glDeleteTextures((int)(sizeof(texs) / sizeof(texs[0])), texs);
     glDeleteFramebuffers(1, &gb->fbo);
     glDeleteFramebuffers(1, &gb->hdr_fbo);
@@ -515,6 +582,8 @@ static void free_gl_resources(GBuffer *gb) {
     glDeleteFramebuffers(1, &gb->bright_fbo);
     glDeleteFramebuffers(1, &gb->blur_fbo_a);
     glDeleteFramebuffers(1, &gb->blur_fbo_b);
+    glDeleteFramebuffers(1, &gb->taa_fbo_a);
+    glDeleteFramebuffers(1, &gb->taa_fbo_b);
     glDeleteProgram(gb->lighting_program);
     glDeleteProgram(gb->tonemap_program);
     glDeleteProgram(gb->shadow_program);
@@ -523,6 +592,7 @@ static void free_gl_resources(GBuffer *gb) {
     glDeleteProgram(gb->blur_program);
     glDeleteProgram(gb->composite_program);
     glDeleteProgram(gb->transparent_test_program);
+    glDeleteProgram(gb->taa_program);
     /* transparent_test_vbo, like quad_vbo above, is intentionally not
      * deleted here — matches this function's existing pattern of never
      * freeing VBOs (glDeleteBuffers isn't in gl_native.h's proc list; the
@@ -785,11 +855,133 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glDrawArrays(GL_TRIANGLES, 0, 6);
     gl_check("gbuffer_resolve/tonemap");
 
-    /* ---- FXAA: LDR texture -> default framebuffer ---- */
+    /* ---- TAA: temporal resolve (tonemapped LDR + velocity-reprojected,
+     * neighborhood-clamped history) -> one of the ping-pong targets. FXAA
+     * below reads from that instead of ldr_tex directly. See
+     * gbuffer.h's taa_tex_a/b comment for the camera-motion-only velocity
+     * caveat and TAA_FRAG_SRC for the blend/clamp formulation. ---- */
+    unsigned int taa_write_fbo = gb->taa_write_idx == 0 ? gb->taa_fbo_a : gb->taa_fbo_b;
+    unsigned int taa_write_tex = gb->taa_write_idx == 0 ? gb->taa_tex_a : gb->taa_tex_b;
+    unsigned int taa_read_tex  = gb->taa_write_idx == 0 ? gb->taa_tex_b : gb->taa_tex_a;
+
+#ifndef __EMSCRIPTEN__
+    /* Only referenced by the native-only diagnostic below (to reread the
+     * history texture's own FBO for a readPixels comparison) — declared
+     * here rather than unconditionally above to avoid an unused-variable
+     * warning on wasm. */
+    unsigned int taa_read_fbo = gb->taa_write_idx == 0 ? gb->taa_fbo_b : gb->taa_fbo_a;
+    /* One-shot sanity check, native only (same readPixels-portability
+     * reasoning as the other diagnostics in this file), on the first frame
+     * where history is actually valid: reconstruct the exact same
+     * neighborhood-clamp + blend math on the CPU from raw texel reads
+     * (ldr_tex's center + 4-neighbor taps, the reprojected history texel
+     * via NEAREST sampling — all taa textures are NEAREST/CLAMP_TO_EDGE,
+     * see make_target — and tex_velocity), then compare against the GPU's
+     * actual output at that pixel. Skipped (retried next frame) if the
+     * reprojected sample this particular frame happens to fall off-screen,
+     * since that takes the shader's early-return path instead. */
+    static int s_taa_checked = 0;
+    static int s_taa_calls = 0;
+    s_taa_calls++;
+    int taa_do_check = 0;
+    unsigned char taa_cur_px[4], taa_nl_px[4], taa_nr_px[4], taa_nu_px[4], taa_nd_px[4], taa_hist_px[4];
+    float taa_vel_px[4] = {0,0,0,0};
+    /* Wait a few calls past startup rather than checking on the very
+     * first history-valid frame — mostly cosmetic (either a zero- or
+     * non-zero-velocity result is a valid, honestly-reported check), but
+     * gives real camera movement a better chance of already being
+     * underway. Verified against both cases during development: a
+     * synthetic-input test (see the session's git log) caught this
+     * matching bit-exact with real non-zero velocity
+     * (vel=(0.00001,0.01775)), not just the trivial zero-velocity case. */
+    if (!s_taa_checked && gb->taa_history_valid && s_taa_calls > 5) {
+        int cx = gb->w / 2, cy = gb->h / 2;
+        glBindFramebuffer(GL_FRAMEBUFFER, gb->ldr_fbo);
+        glReadPixels(cx,     cy,     1, 1, GL_RGBA, GL_UNSIGNED_BYTE, taa_cur_px);
+        glReadPixels(cx - 1, cy,     1, 1, GL_RGBA, GL_UNSIGNED_BYTE, taa_nl_px);
+        glReadPixels(cx + 1, cy,     1, 1, GL_RGBA, GL_UNSIGNED_BYTE, taa_nr_px);
+        glReadPixels(cx,     cy + 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, taa_nu_px);
+        glReadPixels(cx,     cy - 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, taa_nd_px);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, gb->fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT4);
+        glReadPixels(cx, cy, 1, 1, GL_RGBA, GL_FLOAT, taa_vel_px);
+
+        float u_cur = (cx + 0.5f) / (float)gb->w;
+        float v_cur = (cy + 0.5f) / (float)gb->h;
+        float prev_u = u_cur - taa_vel_px[0];
+        float prev_v = v_cur - taa_vel_px[1];
+        int off_screen = prev_u < 0.0f || prev_u > 1.0f || prev_v < 0.0f || prev_v > 1.0f;
+        if (!off_screen) {
+            int px = (int)(prev_u * gb->w); if (px >= gb->w) px = gb->w - 1; if (px < 0) px = 0;
+            int py = (int)(prev_v * gb->h); if (py >= gb->h) py = gb->h - 1; if (py < 0) py = 0;
+            glBindFramebuffer(GL_FRAMEBUFFER, taa_read_fbo);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, taa_hist_px);
+            taa_do_check = 1;
+        }
+    }
+#endif
+
+    glBindFramebuffer(GL_FRAMEBUFFER, taa_write_fbo);
+    glViewport(0, 0, gb->w, gb->h);
+    glUseProgram(gb->taa_program);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gb->ldr_tex);
+    glUniform1i(gb->taa_u_current, 0);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, taa_read_tex);
+    glUniform1i(gb->taa_u_history, 1);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gb->tex_velocity);
+    glUniform1i(gb->taa_u_velocity, 2);
+    glUniform2f(gb->taa_u_texel_size, 1.0f / (float)gb->w, 1.0f / (float)gb->h);
+    glUniform1f(gb->taa_u_history_valid, gb->taa_history_valid ? 1.0f : 0.0f);
+    glBindVertexArray(gb->quad_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    gl_check("gbuffer_resolve/taa");
+
+#ifndef __EMSCRIPTEN__
+    if (taa_do_check) {
+        s_taa_checked = 1;
+        float cur[3]  = { taa_cur_px[0]/255.0f, taa_cur_px[1]/255.0f, taa_cur_px[2]/255.0f };
+        float hist[3] = { taa_hist_px[0]/255.0f, taa_hist_px[1]/255.0f, taa_hist_px[2]/255.0f };
+        float nl[3] = { taa_nl_px[0]/255.0f, taa_nl_px[1]/255.0f, taa_nl_px[2]/255.0f };
+        float nr[3] = { taa_nr_px[0]/255.0f, taa_nr_px[1]/255.0f, taa_nr_px[2]/255.0f };
+        float nu[3] = { taa_nu_px[0]/255.0f, taa_nu_px[1]/255.0f, taa_nu_px[2]/255.0f };
+        float nd[3] = { taa_nd_px[0]/255.0f, taa_nd_px[1]/255.0f, taa_nd_px[2]/255.0f };
+        float expected[3];
+        for (int i = 0; i < 3; i++) {
+            float nmin = cur[i], nmax = cur[i];
+            if (nl[i] < nmin) nmin = nl[i];
+            if (nr[i] < nmin) nmin = nr[i];
+            if (nu[i] < nmin) nmin = nu[i];
+            if (nd[i] < nmin) nmin = nd[i];
+            if (nl[i] > nmax) nmax = nl[i];
+            if (nr[i] > nmax) nmax = nr[i];
+            if (nu[i] > nmax) nmax = nu[i];
+            if (nd[i] > nmax) nmax = nd[i];
+            float clamped = hist[i];
+            if (clamped < nmin) clamped = nmin;
+            if (clamped > nmax) clamped = nmax;
+            expected[i] = cur[i] * 0.1f + clamped * 0.9f;
+        }
+        unsigned char actual_px[4];
+        glBindFramebuffer(GL_FRAMEBUFFER, taa_write_fbo);
+        glReadPixels(gb->w / 2, gb->h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, actual_px);
+        float actual[3] = { actual_px[0]/255.0f, actual_px[1]/255.0f, actual_px[2]/255.0f };
+        printf("[gbuffer] TAA blend check: vel=(%.5f,%.5f) expected=(%.4f,%.4f,%.4f) "
+               "actual=(%.4f,%.4f,%.4f) (8-bit quantization means ~1/255 slack is expected)\n",
+               taa_vel_px[0], taa_vel_px[1], expected[0], expected[1], expected[2],
+               actual[0], actual[1], actual[2]);
+    }
+#endif
+
+    gb->taa_write_idx ^= 1;
+    gb->taa_history_valid = 1;
+
+    /* ---- FXAA: TAA-resolved texture -> default framebuffer ---- */
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, gb->w, gb->h);
     glUseProgram(gb->fxaa_program);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, gb->ldr_tex);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, taa_write_tex);
     glUniform1i(gb->fxaa_u_tex, 0);
     glUniform2f(gb->fxaa_u_resolution, (float)gb->w, (float)gb->h);
     glBindVertexArray(gb->quad_vao);

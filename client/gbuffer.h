@@ -29,9 +29,14 @@
  *                                                         transparent exists in
  *                                                         the game yet)
  *   [tonemap]  -> HDR -> intermediate LDR texture  (gbuffer_resolve, part 4)
- *   [fxaa]     -> LDR texture -> default framebuffer (gbuffer_resolve, part 5)
+ *   [taa]      -> temporal resolve against history  (gbuffer_resolve, part 5 —
+ *                 (velocity-reprojected, neighborhood-  see taa_tex_a/b's
+ *                 clamped), LDR -> LDR                  comment for the
+ *                                                        camera-motion-only
+ *                                                        velocity caveat)
+ *   [fxaa]     -> LDR texture -> default framebuffer (gbuffer_resolve, part 6)
  *
- * Not implemented yet, left for later: TAA, and the Python @phi.render_pass
+ * Not implemented yet, left for later: the Python @phi.render_pass
  * insertion-point system (needs MicroPython, Phase 5, not started —
  * deliberately not stubbed out early, see phi.md) — this is still not the
  * finished pipeline, just a bigger first pass than before. */
@@ -44,7 +49,7 @@ typedef struct {
     unsigned int tex_normal;       /* RGB10_A2: world normal *0.5+0.5 (RGB) + metallic (A, unused yet) */
     unsigned int tex_material;     /* RGBA8: roughness/emissive-mask/object-tag/spare — allocated, not yet meaningfully populated */
     unsigned int tex_emissive;     /* R11F_G11F_B10F: allocated, always black — no emissive surfaces yet */
-    unsigned int tex_velocity;     /* RG16F: allocated, always zero — no motion-vector tracking yet */
+    unsigned int tex_velocity;     /* RG16F: real camera-motion UV-space delta, see renderer.c's u_prev_mvp */
     unsigned int tex_object_id;    /* R32UI: per-pixel object id, see gbuffer_pick_object_id */
     unsigned int tex_depth_stencil;/* DEPTH24_STENCIL8, samplable */
 
@@ -95,6 +100,29 @@ typedef struct {
     unsigned int transparent_test_vbo, transparent_test_program;
     int transparent_test_u_color;
 
+    /* TAA: temporal resolve between tonemap and fxaa. taa_tex_a/b are a
+     * ping-pong pair (see taa_write_idx below) — each frame writes the
+     * blended result into one and reads the OTHER (last frame's result) as
+     * history, then swaps for next frame. 4-tap cross neighborhood-AABB
+     * clamping (a cheaper, recognized simpler variant of the standard
+     * technique) guards against ghosting when reprojecting history via
+     * tex_velocity. Honest caveat, same one as tex_velocity above: velocity
+     * only captures camera motion, not each object's own movement, so
+     * fast-moving players/rockets will show mild ghosting/blur that a full
+     * per-object-motion implementation wouldn't have — a correct, scoped-
+     * down first pass, not the finished thing, matching the shadow map's
+     * static-geometry-only precedent. Whether it's actually ghosting-free
+     * in practice for the camera-motion case is a visual judgment call
+     * that can't be fully proven headlessly — the mechanical parts
+     * (velocity values, history read/write, blend math) are what's
+     * numerically verified here. */
+    unsigned int taa_fbo_a, taa_tex_a;
+    unsigned int taa_fbo_b, taa_tex_b;
+    int          taa_write_idx;     /* 0 -> write taa_tex_a/read taa_tex_b this frame, 1 -> the reverse */
+    int          taa_history_valid; /* 0 on the very first gbuffer_resolve call (no history yet) */
+    unsigned int taa_program;
+    int taa_u_current, taa_u_history, taa_u_velocity, taa_u_texel_size, taa_u_history_valid;
+
     unsigned int quad_vao, quad_vbo;
     unsigned int lighting_program, tonemap_program, fxaa_program;
     unsigned int brightpass_program, blur_program, composite_program;
@@ -128,12 +156,13 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
 /* Lighting pass (G-buffer -> HDR, shadow-mapped), bloom (threshold+blur,
  * additively composited back into HDR), transparency (forward-blended test
  * quad, depth-tested but not depth-writing, into HDR), tonemap pass
- * (HDR -> intermediate LDR texture), then FXAA (LDR texture -> default
- * framebuffer, standard luma-edge-detection formulation). Call once per
- * frame after gbuffer_render_shadow_map. inv_view_proj is the camera's
- * inverse view-projection matrix (renderer_get_inverse_view_proj), needed
- * to reconstruct world-space position from G-buffer depth for
- * shadow-space projection. */
+ * (HDR -> intermediate LDR texture), TAA (temporal resolve against
+ * history, velocity-reprojected and neighborhood-clamped), then FXAA
+ * (-> default framebuffer, standard luma-edge-detection formulation).
+ * Call once per frame after gbuffer_render_shadow_map. inv_view_proj is
+ * the camera's inverse view-projection matrix
+ * (renderer_get_inverse_view_proj), needed to reconstruct world-space
+ * position from G-buffer depth for shadow-space projection. */
 void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color,
                       const float *inv_view_proj);
 

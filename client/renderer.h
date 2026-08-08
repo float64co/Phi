@@ -10,6 +10,8 @@ typedef struct {
 
     /* Uniforms */
     int u_mvp;
+    int u_prev_mvp;   /* see prev_vp below — for the geometry pass's
+                        * velocity-buffer output (TAA) */
     int u_normal_mat;
     int u_light_dir;
     int u_mat_color;
@@ -34,6 +36,18 @@ typedef struct {
     float fov_y;
     int   vp_w, vp_h;
 
+    /* Previous frame's view-projection matrix, snapshotted by
+     * renderer_end_frame() — every draw_* call multiplies its own (current-
+     * frame) model matrix against both this and the current vp to give the
+     * geometry pass's vertex shader curr/prev clip positions for the
+     * velocity buffer. Scoped to camera motion only: each draw reuses its
+     * own CURRENT model matrix for the "previous" reprojection too (no
+     * per-object previous-transform tracking), so a genuinely fast-moving
+     * player/rocket's own motion isn't captured, only the parallax from
+     * camera movement — see gbuffer.h's TAA comment for the honest caveat
+     * this implies (mild ghosting/blur on fast movers specifically). */
+    float prev_vp[16];
+
     /* Rocket billboard mesh */
     unsigned int rocket_vbo;
 
@@ -52,6 +66,13 @@ void renderer_get_sky_color(float *out3);  /* out3[0..2] = r,g,b — see gbuffer
 
 /* Set camera from local player */
 void renderer_set_camera(Renderer *r, const Player *p);
+
+/* Snapshots this frame's view-projection matrix into prev_vp, for the
+ * NEXT frame's velocity-buffer computation. Call once per frame, after
+ * every draw_* call for the frame is done (main.c does this right after
+ * editor_render, before the shadow/resolve passes — order relative to
+ * those doesn't matter, this only touches Renderer's own state). */
+void renderer_end_frame(Renderer *r);
 
 /* Inverse of the current camera view-projection matrix — native only
  * (used by gbuffer.c's lighting pass to reconstruct world-space position

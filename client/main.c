@@ -209,6 +209,12 @@ static void main_loop(void *userdata) {
     renderer_draw_rockets(g_renderer, &g_gs);
     editor_render(&g_ed, g_renderer);
 
+    /* Snapshot this frame's vp for next frame's velocity buffer (TAA) —
+     * must run after every draw_* call above, which each read r->prev_vp
+     * (still holding LAST frame's vp at this point) via their own u_prev_mvp
+     * uniform. */
+    renderer_end_frame(g_renderer);
+
     /* [geometry] done — [shadow] (world mesh, depth-only, from the
      * light's POV), then resolve [lighting] (G-buffer -> HDR, shadow-
      * mapped) and [tonemap] (HDR -> default framebuffer), per phi.md's
