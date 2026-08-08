@@ -16,19 +16,17 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>   /* not GLES2/gl2.h — wasm renders through the same G-buffer path as native now */
 #else
 #include <GL/gl.h>
-#include "gbuffer.h"
 #endif
+#include "gbuffer.h"
 
 /* ---- Global state ---- */
 static Octree      *g_world    = NULL;
 static RenderMesh  *g_mesh     = NULL;
 static Renderer    *g_renderer = NULL;
-#ifndef __EMSCRIPTEN__
-static GBuffer      *g_gbuf     = NULL;  /* deferred renderer — native only, see gbuffer.h */
-#endif
+static GBuffer      *g_gbuf     = NULL;  /* deferred renderer, see gbuffer.h — both build targets now */
 static GameState    g_gs       = {0};
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
@@ -194,18 +192,12 @@ static void main_loop(void *userdata) {
     phi_platform_get_window_size(&cw, &ch);
     if (cw != g_renderer->vp_w || ch != g_renderer->vp_h) {
         renderer_resize(g_renderer, cw, ch);
-#ifndef __EMSCRIPTEN__
         gbuffer_resize(g_gbuf, cw, ch);
-#endif
     }
 
     float sky[3];
     renderer_get_sky_color(sky);
-#ifndef __EMSCRIPTEN__
     gbuffer_begin_geometry_pass(g_gbuf, sky);
-#else
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-#endif
 
     if (local && local->alive) {
         renderer_set_camera(g_renderer, local);
@@ -217,17 +209,17 @@ static void main_loop(void *userdata) {
     renderer_draw_rockets(g_renderer, &g_gs);
     editor_render(&g_ed, g_renderer);
 
-#ifndef __EMSCRIPTEN__
     /* [geometry] done — [shadow] (world mesh, depth-only, from the
      * light's POV), then resolve [lighting] (G-buffer -> HDR, shadow-
      * mapped) and [tonemap] (HDR -> default framebuffer), per phi.md's
-     * deferred pipeline. */
+     * deferred pipeline. Both build targets go through this now — wasm
+     * used to fall back to a plain glClear + forward shader here, before
+     * WebGL2 made MRT/float-texture rendering possible in the browser. */
     static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
     gbuffer_render_shadow_map(g_gbuf, g_mesh, light_dir);
     float inv_vp[16];
     renderer_get_inverse_view_proj(g_renderer, inv_vp);
     gbuffer_resolve(g_gbuf, light_dir, sky, inv_vp);
-#endif
 
     /* HUD */
     int bots_alive = 0;
@@ -237,13 +229,11 @@ static void main_loop(void *userdata) {
     update_editor_ui(&g_ed);
     update_console_ui(&g_cs);
 
-#ifndef __EMSCRIPTEN__
-    /* One-shot visual-correctness check: no browser/screenshot tooling is
-     * available for native builds, so sample the center pixel via
-     * glReadPixels once rendering has had a few frames to settle instead.
-     * Prints the sky-blue clear color's RGB if the world/ground-plane/sky
-     * happens to not cover the exact center pixel, or a different color if
-     * geometry does — either way, proof the frame isn't just black/garbage. */
+    /* Visual-correctness check: no automated screenshot tooling is
+     * available on either target, so sample the center pixel via
+     * glReadPixels periodically instead. printf reaches the browser
+     * console on wasm too (Emscripten redirects stdout there), so this
+     * is useful cross-platform now, not just a native-only workaround. */
     static int s_frame = 0;
     ++s_frame;
     if (s_frame == 30 || s_frame % 120 == 0) {
@@ -260,7 +250,6 @@ static void main_loop(void *userdata) {
         printf("[main] frame %d pos=(%.1f,%.1f,%.1f) yaw=%.3f\n",
                s_frame, local->pos.x, local->pos.y, local->pos.z, local->yaw);
     }
-#endif
 
     phi_platform_swap();
 }
@@ -288,9 +277,7 @@ int main(void) {
     int w, h;
     phi_platform_get_window_size(&w, &h);
     g_renderer = renderer_create(w, h);
-#ifndef __EMSCRIPTEN__
     g_gbuf = gbuffer_create(w, h);
-#endif
 
     /* Build mesh NOW that GL context exists */
     g_mesh = mesh_create();

@@ -1,10 +1,25 @@
 #include "gbuffer.h"
+#ifdef __EMSCRIPTEN__
+#include <GLES3/gl3.h>   /* not GLES2/gl2.h — MRT/FBO/integer-texture support (GLES2/WebGL1 had none of it) */
+#else
 #include <GL/gl.h>
 #include "gl_native.h"
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+
+/* GLSL ES 3.00 (wasm/WebGL2) still needs a precision qualifier, unlike
+ * desktop GLSL 330 core — see renderer.c's shader comment for the same
+ * split. Applied uniformly to every shader stage here (harmless on a
+ * vertex shader, which doesn't strictly require one) to keep one shared
+ * version-line macro instead of separate vertex/fragment variants. */
+#ifdef __EMSCRIPTEN__
+#define GBUF_SHADER_HEADER "#version 300 es\nprecision mediump float;\n"
+#else
+#define GBUF_SHADER_HEADER "#version 330 core\n"
+#endif
 
 /* ---- Small matrix helpers for the shadow pass's light-space camera.
  * Deliberately not shared with renderer.c (kept self-contained, same
@@ -112,7 +127,7 @@ static unsigned int link(const char *vsrc, const char *fsrc) {
 }
 
 static const char *QUAD_VERT_SRC =
-    "#version 330 core\n"
+    GBUF_SHADER_HEADER
     "layout(location=0) in vec2 a_pos;\n"
     "out vec2 v_uv;\n"
     "void main() {\n"
@@ -121,7 +136,7 @@ static const char *QUAD_VERT_SRC =
     "}\n";
 
 static const char *LIGHTING_FRAG_SRC =
-    "#version 330 core\n"
+    GBUF_SHADER_HEADER
     "in vec2 v_uv;\n"
     "uniform sampler2D u_albedo;\n"
     "uniform sampler2D u_normal;\n"
@@ -163,7 +178,7 @@ static const char *LIGHTING_FRAG_SRC =
     "}\n";
 
 static const char *SHADOW_VERT_SRC =
-    "#version 330 core\n"
+    GBUF_SHADER_HEADER
     "layout(location=0) in vec3 a_pos;\n"
     "uniform mat4 u_light_vp;\n"
     "void main() {\n"
@@ -171,12 +186,12 @@ static const char *SHADOW_VERT_SRC =
     "}\n";
 
 static const char *SHADOW_FRAG_SRC =
-    "#version 330 core\n"
+    GBUF_SHADER_HEADER
     "void main() {\n"
     "}\n";
 
 static const char *TONEMAP_FRAG_SRC =
-    "#version 330 core\n"
+    GBUF_SHADER_HEADER
     "in vec2 v_uv;\n"
     "uniform sampler2D u_hdr;\n"
     "out vec4 out_color;\n"
@@ -226,16 +241,18 @@ GBuffer *gbuffer_create(int w, int h) {
     if (status != GL_FRAMEBUFFER_COMPLETE)
         printf("[gbuffer] HDR FBO incomplete: 0x%04x\n", status);
 
-    /* Shadow map: depth-only FBO, no color attachment at all (glDrawBuffer/
-     * glReadBuffer(GL_NONE) tell GL not to expect one — legal and standard
-     * for a depth-only render target). */
+    /* Shadow map: depth-only FBO, no color attachment at all. GL_NONE via
+     * glDrawBuffers(1,&none) tells GL not to expect one — glDrawBuffer
+     * (singular) would do the same on desktop GL, but doesn't exist in
+     * GLES3/WebGL2 at all (only the array-based plural form does), so
+     * this is the one spelling that's portable to both. */
     gb->shadow_size = 2048;
     gb->shadow_tex = make_target(gb->shadow_size, gb->shadow_size,
                                   GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT);
     glGenFramebuffers(1, &gb->shadow_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, gb->shadow_fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, gb->shadow_tex, 0);
-    glDrawBuffer(GL_NONE);
+    { GLenum none = GL_NONE; glDrawBuffers(1, &none); }
     glReadBuffer(GL_NONE);
     status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (status != GL_FRAMEBUFFER_COMPLETE)
@@ -354,11 +371,19 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
     glDrawArrays(GL_TRIANGLES, 0, mesh->count);
     gl_check("gbuffer_render_shadow_map");
 
+#ifndef __EMSCRIPTEN__
     /* One-shot sanity check: sample a handful of shadow-map texels and
      * confirm they actually vary — a degenerate render (nothing rasterized,
      * or a broken light matrix putting everything outside the frustum)
      * would read back as a uniform 1.0 (cleared-and-never-written) across
-     * every sample instead. */
+     * every sample instead. Native only: readPixels(GL_DEPTH_COMPONENT,
+     * GL_FLOAT) against a depth-only FBO isn't a legal format/type
+     * combination under WebGL2/ANGLE (confirmed — it raises
+     * INVALID_ENUM there and returns garbage), unlike desktop GL where
+     * it's fine. No portable equivalent attempted here; the shadow map's
+     * correctness was already independently verified on native (Linux
+     * and Windows, identical depth values on both), which is the
+     * evidence this diagnostic exists to produce in the first place. */
     static int s_checked = 0;
     if (!s_checked) {
         s_checked = 1;
@@ -371,6 +396,7 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
                "%.4f %.4f %.4f %.4f %.4f\n",
                depths[0], depths[1], depths[2], depths[3], depths[4]);
     }
+#endif
 
     /* Restore the quad's own attrib binding for the lighting/tonemap
      * passes that follow — same VAO, different vertex data. */

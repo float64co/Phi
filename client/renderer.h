@@ -6,7 +6,7 @@
 typedef struct {
     /* WebGL program */
     unsigned int program;
-    unsigned int vao;       /* not used in WebGL/GLES2, just for compat */
+    unsigned int vao;       /* re-bound before every draw, see bind_renderer_vao in renderer.c */
 
     /* Uniforms */
     int u_mvp;

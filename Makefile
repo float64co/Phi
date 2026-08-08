@@ -40,7 +40,7 @@ all: wasm native
 # WASM (Emscripten / WebGL1)
 # ---------------------------------------------------------------
 WASM_CC   := emcc
-WASM_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_wasm.c
+WASM_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_wasm.c $(SRCDIR)/gbuffer.c
 
 WASM_CFLAGS := \
 	-O2 \

@@ -2,6 +2,7 @@
 
 #include <emscripten.h>
 #include <emscripten/html5.h>
+#include <stdio.h>
 
 /* Everything here is a direct extraction of what main.c used to do inline
  * under #ifdef __EMSCRIPTEN__ — pure refactor, no behavior change. */
@@ -45,6 +46,16 @@ void phi_platform_init(const PhiPlatformConfig *cfg) {
     EMSCRIPTEN_WEBGL_CONTEXT_HANDLE ctx =
         emscripten_webgl_create_context("#canvas", &attr);
     emscripten_webgl_make_context_current(ctx);
+
+    /* WebGL2 doesn't allow rendering into float-format color attachments
+     * (gbuffer.c's RGBA16F/R11F_G11F_B10F/RG16F targets) unless this
+     * extension is explicitly enabled — unlike native GL3.3 core, where
+     * float render targets are core functionality with no extension
+     * check needed at all. */
+    if (!emscripten_webgl_enable_extension(ctx, "EXT_color_buffer_float")) {
+        fprintf(stderr, "[phi_platform_wasm] EXT_color_buffer_float unavailable — "
+                        "the G-buffer's float render targets will fail to be created\n");
+    }
 
     emscripten_set_resize_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, 1, on_window_resize);
 }

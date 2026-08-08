@@ -6,7 +6,7 @@
 #include <stdio.h>
 
 #ifdef __EMSCRIPTEN__
-#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>   /* not GLES2/gl2.h — need glUniform1ui, MRT outputs (GLES2/WebGL1 had neither) */
 #include <emscripten.h>
 #else
 #include <GL/gl.h>
@@ -38,24 +38,30 @@ static const char *VERT_SRC =
     "  v_mat_id  = a_mat_id;\n"
     "}\n";
 
+/* Geometry-pass output — writes the G-buffer (see gbuffer.h) instead of a
+ * lit color directly, same as the native variant below (see its comment
+ * for why material/emissive/velocity aren't yet meaningfully populated). */
 static const char *FRAG_SRC =
     "#version 300 es\n"
     "precision mediump float;\n"
     "in vec3  v_normal;\n"
     "in float v_mat_id;\n"
-    "uniform vec3  u_light_dir;\n"
     "uniform vec3  u_mat_color;\n"
-    "out vec4 frag_color;\n"
+    "uniform uint  u_object_id;\n"
+    "layout(location=0) out vec4 out_albedo;\n"
+    "layout(location=1) out vec4 out_normal;\n"
+    "layout(location=2) out vec4 out_material;\n"
+    "layout(location=3) out vec4 out_emissive;\n"
+    "layout(location=4) out vec4 out_velocity;\n"
+    "layout(location=5) out uint out_object_id;\n"
     "void main() {\n"
-    /* Back-face culling is off (see renderer_create), so a triangle can be
-     * seen from its rear (viewed from inside geometry/a bot box in noclip
-     * flight). Flip the normal on that side — otherwise it'd light as if
-     * still facing its original way and render implausibly dark. */
     "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
-    "  float diff    = max(dot(n, u_light_dir), 0.0);\n"
-    "  float ambient = 0.3;\n"
-    "  vec3 color    = u_mat_color * (ambient + diff * 0.7);\n"
-    "  frag_color    = vec4(color, 1.0);\n"
+    "  out_albedo    = vec4(u_mat_color, 1.0);\n"
+    "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
+    "  out_material  = vec4(0.5, 0.0, 0.0, 0.0);\n"
+    "  out_emissive  = vec4(0.0);\n"
+    "  out_velocity  = vec4(0.0);\n"
+    "  out_object_id = u_object_id;\n"
     "}\n";
 #else
 static const char *VERT_SRC =
@@ -169,23 +175,32 @@ static void mat4_translate(float *m, float tx, float ty, float tz) {
 
 /* ---- GL error helper ---- */
 static void gl_check(const char *where) {
-    GLenum e = glGetError();
-    if (e != GL_NO_ERROR)
+    /* Drains every pending error, not just one — glGetError only returns
+     * (and clears) a single error per call, so if multiple had queued up
+     * (e.g. from a diagnostic readback earlier in the frame), a single
+     * check here would report just one and leave the rest to be
+     * misattributed to whatever the NEXT gl_check() call happens to be,
+     * anywhere in the codebase. Found exactly this happening: a bad
+     * readPixels format in gbuffer.c's shadow-map diagnostic left a
+     * stale error that then got blamed on gbuffer_resolve's lighting
+     * pass, several calls later. */
+    GLenum e;
+    while ((e = glGetError()) != GL_NO_ERROR)
         printf("[GL] error 0x%04x at %s\n", e, where);
 }
 
 /* Re-binds this renderer's VAO before every draw rather than trusting it to
- * stay bound (GLES2/WebGL1 has no VAO concept, so this is a no-op there).
- * It's NOT safe to assume "bind once at renderer_create and never again" on
- * native: gbuffer.c's fullscreen-quad passes bind their own VAO every frame
- * for the lighting/tonemap draws, which otherwise silently steals the
- * binding out from under the next frame's geometry-pass draw calls. */
+ * stay bound (GLES2/WebGL1 has no VAO concept, so this used to be a no-op
+ * on wasm — now wasm is WebGL2/GLES3, which does have one, and gbuffer.c's
+ * fullscreen-quad passes bind their own VAO on both platforms). It's NOT
+ * safe to assume "bind once at renderer_create and never again" on either
+ * target: gbuffer.c's lighting/tonemap draws bind their own VAO every
+ * frame, which otherwise silently steals the binding out from under the
+ * next frame's geometry-pass draw calls — this exact bug already happened
+ * once on native before every draw call here was made to defend against
+ * it; wasm needed the same fix once it started sharing gbuffer.c too. */
 static void bind_renderer_vao(const Renderer *r) {
-#ifndef __EMSCRIPTEN__
     glBindVertexArray(r->vao);
-#else
-    (void)r;
-#endif
 }
 
 /* ---- Shader compilation ---- */
@@ -306,15 +321,21 @@ Renderer *renderer_create(int width, int height) {
 
 #ifndef __EMSCRIPTEN__
     /* Must run before any GL call below that isn't in <GL/gl.h>'s GL 1.2
-     * set. GL 3.3 core also requires a bound VAO for any vertex-attrib /
-     * draw call — bind one VAO for the whole renderer's lifetime rather
-     * than one per mesh, since every draw call here already re-specifies
-     * its own attrib pointers each time (matches the GLES2/WebGL1 code
-     * path, which has no VAO concept at all). */
+     * set — wasm doesn't need this at all, GLES3 functions link directly
+     * against Emscripten's GL library, no proc-address fetching required. */
     gl_native_load_procs();
+#endif
+    /* GL 3.3 core requires a bound (non-zero) VAO for any vertex-attrib /
+     * draw call; GLES3/WebGL2 doesn't strictly require one (VAO 0 is
+     * legal there, unlike desktop core profile) but creating an explicit
+     * one on both platforms and re-binding it before every draw
+     * (bind_renderer_vao) is what actually keeps gbuffer.c's own VAO
+     * usage from silently stealing the binding — see that function's
+     * comment. One VAO for the whole renderer's lifetime, not one per
+     * mesh, since every draw call here already re-specifies its own
+     * attrib pointers each time. */
     glGenVertexArrays(1, &r->vao);
     glBindVertexArray(r->vao);
-#endif
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
@@ -447,12 +468,11 @@ void renderer_draw_world(Renderer *r, RenderMesh *mesh) {
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
     glUniform3f(r->u_mat_color, 0.50f, 0.50f, 0.55f);
-#ifndef __EMSCRIPTEN__
-    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
-     * no uint type) — not just a location==-1 no-op like the other
-     * per-draw uniform sets, an actual missing symbol at compile time. */
+    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
+     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
+     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
+     * that reason). */
     glUniform1ui(r->u_object_id, r->cur_object_id);
-#endif
 
     glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
     int stride = VERTEX_STRIDE * (int)sizeof(float);
@@ -486,12 +506,11 @@ static void draw_box(const Renderer *r, unsigned int vbo,
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
-#ifndef __EMSCRIPTEN__
-    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
-     * no uint type) — not just a location==-1 no-op like the other
-     * per-draw uniform sets, an actual missing symbol at compile time. */
+    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
+     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
+     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
+     * that reason). */
     glUniform1ui(r->u_object_id, r->cur_object_id);
-#endif
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     int stride = 6 * (int)sizeof(float);
@@ -557,12 +576,11 @@ static void draw_box_oriented(const Renderer *r, unsigned int vbo,
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
-#ifndef __EMSCRIPTEN__
-    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
-     * no uint type) — not just a location==-1 no-op like the other
-     * per-draw uniform sets, an actual missing symbol at compile time. */
+    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
+     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
+     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
+     * that reason). */
     glUniform1ui(r->u_object_id, r->cur_object_id);
-#endif
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     int stride = 6 * (int)sizeof(float);
@@ -645,12 +663,11 @@ void renderer_draw_ground_plane(Renderer *r) {
     glUniform3f(r->u_mat_color, 0.78f, 0.78f, 0.80f);   /* light grey */
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
-#ifndef __EMSCRIPTEN__
-    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
-     * no uint type) — not just a location==-1 no-op like the other
-     * per-draw uniform sets, an actual missing symbol at compile time. */
+    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
+     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
+     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
+     * that reason). */
     glUniform1ui(r->u_object_id, r->cur_object_id);
-#endif
 
     glBindBuffer(GL_ARRAY_BUFFER, s_ground_vbo);
     int stride = 6 * (int)sizeof(float);
@@ -708,12 +725,11 @@ void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
     glUniform3f(r->u_mat_color, cr, cg, cb);
     float ld[3] = {0.577f, 0.577f, 0.577f};
     glUniform3fv(r->u_light_dir, 1, ld);
-#ifndef __EMSCRIPTEN__
-    /* glUniform1ui doesn't exist in GLES2/WebGL1 at all (GLSL ES 1.00 has
-     * no uint type) — not just a location==-1 no-op like the other
-     * per-draw uniform sets, an actual missing symbol at compile time. */
+    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
+     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
+     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
+     * that reason). */
     glUniform1ui(r->u_object_id, r->cur_object_id);
-#endif
 
     int stride = 6 * (int)sizeof(float);
     glEnableVertexAttribArray(0);
