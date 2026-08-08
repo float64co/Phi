@@ -409,19 +409,49 @@ but the shadow map itself is built and sampled through ordinary texture
 sampling in the shader there, a fully portable code path unrelated to
 that restriction, and the user confirmed a GL-errorless, correctly-
 updating browser session after the wasm G-buffer extension landed.
-Transparency, TAA, bloom, FXAA, and the `@phi.render_pass` insertion-
-point system are all still unstarted.
+**FXAA, bloom, and transparency have since landed** on top of the
+shadow-mapped deferred pipeline above, in that order (all three confirmed
+building on native/win32/wasm; FXAA+bloom additionally confirmed
+GL-errorless in a real browser). FXAA: tonemap now writes to an
+intermediate LDR texture (`ldr_fbo`/`ldr_tex`) instead of the default
+framebuffer directly, and a new FXAA pass (standard luma-edge-detection
+formulation, NVIDIA-whitepaper-derived, not invented) reads it and writes
+the actually-presented frame. Bloom: threshold-extract (>1.0 luminance) →
+2-pass separable Gaussian blur (the widely-circulated LearnOpenGL 9-tap
+weight set) → additive composite back into the HDR buffer before
+tonemap. Honest caveat, verified two ways rather than assumed: current
+lighting math never exceeds ~1.0 HDR (no emissive materials, no
+over-bright lights), so this is correct, working plumbing with nothing
+to visibly bloom under current game content — confirmed on native by
+reading back the bright-pass center pixel at the real threshold (0,0,0),
+then temporarily lowering the threshold to 0.01 and confirming genuine
+non-zero extraction (0.2998,0.5000,0.7998), then reverting. Transparency:
+a forward-blended pass into the HDR buffer, depth-tested (not
+depth-writing) against the opaque scene's depth — `hdr_fbo` now shares
+`tex_depth_stencil` with the G-buffer's own `fbo` (a texture can be
+attached to more than one FBO), so `glDepthMask(GL_FALSE)` +
+`glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` correctly composites
+without occluding other transparent draws or the opaque pass. There's no
+transparent content in the game yet to exercise this with, so a small
+fixed NDC-space test quad (bypassing any world/camera transform
+entirely, at a shallow near-plane depth) stands in — verified on native
+by reading the HDR center pixel immediately before and after the blend
+within the same frame (so scene content is identical between the two
+reads) and confirming the result matches the standard over-blend
+equation exactly: `bg=(0.2998,0.5000,0.7998) expected=(0.6499,0.2500,
+0.3999) actual=(0.6499,0.2500,0.3999)`. TAA and the `@phi.render_pass`
+insertion-point system are still unstarted.
 
 **Effort:** 5–7 weeks *(platform abstraction across all three targets
 (wasm/Linux-native/Windows-native) — all with real input and real
 networking now, not just Linux — the wasm WebGL2 upgrade, CI check, and
-the deferred renderer/G-buffer/shadow-map pipeline (all confirmed
-working on wasm, Linux native, and Windows native alike): done — see
-the scope-split note above for what "done" means and how each platform
-was actually verified, not just built. Remaining: macOS (explicitly
-deferred, no access), and everything this phase's G-buffer enables but
-doesn't itself implement — transparency, TAA, bloom, FXAA, the
-`@phi.render_pass` insertion-point system.)*
+the deferred renderer/G-buffer/shadow-map/FXAA/bloom/transparency
+pipeline (all confirmed building on wasm, Linux native, and Windows
+native alike, FXAA+bloom additionally confirmed GL-errorless in a real
+browser): done — see the scope-split note above for what "done" means
+and how each platform was actually verified, not just built. Remaining:
+macOS (explicitly deferred, no access), and what's left of this phase's
+G-buffer scope — TAA, the `@phi.render_pass` insertion-point system.)*
 
 ---
 
