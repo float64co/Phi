@@ -306,6 +306,30 @@ static const char *COMPOSITE_FRAG_SRC =
     "  out_color = vec4(texture(u_tex, v_uv).rgb, 1.0);\n"
     "}\n";
 
+/* ---- Transparency test content: a small quad drawn directly in NDC
+ * space (no camera transform at all — this isn't world content, just a
+ * fixed on-screen probe to exercise the forward-blended pass, per the
+ * agreed scope: prove the mechanism works, not add real content). Its
+ * depth (-0.8, i.e. depth-buffer value 0.1 under the default
+ * glDepthRange(0,1)) is deliberately shallow/near so it passes the depth
+ * test against virtually all real scene geometry, while still genuinely
+ * exercising the shared-depth-texture test (see hdr_fbo's attachment in
+ * gbuffer_create) rather than disabling it. ---- */
+static const char *TRANSPARENT_TEST_VERT_SRC =
+    GBUF_SHADER_HEADER
+    "layout(location=0) in vec2 a_pos;\n"
+    "void main() {\n"
+    "  gl_Position = vec4(a_pos, -0.8, 1.0);\n"
+    "}\n";
+
+static const char *TRANSPARENT_TEST_FRAG_SRC =
+    GBUF_SHADER_HEADER
+    "uniform vec4 u_color;\n"
+    "out vec4 out_color;\n"
+    "void main() {\n"
+    "  out_color = u_color;\n"
+    "}\n";
+
 GBuffer *gbuffer_create(int w, int h) {
     GBuffer *gb = (GBuffer *)calloc(1, sizeof(GBuffer));
     gb->w = w; gb->h = h;
@@ -338,6 +362,14 @@ GBuffer *gbuffer_create(int w, int h) {
     glGenFramebuffers(1, &gb->hdr_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, gb->hdr_fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gb->hdr_tex, 0);
+    /* Share the opaque G-buffer's depth texture here too (a texture can be
+     * attached to more than one FBO at once) — the transparency pass in
+     * gbuffer_resolve draws into hdr_fbo and needs to depth-TEST against
+     * the already-rendered opaque scene (with writes disabled, via
+     * glDepthMask(GL_FALSE)) so transparent geometry is correctly hidden
+     * behind opaque geometry without being able to occlude other
+     * transparent draws. */
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, gb->tex_depth_stencil, 0);
     GLenum hdr_buf = GL_COLOR_ATTACHMENT0;
     glDrawBuffers(1, &hdr_buf);
     status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -415,6 +447,18 @@ GBuffer *gbuffer_create(int w, int h) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
 
+    /* Small centered quad (roughly the middle 30% of the screen), separate
+     * VBO from the fullscreen quad_vbo above — reuses quad_vao's binding
+     * slot the same way gbuffer_render_shadow_map's mesh draw already
+     * does (swap glBindBuffer + glVertexAttribPointer, restore after). */
+    float tquad[] = { -0.15f,-0.15f,  0.15f,-0.15f,  0.15f,0.15f,
+                       -0.15f,-0.15f,  0.15f,0.15f,  -0.15f,0.15f };
+    glGenBuffers(1, &gb->transparent_test_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, gb->transparent_test_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(tquad), tquad, GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, gb->quad_vbo);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+
     gb->lighting_program = link(QUAD_VERT_SRC, LIGHTING_FRAG_SRC);
     gb->light_u_albedo        = glGetUniformLocation(gb->lighting_program, "u_albedo");
     gb->light_u_normal        = glGetUniformLocation(gb->lighting_program, "u_normal");
@@ -447,11 +491,14 @@ GBuffer *gbuffer_create(int w, int h) {
     gb->composite_program = link(QUAD_VERT_SRC, COMPOSITE_FRAG_SRC);
     gb->composite_u_tex   = glGetUniformLocation(gb->composite_program, "u_tex");
 
+    gb->transparent_test_program = link(TRANSPARENT_TEST_VERT_SRC, TRANSPARENT_TEST_FRAG_SRC);
+    gb->transparent_test_u_color = glGetUniformLocation(gb->transparent_test_program, "u_color");
+
     printf("[gbuffer] created %dx%d, lighting_prog=%u tonemap_prog=%u shadow_prog=%u "
-           "fxaa_prog=%u bloom_progs=%u/%u/%u (%dx%d)\n",
+           "fxaa_prog=%u bloom_progs=%u/%u/%u transparent_test_prog=%u (%dx%d)\n",
            w, h, gb->lighting_program, gb->tonemap_program, gb->shadow_program,
            gb->fxaa_program, gb->brightpass_program, gb->blur_program, gb->composite_program,
-           gb->shadow_size, gb->shadow_size);
+           gb->transparent_test_program, gb->shadow_size, gb->shadow_size);
     gl_check("gbuffer_create");
     return gb;
 }
@@ -475,6 +522,11 @@ static void free_gl_resources(GBuffer *gb) {
     glDeleteProgram(gb->brightpass_program);
     glDeleteProgram(gb->blur_program);
     glDeleteProgram(gb->composite_program);
+    glDeleteProgram(gb->transparent_test_program);
+    /* transparent_test_vbo, like quad_vbo above, is intentionally not
+     * deleted here — matches this function's existing pattern of never
+     * freeing VBOs (glDeleteBuffers isn't in gl_native.h's proc list; the
+     * GL context itself is torn down at process exit anyway). */
 }
 
 void gbuffer_destroy(GBuffer *gb) {
@@ -657,6 +709,69 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glDrawArrays(GL_TRIANGLES, 0, 6);
     gl_check("gbuffer_resolve/bloom_composite");
     glDisable(GL_BLEND);
+
+    /* ---- Transparency: forward-blended pass into hdr_fbo, depth-tested
+     * against the opaque scene (hdr_fbo shares tex_depth_stencil with the
+     * G-buffer's own fbo, see gbuffer_create) but not depth-writing, so
+     * transparent draws are correctly hidden behind opaque geometry
+     * without occluding each other or the opaque pass. Still targeting
+     * hdr_fbo (already bound from the bloom composite step above), so no
+     * extra glBindFramebuffer/glViewport needed. See TRANSPARENT_TEST_VERT_SRC's
+     * comment for why this is a fixed NDC-space probe quad rather than
+     * real world content — there's nothing transparent in the game yet to
+     * exercise this with. ---- */
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+#ifndef __EMSCRIPTEN__
+    /* One-shot sanity check, native only (same readPixels-portability
+     * reasoning as the other diagnostics in this file): capture the HDR
+     * center pixel immediately BEFORE the blend (background) and
+     * immediately AFTER (both within this same frame's single
+     * gbuffer_resolve call, so the scene content is identical between the
+     * two reads — no frame-to-frame noise), then confirm the "after"
+     * value matches the standard over-blend equation
+     * result = src*alpha + dst*(1-alpha) applied to the captured
+     * background. Proves the blend math is actually happening at this
+     * exact pixel, not just assumed from the state-setting calls above. */
+    static int s_transparency_checked = 0;
+    float t_bg[4] = {0,0,0,0};
+    if (!s_transparency_checked)
+        glReadPixels(gb->w / 2, gb->h / 2, 1, 1, GL_RGBA, GL_FLOAT, t_bg);
+#endif
+
+    glUseProgram(gb->transparent_test_program);
+    glUniform4f(gb->transparent_test_u_color, 1.0f, 0.0f, 0.0f, 0.5f);
+    glBindVertexArray(gb->quad_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, gb->transparent_test_vbo);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    gl_check("gbuffer_resolve/transparency_test");
+    glBindBuffer(GL_ARRAY_BUFFER, gb->quad_vbo);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+
+#ifndef __EMSCRIPTEN__
+    if (!s_transparency_checked) {
+        s_transparency_checked = 1;
+        float t_after[4];
+        glReadPixels(gb->w / 2, gb->h / 2, 1, 1, GL_RGBA, GL_FLOAT, t_after);
+        float alpha = 0.5f;
+        float exp_r = 1.0f * alpha + t_bg[0] * (1.0f - alpha);
+        float exp_g = 0.0f * alpha + t_bg[1] * (1.0f - alpha);
+        float exp_b = 0.0f * alpha + t_bg[2] * (1.0f - alpha);
+        printf("[gbuffer] transparency blend check: bg=(%.4f,%.4f,%.4f) "
+               "expected=(%.4f,%.4f,%.4f) actual=(%.4f,%.4f,%.4f)\n",
+               t_bg[0], t_bg[1], t_bg[2], exp_r, exp_g, exp_b,
+               t_after[0], t_after[1], t_after[2]);
+    }
+#endif
+
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_DEPTH_TEST);
 
     /* ---- Tonemap: HDR -> intermediate LDR texture (not the default
      * framebuffer directly — fxaa below needs to read the tonemapped

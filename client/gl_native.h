@@ -37,6 +37,7 @@
     X(PFNGLUNIFORMMATRIX4FVPROC,         glUniformMatrix4fv) \
     X(PFNGLUNIFORM3FVPROC,               glUniform3fv) \
     X(PFNGLUNIFORM3FPROC,                glUniform3f) \
+    X(PFNGLUNIFORM4FPROC,                glUniform4f) \
     X(PFNGLENABLEVERTEXATTRIBARRAYPROC,  glEnableVertexAttribArray) \
     X(PFNGLVERTEXATTRIBPOINTERPROC,      glVertexAttribPointer) \
     X(PFNGLDISABLEVERTEXATTRIBARRAYPROC, glDisableVertexAttribArray) \
@@ -81,6 +82,7 @@ GL_NATIVE_PROC_LIST
 #define glUniformMatrix4fv            glUniformMatrix4fv_native
 #define glUniform3fv                  glUniform3fv_native
 #define glUniform3f                   glUniform3f_native
+#define glUniform4f                   glUniform4f_native
 #define glEnableVertexAttribArray     glEnableVertexAttribArray_native
 #define glVertexAttribPointer         glVertexAttribPointer_native
 #define glDisableVertexAttribArray    glDisableVertexAttribArray_native

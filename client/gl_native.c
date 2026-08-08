@@ -27,6 +27,7 @@
     X(PFNGLUNIFORMMATRIX4FVPROC,         glUniformMatrix4fv) \
     X(PFNGLUNIFORM3FVPROC,               glUniform3fv) \
     X(PFNGLUNIFORM3FPROC,                glUniform3f) \
+    X(PFNGLUNIFORM4FPROC,                glUniform4f) \
     X(PFNGLENABLEVERTEXATTRIBARRAYPROC,  glEnableVertexAttribArray) \
     X(PFNGLVERTEXATTRIBPOINTERPROC,      glVertexAttribPointer) \
     X(PFNGLDISABLEVERTEXATTRIBARRAYPROC, glDisableVertexAttribArray) \

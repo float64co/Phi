@@ -21,14 +21,20 @@
  *                                                     working plumbing with
  *                                                     nothing to bloom yet
  *                                                     under current content)
- *   [tonemap]  -> HDR -> intermediate LDR texture  (gbuffer_resolve, part 3)
- *   [fxaa]     -> LDR texture -> default framebuffer (gbuffer_resolve, part 4)
+ *   [transparency] -> forward-blended, depth-tested   (gbuffer_resolve, part 3 —
+ *                     but not depth-writing, into HDR    see the honest caveat
+ *                                                         on transparent_test_vbo
+ *                                                         below: a fixed test
+ *                                                         quad, since nothing
+ *                                                         transparent exists in
+ *                                                         the game yet)
+ *   [tonemap]  -> HDR -> intermediate LDR texture  (gbuffer_resolve, part 4)
+ *   [fxaa]     -> LDR texture -> default framebuffer (gbuffer_resolve, part 5)
  *
- * Not implemented yet, left for later: transparency, TAA, and the Python
- * @phi.render_pass insertion-point system (needs MicroPython, Phase 5,
- * not started — deliberately not stubbed out early, see phi.md) — this
- * is still not the finished pipeline, just a bigger first pass than
- * before. */
+ * Not implemented yet, left for later: TAA, and the Python @phi.render_pass
+ * insertion-point system (needs MicroPython, Phase 5, not started —
+ * deliberately not stubbed out early, see phi.md) — this is still not the
+ * finished pipeline, just a bigger first pass than before. */
 
 typedef struct {
     int w, h;
@@ -80,6 +86,15 @@ typedef struct {
     unsigned int blur_fbo_a,  tex_blur_a;   /* RGBA16F, horizontal blur result */
     unsigned int blur_fbo_b,  tex_blur_b;   /* RGBA16F, vertical blur result = final bloom */
 
+    /* Transparency: a fixed NDC-space test quad drawn forward-blended into
+     * hdr_fbo, depth-tested (not depth-writing) against tex_depth_stencil
+     * (shared with the opaque G-buffer's fbo, see gbuffer_create). See
+     * gbuffer.c's TRANSPARENT_TEST_VERT_SRC comment for why it's a fixed
+     * on-screen probe rather than real world content — nothing
+     * transparent exists in the game yet to exercise this path with. */
+    unsigned int transparent_test_vbo, transparent_test_program;
+    int transparent_test_u_color;
+
     unsigned int quad_vao, quad_vbo;
     unsigned int lighting_program, tonemap_program, fxaa_program;
     unsigned int brightpass_program, blur_program, composite_program;
@@ -111,13 +126,14 @@ void gbuffer_begin_geometry_pass(GBuffer *gb, const float *sky_color);
 void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light_dir);
 
 /* Lighting pass (G-buffer -> HDR, shadow-mapped), bloom (threshold+blur,
- * additively composited back into HDR), tonemap pass (HDR -> intermediate
- * LDR texture), then FXAA (LDR texture -> default framebuffer, standard
- * luma-edge-detection formulation). Call once per frame after
- * gbuffer_render_shadow_map. inv_view_proj is the camera's inverse
- * view-projection matrix (renderer_get_inverse_view_proj), needed to
- * reconstruct world-space position from G-buffer depth for shadow-space
- * projection. */
+ * additively composited back into HDR), transparency (forward-blended test
+ * quad, depth-tested but not depth-writing, into HDR), tonemap pass
+ * (HDR -> intermediate LDR texture), then FXAA (LDR texture -> default
+ * framebuffer, standard luma-edge-detection formulation). Call once per
+ * frame after gbuffer_render_shadow_map. inv_view_proj is the camera's
+ * inverse view-projection matrix (renderer_get_inverse_view_proj), needed
+ * to reconstruct world-space position from G-buffer depth for
+ * shadow-space projection. */
 void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color,
                       const float *inv_view_proj);
 
