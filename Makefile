@@ -88,7 +88,7 @@ run: wasm
 # Native (Xlib/GLX, OpenGL 3.3 core)
 # ---------------------------------------------------------------
 NATIVE_CC   := gcc
-NATIVE_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_native.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c
+NATIVE_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_native.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_native.c
 
 NATIVE_CFLAGS := \
 	-O2 \
@@ -96,7 +96,7 @@ NATIVE_CFLAGS := \
 	-Wextra \
 	-I$(SRCDIR)
 
-NATIVE_LDFLAGS := -lX11 -lGL -lm
+NATIVE_LDFLAGS := -lX11 -lGL -lm -lcrypto
 
 OUT_NATIVE := $(BUILDDIR)/phi_native
 

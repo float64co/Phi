@@ -108,6 +108,10 @@ static void main_loop(void *userdata) {
     g_last_t = now;
     if (dt > 0.05f) dt = 0.05f;   /* cap at 50ms */
 
+#ifndef __EMSCRIPTEN__
+    net_poll_native();  /* wasm gets messages via an async JS callback instead */
+#endif
+
     /* --- Apply any authoritative map swap from the server before physics/render --- */
     if (g_ns.has_pending_map) {
         g_ns.has_pending_map = 0;

@@ -78,3 +78,9 @@ void net_send_hello(NetState *ns, const char *name);
 
 /* Set the game state pointer used by the WebSocket receive callback */
 void net_set_game_state(GameState *gs);
+
+#ifndef __EMSCRIPTEN__
+/* Native only: pumps the WebSocket socket (non-blocking) once per frame.
+ * wasm has no equivalent — messages arrive via an async JS callback instead. */
+void net_poll_native(void);
+#endif

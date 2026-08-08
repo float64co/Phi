@@ -63,10 +63,45 @@ static void ws_send_binary(const uint8_t *data, int len) {
 }
 
 #else
-/* Stub for native build */
-static void ws_send_binary(const uint8_t *data, int len) { (void)data; (void)len; }
+#include "ws_client_native.h"
+
+static GameState *s_gs_native = NULL;
+static NetState   *s_ns_native = NULL;
+
+static void ws_send_binary(const uint8_t *data, int len) {
+    ws_client_send_binary(data, len);
+}
+
 void net_connect(NetState *ns, const char *url) {
     strncpy(ns->ws_url, url, sizeof(ns->ws_url)-1);
+    s_ns_native = ns;
+    ns->connected = 0;
+    if (ws_client_connect(url) == 0) {
+        ns->connected = 1;
+        printf("[net] WebSocket connected (native)\n");
+        net_send_hello(ns, "player");
+    } else {
+        printf("[net] WebSocket connect failed: %s\n", url);
+    }
+}
+
+static void on_native_ws_message(void *user, const uint8_t *data, int len) {
+    (void)user;
+    if (s_gs_native && s_ns_native) net_on_message(s_gs_native, s_ns_native, data, len);
+}
+
+/* Called once per frame by main.c (native only) — sockets need active
+ * polling, unlike wasm's async ws_on_message callback. */
+void net_poll_native(void) {
+    if (!s_ns_native) return;
+    if (!ws_client_connected()) {
+        if (s_ns_native->connected) {
+            s_ns_native->connected = 0;
+            printf("[net] WebSocket disconnected\n");
+        }
+        return;
+    }
+    ws_client_poll(on_native_ws_message, NULL);
 }
 #endif
 
@@ -319,6 +354,6 @@ void net_set_game_state(GameState *gs) {
 #ifdef __EMSCRIPTEN__
     s_gs = gs;
 #else
-    (void)gs;
+    s_gs_native = gs;
 #endif
 }
