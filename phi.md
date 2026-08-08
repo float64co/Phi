@@ -625,6 +625,27 @@ in Blender; Phi-specific data is simply data Blender doesn't render.
 Built in C, rendered entirely via WebGL 2. No third-party UI library — this is
 the resolved decision over Dear ImGui (see Hard Architectural Decisions).
 
+**Design reference**: evaluated a separate, mature CAD tool's C++/Python UI
+codebase as reference material (brought in temporarily, read-only, removed
+once this phase is far enough along — nothing here should assume its files
+still exist). Confirms the core bet: a hand-rolled immediate-mode C++ UI
+(no ImGui) driven by Python panel callbacks is a proven, working pattern, not
+just a plan. Two decisions it directly informed:
+- Its Python layer is CPython + pybind11, not MicroPython — the *shape* of
+  the binding pattern (global setter functions registering live engine
+  pointers, e.g. `zenith_set_scene(SceneGraph*)`, panels holding a Python
+  callable invoked each frame) ports cleanly; the binding *code* doesn't,
+  since pybind11 doesn't exist for MicroPython and its C API is narrower.
+  Budget real design time for the binding layer rather than assuming a port.
+- Its own node-graph-style canvas (an LLM-conversation graph, not geometry —
+  but the interaction mechanics are the same: pan/zoom, draggable/
+  resizable nodes, socket hit-testing, wire drag-and-drop) is built entirely
+  in Python over a generic 2D immediate-mode drawing primitive (rect/line/
+  circle/text), with no dedicated C++ node-graph widget at all. Phi
+  deliberately diverges from that for its own node graph and curve editor —
+  see below and Phase 6 — because large graphs need C++ to own the
+  topology, not just the rendering.
+
 #### Property System (DNA/RNA analogue)
 
 ```c
@@ -645,8 +666,18 @@ node-driveable, and scriptable.
 #### Widget rendering
 
 All widgets are textured quads in the WebGL 2 context. SDF fonts — one atlas
-baked at startup, crisp at any size. Layout engine manages panels, regions,
-splits, scrollable areas. Hit testing is a rectangle walk.
+baked at startup, crisp at any size. Hit testing is a rectangle walk.
+
+**Panel layout**: Blender's actual model, not a simpler fixed-slot dock (the
+reference CAD tool above uses the latter — a curated 4-slot icon-strip dock,
+one active slot at a time — which is simpler to build but isn't what was
+asked for here). Screen space is a recursive tree of areas; any area can
+split horizontally or vertically, the split's edge is draggable, and
+dragging a shared corner between four areas resizes all of them at once.
+Each leaf area hosts exactly one editor type (3D viewport, node graph, curve
+editor, property panel, ...) chosen from a type dropdown, same as Blender.
+This is user-defined layout, not a fixed set of panel positions — the
+specific split tree is per-project saved state, not engine-hardcoded.
 
 Elements that aren't 2D panel chrome are rendered separately, as raw WebGL calls
 alongside (not through) the panel system, since they're 3D scene content rather
@@ -654,7 +685,8 @@ than UI:
 
 | Element | Rendered by |
 |---|---|
-| Property panels, toolbar, menus, node graph canvas, animation timeline | Custom C UI system (DNA/RNA property panels, above) |
+| Property panels, toolbar, menus, animation timeline | Custom C UI system (DNA/RNA property panels, above) |
+| Node graph canvas, curve editor | Custom C UI system — C owns topology/keyframe data and rendering/interaction (not just drawing), so both stay fast at large graph/curve sizes; see Phase 6 for why and how Python (or an LLM-generated script) still authors a whole graph or curve set in one call rather than only incrementally via mouse drags |
 | Transform gizmos | WebGL draw calls, 3D geometry |
 | Selection highlights | WebGL stencil outline pass (two-pass: draw selection into stencil, then a scaled-up copy wherever the stencil is clear) |
 | Wireframe overlay | Barycentric coordinates as a vertex attribute, thresholded in the fragment shader — WebGL 2 has no `GL_LINE` polygon mode |
@@ -893,7 +925,10 @@ The animation runtime has three layers:
 ### Editor operations
 
 - Timeline scrubber with keyframe handles
-- Bezier curve editor per channel
+- Bezier curve editor per channel — same C-owns-data/Python-authors-
+  whole-cloth split as the node graph, see Phase 6's "Graph ownership"
+  section (curve editor and node graph are the same architectural pattern
+  applied to two different data shapes)
 - Multiple clip management per asset (maps to glTF animation array)
 - Preview playback with skinned mesh in the viewport
 - Event markers on the timeline (trigger Python callbacks at a named frame)
@@ -1057,31 +1092,53 @@ angle = math.sin(t * 2.0) * 0.5
 return phi.mesh_rotate(mesh, axis=(0, 1, 0), angle=angle)
 ```
 
-### Graph evaluator
+### Graph ownership: C owns topology, Python drives and evaluates it
 
-The evaluator lives in MicroPython — the data structure is small and the
-performance cost of Python dispatch is paid once per graph evaluation, not per
-vertex:
+The graph's topology, socket connections, and editor-only state (node
+positions, selection) live in **C**, not in a Python object — the node
+graph *canvas* is a native C UI widget (see Phase 1's Native UI System),
+and interactive editing (drag a node, drag-connect a wire, box-select)
+mutates that C-owned structure directly, at any graph size, without ever
+crossing into Python. This is a deliberate departure from the simpler
+"graph as a plain Python object" sketch this section used to have —
+necessary once the editor itself is a C widget rather than drawn by Python
+(see Phase 1's design-reference note on why), otherwise every drag/connect
+interaction would round-trip through Python regardless of graph size.
+
+Two things stay true despite that move:
+
+- **Dispatch cost is still paid once per node, not per vertex.** The
+  evaluator walks the C-owned topological order and calls each node's
+  Python `fn` through the MicroPython C API — same cost model this section
+  always had, just reading from a C structure instead of a Python one.
+- **Python (or an LLM-generated script) can still author a whole graph in
+  one call, not just interactively.** The binding layer exposes full CRUD
+  over the C-owned graph — `graph.add_node(type_name, **params)`,
+  `graph.connect(src, src_socket, dst, dst_socket)`, `graph.set_position(...)`
+  — so a script can build (or rewrite) an entire graph programmatically in
+  one execution, exactly the UX a Claude-assisted authoring session needs:
+  describe what you want, get back a fully-wired graph, without anyone
+  having dragged a single node by hand. `to_python()`/eject-to-code and
+  this whole-graph `build()` path are inverses of each other — script → graph
+  and graph → script both need to be lossless through the same binding
+  surface, which is a real constraint on that surface's design, not an
+  afterthought:
 
 ```python
-class Graph:
-    def evaluate(self, context):
-        for node_id in self._topo_sort():
-            node = self.nodes[node_id]
-            inputs = self._resolve_inputs(node_id, cache, context)
-            cache[node_id] = node.fn(**inputs)
-        return cache[order[-1]]
-
-    def to_python(self):
-        lines = []
-        for node_id in self._topo_sort():
-            node = self.nodes[node_id]
-            lines.append(f"_{node_id} = {node.type_name}({self._format_inputs(node_id)})")
-        return "\n".join(lines)
+graph = phi.Graph(kind="geometry")
+n1 = graph.add_node("input_mesh", asset="rock.glb")
+n2 = graph.add_node("noise_displace", scale=0.3)
+graph.connect(n1, "mesh", n2, "mesh")
+graph.set_position(n2, x=300, y=120)   # editor layout, not required for evaluation
+result = graph.evaluate(context)
 ```
 
-`to_python()` is the eject button. The output is valid, readable Python the user
-can copy into a script and edit directly.
+Curves (Phase 4's animation curve editor) follow the identical split for
+the identical reason: C owns keyframe data and the curve widget's
+rendering/interaction, Python gets full CRUD (`curve.add_keyframe(time,
+value, interp="bezier")`) so a script or an LLM can author a complete set
+of curves whole-cloth, not just nudge existing keyframes one drag at a
+time.
 
 ### Two evaluation modes
 
