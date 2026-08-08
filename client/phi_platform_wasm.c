@@ -39,7 +39,7 @@ void phi_platform_init(const PhiPlatformConfig *cfg) {
 
     EmscriptenWebGLContextAttributes attr;
     emscripten_webgl_init_context_attributes(&attr);
-    attr.majorVersion = 1;
+    attr.majorVersion = 2;  /* WebGL 2 — see phi.md's "WebGL 2 from day one" decision */
     attr.minorVersion = 0;
     attr.antialias    = 1;
     EMSCRIPTEN_WEBGL_CONTEXT_HANDLE ctx =

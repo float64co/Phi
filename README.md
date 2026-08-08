@@ -12,9 +12,11 @@ authoritative-server pattern used for player movement, so edits persist to
 disk and sync to every connected player live.
 
 ```
-Language:    C (Emscripten → WASM)
-Rendering:   WebGL 1.0 (GLES2), flat-shaded
-Networking:  WebSockets (RFC 6455 hand-rolled in pure Python)
+Language:    C (Emscripten → WASM, or native via Xlib/GLX)
+Rendering:   WebGL 2 (GLES3) in-browser, OpenGL 3.3 core natively, flat-shaded
+Networking:  WebSockets (RFC 6455 — hand-rolled in pure Python server-side,
+             hand-rolled in C for the native client; browser build uses the
+             Emscripten WebSocket API)
 Server:      Pure Python stdlib — no third-party deps
 Geometry:    10-level 1024³ Sauerbraten-style octree
 Export:      Binary STL (in-browser, F4 key)

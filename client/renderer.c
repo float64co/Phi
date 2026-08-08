@@ -14,20 +14,24 @@
 #endif
 
 /* ---- Shaders ----
- * Two variants: GLSL ES 1.00 (attribute/varying/precision/gl_FragColor,
- * WebGL1/GLES2) and GLSL 330 core (in/out, explicit frag_color output, no
- * precision qualifiers — core profile dropped both). Same lighting logic,
- * same attribute/uniform names (bound to matching locations either way via
- * glBindAttribLocation before linking, see link_program), so everything
- * downstream of link_program is identical on both backends. */
+ * Two variants: GLSL ES 3.00 (WebGL2/GLES3 — in/out, explicit frag_color,
+ * still needs a precision qualifier unlike desktop core profile) and GLSL
+ * 330 core (in/out, explicit frag_color, no precision qualifiers — core
+ * profile dropped those). Same lighting logic, same attribute/uniform
+ * names (bound to matching locations either way via glBindAttribLocation
+ * before linking, see link_program), so everything downstream of
+ * link_program is identical on both backends. GLSL ES 1.00
+ * (attribute/varying/gl_FragColor) was retired along with the WebGL1
+ * context — see phi.md's "WebGL 2 from day one" decision. */
 #ifdef __EMSCRIPTEN__
 static const char *VERT_SRC =
-    "attribute vec3 a_pos;\n"
-    "attribute vec3 a_normal;\n"
-    "attribute float a_mat_id;\n"
+    "#version 300 es\n"
+    "in vec3 a_pos;\n"
+    "in vec3 a_normal;\n"
+    "in float a_mat_id;\n"
     "uniform mat4 u_mvp;\n"
-    "varying vec3 v_normal;\n"
-    "varying float v_mat_id;\n"
+    "out vec3 v_normal;\n"
+    "out float v_mat_id;\n"
     "void main() {\n"
     "  gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
     "  v_normal  = a_normal;\n"
@@ -35,11 +39,13 @@ static const char *VERT_SRC =
     "}\n";
 
 static const char *FRAG_SRC =
+    "#version 300 es\n"
     "precision mediump float;\n"
-    "varying vec3  v_normal;\n"
-    "varying float v_mat_id;\n"
+    "in vec3  v_normal;\n"
+    "in float v_mat_id;\n"
     "uniform vec3  u_light_dir;\n"
     "uniform vec3  u_mat_color;\n"
+    "out vec4 frag_color;\n"
     "void main() {\n"
     /* Back-face culling is off (see renderer_create), so a triangle can be
      * seen from its rear (viewed from inside geometry/a bot box in noclip
@@ -49,7 +55,7 @@ static const char *FRAG_SRC =
     "  float diff    = max(dot(n, u_light_dir), 0.0);\n"
     "  float ambient = 0.3;\n"
     "  vec3 color    = u_mat_color * (ambient + diff * 0.7);\n"
-    "  gl_FragColor  = vec4(color, 1.0);\n"
+    "  frag_color    = vec4(color, 1.0);\n"
     "}\n";
 #else
 static const char *VERT_SRC =
