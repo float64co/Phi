@@ -492,6 +492,72 @@ An in-browser editor for creating and modifying discrete mesh objects. The octre
 world remains for static terrain; mesh objects are a new entity class that floats
 above it, can be transformed, and participates in physics.
 
+### Status: non-interactive foundation landed, editor itself not started
+
+The **non-interactive foundation** this phase depends on is done and build-
+verified on all three targets (wasm/native/win32) — deliberately scoped this
+way rather than attempting the whole phase at once, since the interactive
+editor (UI system, gizmos, picking, editing operations, fracturing, physics)
+involves real design decisions that need a conversation, not autonomous
+implementation:
+
+- **cgltf** (single-header C99 glTF 2.0 parser, MIT, vendored at
+  `client/cgltf.h`) — the Hard Architectural Decisions table already named
+  this as the intended parser, so it's a pre-approved dependency, not a new
+  one. Confirmed compiling cleanly with gcc, MinGW-w64, and emcc.
+- **Half-edge (winged-edge) mesh structure** (`client/halfedge.c`/`.h`) — the
+  standard textbook formulation (same family Blender/most mesh editors use
+  internally), scoped to triangles only for now (n-gon support isn't
+  exercised yet). Twin-edge lookup is a linear scan, O(n) per edge add — fine
+  for this phase's small test assets, flagged honestly as something a real
+  editor-scale mesh would want a hash map for instead. Verified via a
+  standalone test on a unit cube: correct vertex/face/edge counts (8/12/36),
+  zero boundary edges (a closed 2-manifold), every twin relationship checked
+  both symmetric AND geometrically opposite (not just structurally
+  plausible), and an exact round-trip through build → flatten.
+- **glTF load/save** (`client/halfedge_gltf.c`/`.h`) — loads mesh 0/primitive
+  0's POSITION + indices via cgltf into a HalfEdgeMesh; saves by flattening
+  back to a hand-written minimal single-primitive glTF (JSON text + a
+  sibling `.bin`, cgltf itself is read-only). Verified with a real
+  load → save → reload round-trip through the actual cgltf parser (not just
+  hand-rolled test data) against `assets/cube.gltf` (a hand-authored,
+  8-vertex/12-triangle unit cube test asset, generated via a one-off Python
+  script) — positions and face topology matched exactly.
+- **Quaternion → rotation matrix** (`client/meshobject.c`'s `quat_to_mat4`) —
+  verified numerically before use (identity in → identity out; a known
+  90-degree rotation checked against the exact expected axis mapping;
+  determinant 1 confirmed, i.e. a proper rotation with no skew/reflection),
+  matching this codebase's established bar for matrix/rotation code (see
+  `renderer.c`'s `mat4_inverse`).
+- **MeshObject rendering**: a minimal `MeshObject` entity (id, position,
+  quaternion orientation, `RenderMesh`, `is_static` — deliberately without
+  the `ConvexHull`/Bullet physics field from the original sketch below,
+  since Phase 2 owns physics and a placeholder field would just be dead
+  weight) loads `assets/cube.gltf` at startup and renders through the
+  *existing* G-buffer geometry pass (`renderer_draw_mesh_object`, sharing
+  the same shader every other draw call uses) as a fixed, static, non-
+  interactive object. Verified on native via a deterministic diagnostic
+  camera override (the real gameplay camera's position depends on physics/
+  network timing, so it can't be relied on to actually be looking at the
+  object) plus a coarse object-id framebuffer scan — consistent across
+  repeated runs once the test object was moved clear of ground-level bot
+  traffic (an early run intermittently showed 0 visibility hits; root-
+  caused to a bot occasionally standing in the direct camera-to-object line
+  of sight, not a rendering bug — confirmed via debug output showing
+  identical camera/MVP math every run, only the occluding object-id
+  differing). The wasm build embeds `assets/` directly into the module via
+  `--embed-file` (Makefile) so `fopen("assets/cube.gltf")` resolves the same
+  way native's real filesystem access does — confirmed functionally (not
+  just via the build succeeding) by running the actual embedded-FS + cgltf
+  path under Node with the environment restriction temporarily lifted, since
+  a plain text search of the minified output isn't a reliable way to confirm
+  embedded binary data is really there.
+
+**Not started**: the native UI system (DNA/RNA property system, SDF font
+widget rendering, panel layout — see below), transform gizmos, ray-vs-mesh
+picking, extrude/inset/loop-cut editing operations, PBR material assignment,
+Voronoi fracture tooling, and Bullet physics integration for mesh objects.
+
 ### Architecture
 
 A new `MeshObject` entity type sits alongside `Player` and `Rocket` in the game
