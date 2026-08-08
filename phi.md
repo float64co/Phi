@@ -324,11 +324,17 @@ class SSAO(phi.Pass):
       portable `phi_gl_get_proc` abstraction, no Linux-specific code)
       worked with zero changes, and the center-pixel readback came back
       pixel-identical to the Linux native build — `(90,90,99)` on both,
-      despite running on entirely different OS/GPU/driver stacks. Scoped
-      to windowing + GL context + rendering only, matching how the Linux
+      despite running on entirely different OS/GPU/driver stacks. Started
+      as windowing + GL context + rendering only, matching how the Linux
       native backend also got a rendering-only milestone before input/
-      networking followed — Win32 keyboard/mouse (WndProc) and Winsock
-      networking are separate, unstarted follow-on work.
+      networking followed — **since then, Win32 keyboard/mouse (WndProc
+      forwarding to `input_native_handle_event`, verified with a
+      `PostMessageA`-based synthetic-input test harness: real player
+      movement) and Winsock networking (a port of `ws_client_native.c`
+      onto Winsock2, SHA1 via Windows' own CNG/BCrypt API instead of
+      OpenSSL since this MinGW install doesn't have it, verified against
+      the real server the same way as Linux) have both landed** — Windows
+      native now has input/rendering/networking parity with Linux native.
 - [x] Deferred renderer with G-buffer writing and basic lighting pass —
       **native only** (see below); wasm still renders forward, unaffected
 - [x] `readPixels` object ID selection working — **native only** (see below)
@@ -359,12 +365,11 @@ the `@phi.render_pass` insertion-point system are all still unstarted —
 this is the minimum pipeline the rest builds on, not the finished thing.
 
 **Effort:** 5–7 weeks *(platform abstraction across three targets
-(wasm/Linux-native/Windows-native), real networking on Linux native, the
-wasm WebGL2 upgrade, CI check, and a native-only (Linux + Windows)
-deferred renderer/G-buffer core: done — see the scope-split note above
-for what "done" means here. Remaining: Win32 input + Winsock networking
-(Windows native is windowing/rendering-only so far), extending the
-G-buffer to wasm now that WebGL2 makes it possible, macOS (explicitly
+(wasm/Linux-native/Windows-native) — all with real input and real
+networking now, not just Linux — the wasm WebGL2 upgrade, CI check, and
+a native-only (Linux + Windows) deferred renderer/G-buffer core: done —
+see the scope-split note above for what "done" means here. Remaining:
+extending the G-buffer to wasm now that WebGL2 makes it possible, macOS (explicitly
 deferred, no access), and everything this phase's G-buffer enables but
 doesn't itself implement — shadows, transparency, TAA, bloom, FXAA, the
 `@phi.render_pass` insertion-point system.)*
