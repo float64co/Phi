@@ -303,9 +303,13 @@ class SSAO(phi.Pass):
       GLES2/WebGL1 path. Verified end to end on Linux/WSL2 (Mesa/llvmpipe):
       real simulation ticks, `glReadPixels` confirms lit-geometry output
       (not a black frame), and a synthetic X11 keypress moves the player.
-      Native networking is still an offline-only stub (see Phase 0's
-      networking abstraction table) — no BSD-socket WebSocket client yet,
-      so native play is single-player/bots-only for now.
+      Native networking now works too — `client/ws_client_native.h`/`.c`
+      is a real RFC 6455 client over BSD sockets (handshake, masked
+      client→server framing, non-blocking per-frame poll), verified
+      against the actual Python server: full handshake, `PKT_HELLO`
+      round-trip, and a 100KB+ `PKT_MAP_FULL` correctly received. wss://
+      (TLS) isn't implemented — `ws://` only, matching what the local dev
+      server itself speaks.
 - [ ] `glext.h` GL loading verified on Linux, Windows, macOS — Linux only so far
 - [x] Deferred renderer with G-buffer writing and basic lighting pass —
       **native only** (see below); wasm still renders forward, unaffected
