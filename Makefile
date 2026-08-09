@@ -47,10 +47,11 @@ COMMON_SRCS := \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c            \
+	$(SRCDIR)/area_tree.c     \
 	$(SRCDIR)/mp_port.c       \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test
 
 all: wasm native
 
@@ -181,6 +182,22 @@ mesh_edit_test: $(OUT_MESH_EDIT_TEST)
 $(OUT_MESH_EDIT_TEST): $(MESH_EDIT_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(MESH_EDIT_TEST_SRCS) -o $(OUT_MESH_EDIT_TEST) -lm
 	@echo "mesh_edit_test build complete -> $(OUT_MESH_EDIT_TEST)"
+
+# area_tree.c (Blender-style area border resize/split/join) self-test --
+# same no-GL-dependency rationale as mesh_edit_test above; built with
+# AddressSanitizer since this module does its own malloc/free tree
+# surgery (area_tree_split/join_with_sibling) and a leak or use-after-free
+# here would otherwise only show up as a slow crash much later, deep
+# inside ui.c's real GL rendering.
+AREA_TREE_TEST_SRCS := $(SRCDIR)/area_tree_test_main.c $(SRCDIR)/area_tree.c
+OUT_AREA_TREE_TEST   := $(BUILDDIR)/area_tree_test
+
+area_tree_test: $(OUT_AREA_TREE_TEST)
+	./$(OUT_AREA_TREE_TEST)
+
+$(OUT_AREA_TREE_TEST): $(AREA_TREE_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -g -fsanitize=address -Wall -Wextra -I$(SRCDIR) $(AREA_TREE_TEST_SRCS) -o $(OUT_AREA_TREE_TEST) -lm
+	@echo "area_tree_test build complete -> $(OUT_AREA_TREE_TEST)"
 
 # Voronoi fracture (client/fracture.c) topology/volume self-test -- same
 # no-GL-dependency rationale as mesh_edit_test above.

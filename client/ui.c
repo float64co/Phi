@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "area_tree.h"
 #include "meshobject.h"
 #include "renderer.h"
 #include "gbuffer.h"
@@ -132,6 +133,29 @@ typedef struct {
     int   ctx_menu_open;
     float ctx_menu_x, ctx_menu_y;
     CtxMenuAction ctx_menu_pending_action;  /* see ui_poll_context_menu_action() */
+
+    /* Blender-style area border drag-to-resize (see area_tree_find_border_hit/
+     * ui_update_area_drag) -- NULL when not resizing. Set on a press
+     * inside a border's hit strip (ui_on_mouse_button), updated every
+     * frame via ui_update_area_drag (called from main.c's main_loop, the
+     * same "continuous per-frame update while a button stays held" shape
+     * the gizmo drag already established), cleared on release. */
+    Area *resizing_area;
+    /* Purely visual -- which border (if any) to highlight because the
+     * mouse is over it right now, not being dragged. Updated by
+     * ui_on_mouse_move, which main.c now actually calls every frame
+     * (it used to be declared but never called at all). */
+    Area *hover_border;
+
+    /* Blender-style Area menu (Split Horizontal/Vertical, Join with
+     * Sibling) -- opened by right-clicking a panel's own type-switcher
+     * icon, the same spot Blender's own per-area options menu lives
+     * behind. A menu-driven equivalent of Blender's corner-drag gesture,
+     * not a pixel-for-pixel replication of it -- see phi.md's note on
+     * this tradeoff. */
+    int   area_menu_open;
+    Area *area_menu_target;
+    float area_menu_x, area_menu_y;
 } UIState;
 
 static UIState g_ui;
@@ -319,6 +343,28 @@ void ui_layout(int window_w, int window_h) {
     if (!g_ui.root) return;
     layout_area(g_ui.root, 0.0f, UI_TOP_CHROME_H, (float)window_w, (float)window_h - UI_TOP_CHROME_H);
 }
+
+/* ---- Area tree structural edits: split (create) / join (delete) ----
+ * The actual tree mutation (area_tree_split/join_with_sibling/etc.) lives
+ * in area_tree.c/.h, a GL-free module extracted so it can be unit-tested
+ * standalone -- ui.c just owns the interactive/visual side (drag state,
+ * hover highlighting, the Area menu) and calls into it. */
+
+/* Called once per frame from main.c's main_loop (mirrors the gizmo drag
+ * block's own shape exactly): while g_ui.resizing_area is set and the
+ * button's still down, keep the border glued to the mouse; on release,
+ * end the drag. A no-op, including not touching anything, when nothing's
+ * being resized. */
+void ui_update_area_drag(int mouse_x, int mouse_y, int lmb_down) {
+    if (!g_ui.resizing_area) return;
+    if (lmb_down) {
+        area_tree_resize_to_mouse(g_ui.resizing_area, mouse_x, mouse_y);
+    } else {
+        g_ui.resizing_area = NULL;
+    }
+}
+
+int ui_is_resizing_area(void) { return g_ui.resizing_area != NULL; }
 
 static SvgIcon *icon_for_panel(PanelType t) {
     switch (t) {
@@ -991,6 +1037,40 @@ void ui_render(const UIRenderContext *ctx) {
     draw_branding_bar();
     draw_menu_row();
 
+    /* Border resize highlight -- actively-dragged border wins over a
+     * merely-hovered one if somehow both are set (shouldn't happen, but
+     * dragging is the more truthful state to show if it does). No OS
+     * cursor-shape change (e.g. a resize cursor icon) -- this codebase has
+     * no cursor-shape API wired up on any platform yet, flagged rather
+     * than silently assumed; this accent line is the whole affordance for
+     * now. */
+    {
+        Area *hl = g_ui.resizing_area ? g_ui.resizing_area : g_ui.hover_border;
+        if (hl) {
+            if (hl->kind == AREA_SPLIT_H) {
+                float bx = hl->x + hl->w * hl->split;
+                ui_rect(bx - 1.0f, hl->y, 2.0f, hl->h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.9f);
+            } else {
+                float by = hl->y + hl->h * hl->split;
+                ui_rect(hl->x, by - 1.0f, hl->w, 2.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.9f);
+            }
+        }
+    }
+
+    if (g_ui.area_menu_open && g_ui.area_menu_target) {
+        float menu_w = 170.0f, row_h = 24.0f;
+        int can_join = area_tree_find_parent(g_ui.root, g_ui.area_menu_target) != NULL;
+        static const char *items_full[] = { "Split Horizontal", "Split Vertical", "Join with Sibling" };
+        int n = can_join ? 3 : 2;   /* root has no sibling to join with -- just don't show the row rather than show-then-reject-it */
+        float menu_h = row_h * n;
+        ui_rect(g_ui.area_menu_x, g_ui.area_menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
+        ui_rect(g_ui.area_menu_x, g_ui.area_menu_y, menu_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
+        for (int i = 0; i < n; i++) {
+            ui_text_draw(g_ui.area_menu_x + 10.0f, g_ui.area_menu_y + i * row_h + 4.0f, items_full[i],
+                         g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+        }
+    }
+
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
         static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
@@ -1022,6 +1102,20 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
     type_icon_rect(a, &bx, &by);
     if (button == 0 && pressed && point_in_rect((float)x, (float)y, bx, by, UI_TYPE_ICON_SIZE, UI_TYPE_ICON_SIZE)) {
         a->type_menu_open = !a->type_menu_open;
+        return 1;
+    }
+    /* Right-click on the same icon opens the Blender-style Area menu
+     * (Split Horizontal/Vertical, Join with Sibling) -- the real corner-
+     * drag gesture Blender itself uses is a menu-driven equivalent of,
+     * not a pixel-for-pixel replication (see phi.md's note on this
+     * tradeoff). Same trigger spot, different button, as the type
+     * dropdown right above. */
+    if (button == 1 && pressed && point_in_rect((float)x, (float)y, bx, by, UI_TYPE_ICON_SIZE, UI_TYPE_ICON_SIZE)) {
+        g_ui.area_menu_open = 1;
+        g_ui.area_menu_target = a;
+        g_ui.area_menu_x = (float)x;
+        g_ui.area_menu_y = (float)y;
+        a->type_menu_open = 0;   /* the two menus are mutually exclusive on the same icon */
         return 1;
     }
     if (a->type_menu_open) {
@@ -1180,6 +1274,30 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
         if (button == 1 && pressed) { g_ui.ctx_menu_open = 0; return 1; }
     }
 
+    if (g_ui.area_menu_open && g_ui.area_menu_target) {
+        float menu_w = 170.0f, row_h = 24.0f;
+        int can_join = area_tree_find_parent(g_ui.root, g_ui.area_menu_target) != NULL;
+        int n = can_join ? 3 : 2;
+        float menu_h = row_h * n;
+        if (button == 0 && pressed) {
+            if (point_in_rect((float)x, (float)y, g_ui.area_menu_x, g_ui.area_menu_y, menu_w, menu_h)) {
+                int row = (int)(((float)y - g_ui.area_menu_y) / row_h);
+                Area *target = g_ui.area_menu_target;
+                if (row == 0) {
+                    area_tree_split(target, AREA_SPLIT_H);
+                } else if (row == 1) {
+                    area_tree_split(target, AREA_SPLIT_V);
+                } else if (row == 2 && can_join) {
+                    area_tree_join_with_sibling(g_ui.root, target);
+                }
+            }
+            g_ui.area_menu_open = 0;
+            g_ui.area_menu_target = NULL;
+            return 1;
+        }
+        if (button == 1 && pressed) { g_ui.area_menu_open = 0; g_ui.area_menu_target = NULL; return 1; }
+    }
+
     /* Asset Browser text field blur: any click that doesn't land inside
      * whichever field (search/edit_name/edit_tags) currently owns focus
      * drops that focus -- same click-away-dismisses convention the
@@ -1208,12 +1326,40 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
         if (!inside) ab->focus = AB_FOCUS_NONE;
     }
 
+    /* Border drag-to-resize starts here (checked before the top-chrome-
+     * strip early return below, and before the recursive leaf hit-test,
+     * since a border press is a distinct gesture that should win over
+     * whatever's directly underneath it -- same "grabbing wins over
+     * what's behind it" priority the gizmo handles already get over
+     * scene-object picking). Only the press matters here; the drag itself
+     * is continuous, driven every frame by ui_update_area_drag (called
+     * from main.c), same split from click-edge to per-frame-continuation
+     * the gizmo drag already uses. */
+    if (button == 0 && pressed && g_ui.root) {
+        Area *border = area_tree_find_border_hit(g_ui.root, x, y);
+        if (border) {
+            g_ui.resizing_area = border;
+            return 1;
+        }
+    }
+
     if (y < (int)UI_TOP_CHROME_H) return 1;  /* branding bar + menu row claim the whole strip, nothing to route through it yet */
     if (g_ui.root && hit_test_area(g_ui.root, x, y, button, pressed, ctx)) return 1;
     return 0;
 }
 
-void ui_on_mouse_move(int x, int y) { (void)x; (void)y; /* hover states are a follow-up, not needed for this pass */ }
+void ui_on_mouse_move(int x, int y) {
+    /* Purely visual hover highlight for resize borders -- see
+     * area_tree_find_border_hit/ui_render's border-highlight block. Skipped
+     * entirely while a drag or any menu is already in progress, so hover
+     * detection doesn't fight with (or redundantly recompute over) an
+     * already-active interaction. */
+    if (g_ui.resizing_area || g_ui.ctx_menu_open || g_ui.area_menu_open || !g_ui.root) {
+        g_ui.hover_border = NULL;
+        return;
+    }
+    g_ui.hover_border = area_tree_find_border_hit(g_ui.root, x, y);
+}
 
 void ui_open_scene_context_menu(int x, int y) {
     g_ui.ctx_menu_open = 1;

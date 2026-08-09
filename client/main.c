@@ -277,6 +277,13 @@ static void main_loop(void *userdata) {
     int cw, ch;
     phi_platform_get_window_size(&cw, &ch);
     ui_layout(cw, ch);
+    /* Feeds this frame's cursor position into ui.c's border-hover
+     * highlight (see ui_on_mouse_move) -- previously declared but never
+     * actually called anywhere, since nothing needed live hover state
+     * before area-border resize did. Layout must be current first (just
+     * above) since hover hit-testing reads each Area's freshly-computed
+     * x/y/w/h. */
+    ui_on_mouse_move(g_inp.mouse_x, g_inp.mouse_y);
 
     static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
     float sky[3];
@@ -369,6 +376,11 @@ static void main_loop(void *userdata) {
             gizmo_end_drag();
         }
     }
+
+    /* Area border drag-to-resize -- same continuous per-frame shape as
+     * the gizmo drag block just above, driving ui.c's own resize state
+     * instead of the gizmo's. A no-op whenever nothing's being resized. */
+    ui_update_area_drag(g_inp.mouse_x, g_inp.mouse_y, g_inp.lmb_down);
 
     /* Scene context-menu action, drained once per frame like the click
      * flags above. Only Add Mesh Object / Delete / Extrude / Inset / Loop

@@ -159,6 +159,15 @@ void ui_render(const UIRenderContext *ctx);
 int  ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderContext *ctx);
 void ui_on_mouse_move(int x, int y);
 
+/* Blender-style area border drag-to-resize -- call once per frame (same
+ * shape as the gizmo drag block in main.c) with the current mouse
+ * position and whether LMB is held. No-op if nothing's being resized.
+ * ui_is_resizing_area() lets main.c skip its own scene-click/gizmo-drag
+ * handling for a frame where a border drag is in progress (a resize
+ * shouldn't also register as a scene click underneath it). */
+void ui_update_area_drag(int mouse_x, int mouse_y, int lmb_down);
+int  ui_is_resizing_area(void);
+
 /* Opens the 3D scene's right-click context menu at (x,y) — called from
  * main.c when a right-click lands inside the Scene panel's content area,
  * not its chrome. See ui.c's context-menu section. */

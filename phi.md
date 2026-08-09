@@ -1944,6 +1944,84 @@ just a plan. Two decisions it directly informed:
   see below and Phase 6 — because large graphs need C++ to own the
   topology, not just the rendering.
 
+#### Blender-style area resize/split/join, 2026-08-10
+
+The "Blender's recursive area-split model, not Zenith's simpler fixed-slot
+dock, deliberately" design goal stated at the top of this section (and in
+`ui.c`'s own header comment since the very first version) had never
+actually been built beyond the split *tree data structure* itself — the
+default layout was computed once at startup and then fixed: no drag-to-
+resize, no way to split an area into two, no way to join two back
+together. All three now exist.
+
+**Resize** is the real gesture, not an approximation: press-and-drag the
+border between two split children (a `AREA_BORDER_HIT_PX`-wide hit strip
+either side of it), and the split fraction tracks the mouse continuously.
+Architecturally this reuses the exact shape the translate gizmo's own
+drag already established — recompute from the absolute mouse position
+every frame rather than accumulating a delta (immune to a missed mouse-
+move event), start on a discrete click, continue via a per-frame call
+from `main.c`'s `main_loop` (`ui_update_area_drag`, called right next to
+the gizmo's own per-frame drag update) — because that pattern was already
+proven correct once in this codebase, not reinvented. A thin accent line
+highlights the border on hover too (`ui_on_mouse_move`, which existed as
+a declared-but-never-called stub before this — nothing needed live hover
+state until this did). No OS cursor-shape change (a resize-arrow icon):
+this codebase has no cursor-shape API wired up on any platform yet, and
+that's flagged rather than silently assumed — the accent line is the
+whole affordance for now.
+
+**Split (create) and join (delete)** are a menu-driven equivalent of
+Blender's own corner-drag gesture, not a pixel-for-pixel replication of
+it — a deliberate scope tradeoff, since faithfully replicating corner hit
+zones, direction detection, and a live drag-preview line is real
+additional interaction-design work with its own edge cases, and Blender
+itself also exposes the identical operations through a plain right-click
+"Area" menu as an alternative to dragging, so this isn't inventing a
+non-Blender interaction, just picking the simpler of two real ones.
+Right-clicking a panel's own type-switcher icon (mutually exclusive with
+left-click's type dropdown on the same icon) opens that menu: Split
+Horizontal, Split Vertical, and Join with Sibling (hidden, not just
+disabled, when the target has no parent — i.e. it's the sole area filling
+the whole window — since there is nothing to join it with).
+
+The tree surgery itself mutates a target `Area` **in place** (leaf
+becomes a split with two new leaf children; a split collapses back into
+a leaf) rather than splicing a new node into a parent — deliberately,
+since `Area` has no parent pointer (nothing in this codebase needed one
+before this), so in-place mutation means every existing raw `Area*`
+anywhere, `g_ui.root` included, stays valid across a split/join with no
+pointer fixup needed. A freshly split area starts as a copy of whatever
+you split (matches Blender's own default); a join keeps whichever side
+you actually right-clicked, since a menu click can't express Blender's
+own "which direction did you drag" disambiguation.
+
+**Extracted into `client/area_tree.c`/`.h`**, a new module with zero GL
+dependency — deliberately split out of `ui.c` (which is GL/rendering-
+heavy throughout) so this logic could be unit-tested standalone the same
+way `mesh_edit.c`'s topology mutations already are, rather than only
+being reachable through a live window this sandbox can't open. `ui.c`
+keeps the interactive/visual side (drag state, hover highlighting, the
+Area menu itself) and calls into `area_tree.c` for the actual tree edits.
+
+Verified: `client/area_tree_test_main.c` (`make area_tree_test`, built
+with AddressSanitizer since this module does its own `malloc`/`free` tree
+surgery) — 21 checks covering split producing two leaves of the original
+panel type, `find_parent` including the "root has no parent" case, border
+hit-testing against a hand-laid-out tree (exact position, within the hit
+tolerance, and correctly missing both outside the split's own axis-
+perpendicular range and far from the border), resize-to-mouse including
+both clamp directions, a **nested** split resolving to the correct inner
+border instead of the outer one, join collapsing a split back to a leaf
+with the right-clicked side's panel type and cleared child pointers, join
+on a parentless root being a safe no-op, and `area_tree_free` on both a
+real multi-level subtree and `NULL` — all pass clean under ASan (no leak/
+use-after-free/double-free reports). All three build targets (native/
+wasm/win32) still link clean. Live click-through (actually dragging a
+border, opening the Area menu, watching a split appear) is still not
+verified in this sandbox, same `XOpenDisplay()` limitation as everything
+else in this session needing a real window.
+
 #### Property System (DNA/RNA analogue)
 
 ```c
