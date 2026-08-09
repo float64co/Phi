@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Qek</title>
+<title>Phi</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -181,7 +181,7 @@
 <body>
 
 <div id="loading">
-  <div id="loading-title">QEK</div>
+  <div id="loading-title">PHI</div>
   <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
   <div id="loading-status">Initialising...</div>
 </div>
@@ -189,8 +189,8 @@
 <canvas id="canvas"></canvas>
 
 <div id="overlay" style="display:none">
-  <h1>QEK</h1>
-  <p>Sauerbraten-style octree arena · Rocket jumping · WebAssembly</p>
+  <h1>PHI</h1>
+  <p>Click to enable mouse-look in the Scene panel (optional — the editor itself doesn't need it)</p>
   <table class="controls-table">
     <tr><td>WASD</td><td>Move</td></tr>
     <tr><td>SPACE</td><td>Jump</td></tr>
@@ -244,14 +244,16 @@ document.getElementById('canvas').addEventListener('contextmenu', function(e) {
   e.preventDefault();
 });
 
-// Pointer lock state → tell C code
+// Pointer lock state → tell C code. Losing pointer lock (Escape, alt-tab,
+// clicking a panel) no longer re-shows the "CLICK TO PLAY" overlay — Phi is
+// an editor now, not an FPS game, and the overlay covering the whole UI on
+// every unlock is exactly the "pause menu getting in the way" this session
+// was asked to fix. The overlay still exists as an opt-in way to re-engage
+// mouse-look (see the play button), it just isn't a mandatory gate anymore.
 document.addEventListener('pointerlockchange', function() {
   var locked = document.pointerLockElement === document.getElementById('canvas');
   if (Module._input_set_pointer_locked) {
     Module._input_set_pointer_locked(locked ? 1 : 0);
-  }
-  if (!locked) {
-    document.getElementById('overlay').style.display = 'flex';
   }
 });
 
@@ -300,9 +302,11 @@ var Module = {
 
   onRuntimeInitialized: function() {
     _setLoadProgress(100, 'Ready');
+    /* Just dismiss the loading screen -- straight into the editor, not a
+     * blocking "CLICK TO PLAY" gate over it (see the pointerlockchange
+     * comment above for why that changed). */
     setTimeout(function() {
       document.getElementById('loading').style.display = 'none';
-      document.getElementById('overlay').style.display = 'flex';
     }, 320);
     // WebSocket connection is initiated from C (main.c EM_ASM block)
   },

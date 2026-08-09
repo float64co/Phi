@@ -27,7 +27,19 @@
 #define UI_PHI       1.6180339887f
 #define UI_INV_PHI   0.6180339887f   /* 1/PHI == PHI-1, the "larger" golden fraction */
 
-#define UI_BAR_H      48.0f   /* branding bar height */
+/* Chrome sizing derived from a single base unit via PHI, the same relationship
+ * a separate reference project used for its own UI constants (FONT_SIZE ->
+ * WIDGET_H -> HEADER_H, each the last times PHI or SQRT_PHI) — golden ratio
+ * "with respect to the whole layout" means chrome heights are related to
+ * each other and to the font size by the same ratio the panel splits use,
+ * not an arbitrary flat pixel count. UI_MENU_H (the menu row) is the base
+ * font size stepped up once by PHI; UI_BAR_H (the branding row above it) is
+ * stepped up once more — shorter than the original flat 48px branding bar,
+ * per the explicit request to reduce it. */
+#define UI_FONT_SIZE  14.0f
+#define UI_MENU_H     (UI_FONT_SIZE * UI_PHI)         /* ~22.65 */
+#define UI_BAR_H      (UI_MENU_H   * UI_PHI)          /* ~36.65 */
+#define UI_TOP_CHROME_H (UI_BAR_H + UI_MENU_H)        /* branding row + menu row together */
 #define UI_PANEL_PAD  10.0f
 #define UI_TYPE_ICON_SIZE 20.0f  /* per-panel corner type-switcher button */
 

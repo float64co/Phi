@@ -313,7 +313,7 @@ void ui_layout(int window_w, int window_h) {
     g_ui.screen_w = window_w;
     g_ui.screen_h = window_h;
     if (!g_ui.root) return;
-    layout_area(g_ui.root, 0.0f, UI_BAR_H, (float)window_w, (float)window_h - UI_BAR_H);
+    layout_area(g_ui.root, 0.0f, UI_TOP_CHROME_H, (float)window_w, (float)window_h - UI_TOP_CHROME_H);
 }
 
 static SvgIcon *icon_for_panel(PanelType t) {
@@ -329,61 +329,115 @@ static SvgIcon *icon_for_panel(PanelType t) {
     }
 }
 
-/* ---- Branding bar ----
- * Design language adapted from a real site's actual page source (fetched
- * and read this session, not guessed at): white/light background, a thin
- * bottom border, and — the distinctive part — a bold-italic brand mark
- * rendered as a colored-background "pill" with white text, rather than a
- * logo image. That structural pattern is what's reused here; the specific
- * brand text/name and accent color are Phi's own, not copied. IBM Plex
- * Sans tops out at Bold (700) — there's no 900/Black weight in the family
- * at all, so BoldItalic is the heaviest/closest available, not a
- * corner-cut substitution for something that exists. */
-#define UI_BG_R 0.96f
-#define UI_BG_G 0.97f
-#define UI_BG_B 0.98f
-#define UI_BORDER_R 0.88f
-#define UI_BORDER_G 0.89f
-#define UI_BORDER_B 0.91f
-/* Warm gold/amber — deliberately distinct from the reference site's sky-
- * blue pill, and ties into the golden-ratio identity this whole UI is
- * built around (UI_PHI). */
-#define UI_ACCENT_R 0.80f
-#define UI_ACCENT_G 0.58f
-#define UI_ACCENT_B 0.12f
-#define UI_TEXT_DARK_R 0.15f
-#define UI_TEXT_DARK_G 0.16f
-#define UI_TEXT_DARK_B 0.18f
+/* ---- Palette ----
+ * The branding bar (only) copies https://float64co.github.io's actual
+ * color palette, read from its real page source (`--bg`/`--acc`/etc. CSS
+ * custom properties, and the brand mark's own `#87CEEB` pill color) —
+ * this is explicitly a Float64 project, so this is Phi's own brand
+ * identity, not someone else's being borrowed. Every OTHER color in this
+ * file (menu row, panel chrome, panel content, dropdowns, context menu)
+ * uses a separate reference project's actual dark-theme palette instead
+ * (`col::PANEL_BG`/`WIDGET`/`TEXT`/etc. from that project's DrawBatch.h,
+ * read this session) — a deliberate two-tier scheme: light branded top
+ * bar over a dark professional editor body, the same split VSCode/Blender
+ * and most serious creative tools use, not a mismatch. */
+#define UI_BRAND_BG_R 0.961f
+#define UI_BRAND_BG_G 0.969f
+#define UI_BRAND_BG_B 0.980f
+#define UI_BRAND_BORDER_R 0.878f
+#define UI_BRAND_BORDER_G 0.894f
+#define UI_BRAND_BORDER_B 0.918f
+#define UI_BRAND_ACCENT_R 0.0f      /* float64's --acc: #00bfff */
+#define UI_BRAND_ACCENT_G 0.749f
+#define UI_BRAND_ACCENT_B 1.0f
+#define UI_BRAND_PILL_R 0.529f      /* float64's own brand-mark pill: #87CEEB */
+#define UI_BRAND_PILL_G 0.808f
+#define UI_BRAND_PILL_B 0.922f
+#define UI_BRAND_TEXT_R 0.2f        /* float64's --body: #333333 */
+#define UI_BRAND_TEXT_G 0.2f
+#define UI_BRAND_TEXT_B 0.2f
+
+/* Dark editor-body palette, values copied from that reference project's
+ * col:: namespace (DrawBatch.h) — same 0-255 numbers, divided by 255. */
+#define UI_ZEN_PANEL_BG_R 0.094f
+#define UI_ZEN_PANEL_BG_G 0.094f
+#define UI_ZEN_PANEL_BG_B 0.094f
+#define UI_ZEN_PANEL_BG_A 0.902f
+#define UI_ZEN_PANEL_HD_R 0.071f
+#define UI_ZEN_PANEL_HD_G 0.071f
+#define UI_ZEN_PANEL_HD_B 0.071f
+#define UI_ZEN_WIDGET_R 0.141f
+#define UI_ZEN_WIDGET_G 0.141f
+#define UI_ZEN_WIDGET_B 0.141f
+#define UI_ZEN_WIDGET_H_R 0.188f    /* hovered */
+#define UI_ZEN_WIDGET_H_G 0.188f
+#define UI_ZEN_WIDGET_H_B 0.188f
+#define UI_ZEN_ACCENT_R 0.0f        /* active/accent */
+#define UI_ZEN_ACCENT_G 0.478f
+#define UI_ZEN_ACCENT_B 0.800f
+#define UI_ZEN_TEXT_R 0.980f
+#define UI_ZEN_TEXT_G 0.980f
+#define UI_ZEN_TEXT_B 0.996f
+#define UI_ZEN_TEXT_DIM_R 0.725f
+#define UI_ZEN_TEXT_DIM_G 0.725f
+#define UI_ZEN_TEXT_DIM_B 0.765f
+#define UI_ZEN_BORDER_R 0.157f
+#define UI_ZEN_BORDER_G 0.157f
+#define UI_ZEN_BORDER_B 0.157f
 
 static void draw_branding_bar(void) {
-    ui_rect(0, 0, (float)g_ui.screen_w, UI_BAR_H, UI_BG_R, UI_BG_G, UI_BG_B, 1.0f);
-    ui_rect(0, UI_BAR_H - 1.0f, (float)g_ui.screen_w, 1.0f, UI_BORDER_R, UI_BORDER_G, UI_BORDER_B, 1.0f);
+    ui_rect(0, 0, (float)g_ui.screen_w, UI_BAR_H, UI_BRAND_BG_R, UI_BRAND_BG_G, UI_BRAND_BG_B, 1.0f);
+    ui_rect(0, UI_BAR_H - 1.0f, (float)g_ui.screen_w, 1.0f, UI_BRAND_BORDER_R, UI_BRAND_BORDER_G, UI_BRAND_BORDER_B, 1.0f);
 
-    /* Brand mark pill, left-aligned, vertically centered in the bar. */
+    /* Brand mark pill, left-aligned, vertically centered in the (now
+     * golden-ratio-reduced, see UI_BAR_H) bar -- sized down proportionally
+     * from a fixed 26px so it still fits comfortably inside the shorter bar. */
     const char *brand = "\xCF\x86 Phi";  /* UTF-8 for U+03C6 GREEK SMALL LETTER PHI -- not in the
                                              ASCII 32-126 glyph range this atlas bakes, so it'll
                                              render as a blank/skipped glyph for now (see the
                                              font_text_draw loop's range check) -- "Phi" alone still
                                              reads fine; full Greek-letter glyph coverage is a small
                                              follow-up once non-ASCII ranges matter elsewhere too. */
-    float pill_pad_x = 14.0f, pill_pad_y = 8.0f;
-    float text_w = font_text_width(g_ui.font_brand, brand, 26.0f);
+    float brand_font = UI_BAR_H * 0.5f;   /* was a fixed 26px against a 48px bar -- same proportion, scaled to the new height */
+    float pill_pad_x = brand_font * 0.4f, pill_pad_y = brand_font * 0.22f;
+    float text_w = font_text_width(g_ui.font_brand, brand, brand_font);
     float pill_w = text_w + pill_pad_x * 2.0f;
-    float pill_h = 26.0f + pill_pad_y * 2.0f;
+    float pill_h = brand_font + pill_pad_y * 2.0f;
     float pill_x = 16.0f, pill_y = (UI_BAR_H - pill_h) * 0.5f;
-    ui_rect(pill_x, pill_y, pill_w, pill_h, UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
-    ui_text_draw(pill_x + pill_pad_x, pill_y + pill_pad_y - 3.0f, brand, g_ui.font_brand, 26.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+    ui_rect(pill_x, pill_y, pill_w, pill_h, UI_BRAND_PILL_R, UI_BRAND_PILL_G, UI_BRAND_PILL_B, 1.0f);
+    ui_text_draw(pill_x + pill_pad_x, pill_y + pill_pad_y - brand_font * 0.12f, brand, g_ui.font_brand, brand_font, 1.0f, 1.0f, 1.0f, 1.0f);
 
     /* Undo/redo, right-aligned (Zenith's icons, reused verbatim per
      * instruction). No real undo stack exists yet to drive these -- drawn
      * so the branding bar's layout is complete and they have a home,
      * functional wiring is follow-up work once there's something to undo. */
-    float btn = 24.0f, gap = 8.0f, right_pad = 16.0f;
+    float btn = UI_BAR_H * 0.5f, gap = 8.0f, right_pad = 16.0f;
     float redo_x = (float)g_ui.screen_w - right_pad - btn;
     float undo_x = redo_x - gap - btn;
     float icon_y = (UI_BAR_H - btn) * 0.5f;
-    ui_icon_draw(undo_x, icon_y, btn, g_ui.icon_undo, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 0.85f);
-    ui_icon_draw(redo_x, icon_y, btn, g_ui.icon_redo, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 0.85f);
+    ui_icon_draw(undo_x, icon_y, btn, g_ui.icon_undo, UI_BRAND_TEXT_R, UI_BRAND_TEXT_G, UI_BRAND_TEXT_B, 0.85f);
+    ui_icon_draw(redo_x, icon_y, btn, g_ui.icon_redo, UI_BRAND_TEXT_R, UI_BRAND_TEXT_G, UI_BRAND_TEXT_B, 0.85f);
+}
+
+/* Main menu row, directly under the branding bar — Zenith's dark palette,
+ * not float64's (see the palette comment above). Plain labels for now
+ * (File/Edit/View/Help, the standard desktop-app set) with no dropdown
+ * content yet — this proves the chrome has a place for a real menu system
+ * to land in, not a finished menu bar. */
+static void draw_menu_row(void) {
+    float y = UI_BAR_H;
+    ui_rect(0, y, (float)g_ui.screen_w, UI_MENU_H, UI_ZEN_PANEL_HD_R, UI_ZEN_PANEL_HD_G, UI_ZEN_PANEL_HD_B, 1.0f);
+    ui_rect(0, y + UI_MENU_H - 1.0f, (float)g_ui.screen_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
+
+    static const char *items[] = { "File", "Edit", "View", "Help" };
+    float x = 14.0f;
+    float text_y = y + (UI_MENU_H - UI_FONT_SIZE) * 0.35f;
+    for (int i = 0; i < (int)(sizeof(items) / sizeof(items[0])); i++) {
+        float w = font_text_width(g_ui.font_body, items[i], UI_FONT_SIZE) + 20.0f;
+        ui_text_draw(x + 10.0f, text_y, items[i], g_ui.font_body, UI_FONT_SIZE,
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        x += w;
+    }
 }
 
 /* ---- Per-area chrome: background, border, and the Blender-authentic
@@ -394,27 +448,27 @@ static int point_in_rect(float px, float py, float x, float y, float w, float h)
 }
 
 static void draw_area_chrome(Area *a) {
-    ui_rect(a->x, a->y, a->w, 1.0f, UI_BORDER_R, UI_BORDER_G, UI_BORDER_B, 1.0f);
-    ui_rect(a->x, a->y, 1.0f, a->h, UI_BORDER_R, UI_BORDER_G, UI_BORDER_B, 1.0f);
+    ui_rect(a->x, a->y, a->w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
+    ui_rect(a->x, a->y, 1.0f, a->h, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
 
     float bx = a->x + a->w - UI_TYPE_ICON_SIZE - 4.0f;
     float by = a->y + 4.0f;
     SvgIcon *icon = icon_for_panel(a->panel_type);
-    if (icon) ui_icon_draw(bx, by, UI_TYPE_ICON_SIZE, *icon, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 0.7f);
+    if (icon) ui_icon_draw(bx, by, UI_TYPE_ICON_SIZE, *icon, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 0.85f);
 
     if (a->type_menu_open) {
         float menu_w = 170.0f, row_h = 24.0f;
         float menu_h = row_h * PANEL_TYPE_COUNT;
         float menu_x = bx + UI_TYPE_ICON_SIZE - menu_w;
         float menu_y = by + UI_TYPE_ICON_SIZE + 2.0f;
-        ui_rect(menu_x, menu_y, menu_w, menu_h, 1.0f, 1.0f, 1.0f, 0.98f);
-        ui_rect(menu_x, menu_y, menu_w, 1.0f, UI_BORDER_R, UI_BORDER_G, UI_BORDER_B, 1.0f);
+        ui_rect(menu_x, menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
+        ui_rect(menu_x, menu_y, menu_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
         for (int i = 0; i < PANEL_TYPE_COUNT; i++) {
             float ry = menu_y + i * row_h;
             SvgIcon *ri = icon_for_panel((PanelType)i);
-            if (ri) ui_icon_draw(menu_x + 6.0f, ry + 3.0f, 18.0f, *ri, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 0.8f);
+            if (ri) ui_icon_draw(menu_x + 6.0f, ry + 3.0f, 18.0f, *ri, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.85f);
             ui_text_draw(menu_x + 30.0f, ry + 3.0f, PANEL_NAMES[i], g_ui.font_body, 13.0f,
-                         UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+                         UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         }
     }
 }
@@ -448,32 +502,54 @@ static void draw_panel_scene(Area *a, const UIRenderContext *ctx) {
     glDisable(GL_DEPTH_TEST);
 }
 
+/* Zebra-striped, full-panel-width row backgrounds — Blender's own list-row
+ * convention (rather than left-aligned bare text trailing off into blank
+ * space on the right, which read as "empty space to the right of the
+ * Outliner" against this panel's ~38%-of-window width). Row index is
+ * shared across every row-emitting section below via *row_index so the
+ * stripe alternates continuously (world mesh, then object, then players),
+ * not restarting per section. */
+static void outliner_row_bg(Area *a, float y, float row_h, int row_index) {
+    if (row_index % 2 == 1) {
+        ui_rect(a->x + 1.0f, y - 2.0f, a->w - 2.0f, row_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.5f);
+    }
+}
+
 static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
+    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
     float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
     float row_h = 20.0f;
-    ui_text_draw(x, y, "Outliner", g_ui.font_bold, 15.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+    int row_index = 0;
+    ui_text_draw(x, y, "Outliner", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     y += row_h + 6.0f;
 
     char line[128];
     if (ctx->world_mesh) {
+        outliner_row_bg(a, y, row_h, row_index++);
         snprintf(line, sizeof(line), "World Mesh (%d verts)", ctx->world_mesh->count);
-        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         y += row_h;
     }
     if (ctx->test_obj_loaded && ctx->test_obj) {
-        snprintf(line, sizeof(line), "MeshObject #%d", ctx->test_obj->id);
         int sel = (g_ui.selected_object_id == 4000u + (unsigned int)ctx->test_obj->id);
-        if (sel) ui_rect(x - 2.0f, y - 2.0f, a->w - UI_PANEL_PAD * 2.0f + 4.0f, row_h, UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 0.25f);
-        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+        if (sel) {
+            ui_rect(a->x + 1.0f, y - 2.0f, a->w - 2.0f, row_h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.35f);
+        } else {
+            outliner_row_bg(a, y, row_h, row_index);
+        }
+        row_index++;
+        snprintf(line, sizeof(line), "MeshObject #%d", ctx->test_obj->id);
+        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         y += row_h;
     }
     if (ctx->gs) {
         for (int i = 0; i < ctx->gs->num_players; i++) {
             const Player *p = &ctx->gs->players[i];
             if (!p->alive) continue;
+            outliner_row_bg(a, y, row_h, row_index++);
             snprintf(line, sizeof(line), "%s #%d%s", p->is_bot ? "Bot" : "Player", p->id,
                      p->id == (uint8_t)ctx->local_player_id ? " (you)" : "");
-            ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+            ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
             y += row_h;
             if (y > a->y + a->h - row_h) break;  /* no scrolling yet -- first pass, see phi.md */
         }
@@ -481,37 +557,38 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
 }
 
 static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
+    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
     float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
-    ui_text_draw(x, y, "Properties", g_ui.font_bold, 15.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+    ui_text_draw(x, y, "Properties", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     y += 26.0f;
 
     if (ctx->test_obj_loaded && ctx->test_obj &&
         g_ui.selected_object_id == 4000u + (unsigned int)ctx->test_obj->id) {
         char line[96];
         snprintf(line, sizeof(line), "MeshObject #%d", ctx->test_obj->id);
-        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         y += 22.0f;
         snprintf(line, sizeof(line), "Position: %.2f, %.2f, %.2f",
                  ctx->test_obj->position.x, ctx->test_obj->position.y, ctx->test_obj->position.z);
-        ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+        ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         y += 20.0f;
         snprintf(line, sizeof(line), "Orientation: %.2f, %.2f, %.2f, %.2f",
                  ctx->test_obj->orientation.x, ctx->test_obj->orientation.y,
                  ctx->test_obj->orientation.z, ctx->test_obj->orientation.w);
-        ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+        ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         y += 20.0f;
         ui_text_draw(x, y, ctx->test_obj->is_static ? "Static: yes" : "Static: no", g_ui.font_mono, 13.0f,
-                     UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
     } else {
-        ui_text_draw(x, y, "Nothing selected", g_ui.font_body, 14.0f, 0.5f, 0.5f, 0.5f, 1.0f);
+        ui_text_draw(x, y, "Nothing selected", g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         y += 22.0f;
-        ui_text_draw(x, y, "Click an object in the Scene or Outliner.", g_ui.font_body, 13.0f, 0.5f, 0.5f, 0.5f, 1.0f);
+        ui_text_draw(x, y, "Click an object in the Scene or Outliner.", g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
     }
 }
 
 static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
     float x = a->x + UI_PANEL_PAD, y = a->y + a->h - UI_PANEL_PAD - 18.0f;
-    ui_rect(a->x, a->y, a->w, a->h, 0.10f, 0.10f, 0.12f, 0.95f);  /* dark terminal-style background */
+    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_HD_R, UI_ZEN_PANEL_HD_G, UI_ZEN_PANEL_HD_B, 0.95f);
     if (!ctx->console) return;
 
     /* Input row pinned to the bottom, log scrolling up from just above it
@@ -519,50 +596,51 @@ static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
      * scrollback orientation. */
     char prompt[CONSOLE_INPUT_LEN + 4];
     snprintf(prompt, sizeof(prompt), "> %s", ctx->console->input);
-    ui_text_draw(x, y, prompt, g_ui.font_mono, 13.0f, 0.85f, 0.9f, 0.85f, 1.0f);
+    ui_text_draw(x, y, prompt, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     y -= 20.0f;
 
     for (int i = ctx->console->log_count - 1; i >= 0 && y > a->y + UI_PANEL_PAD; i--) {
-        ui_text_draw(x, y, ctx->console->log[i], g_ui.font_mono, 13.0f, 0.75f, 0.78f, 0.75f, 1.0f);
+        ui_text_draw(x, y, ctx->console->log[i], g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         y -= 18.0f;
     }
 }
 
 static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
     (void)ctx;
+    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
     float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
-    ui_text_draw(x, y, "Chat", g_ui.font_bold, 15.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+    ui_text_draw(x, y, "Chat", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     y += 26.0f;
     /* Explicitly not connected to a real LLM yet -- that needs a
      * server-side proxy per phi.md's Hard Architectural Decision that the
      * API key never ships to the client. This is the panel shell only. */
-    ui_text_draw(x, y, "Not connected to an LLM yet.", g_ui.font_body, 14.0f, 0.5f, 0.5f, 0.5f, 1.0f);
+    ui_text_draw(x, y, "Not connected to an LLM yet.", g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
     y += 20.0f;
-    ui_text_draw(x, y, "Needs a server-side API proxy (see phi.md).", g_ui.font_body, 13.0f, 0.5f, 0.5f, 0.5f, 1.0f);
+    ui_text_draw(x, y, "Needs a server-side API proxy (see phi.md).", g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
 
     float input_h = 28.0f;
     float input_y = a->y + a->h - UI_PANEL_PAD - input_h;
-    ui_rect(x, input_y, a->w - UI_PANEL_PAD * 2.0f, input_h, 1.0f, 1.0f, 1.0f, 1.0f);
-    ui_rect(x, input_y, a->w - UI_PANEL_PAD * 2.0f, 1.0f, UI_BORDER_R, UI_BORDER_G, UI_BORDER_B, 1.0f);
-    ui_text_draw(x + 8.0f, input_y + 6.0f, "Type a message...", g_ui.font_body, 13.0f, 0.6f, 0.6f, 0.6f, 1.0f);
+    ui_rect(x, input_y, a->w - UI_PANEL_PAD * 2.0f, input_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
+    ui_rect(x, input_y, a->w - UI_PANEL_PAD * 2.0f, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
+    ui_text_draw(x + 8.0f, input_y + 6.0f, "Type a message...", g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
 }
 
 static void draw_panel_stub(Area *a, const char *name) {
     ui_text_draw(a->x + UI_PANEL_PAD, a->y + UI_PANEL_PAD, name, g_ui.font_bold, 15.0f,
-                 UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+                 UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     ui_text_draw(a->x + UI_PANEL_PAD, a->y + UI_PANEL_PAD + 24.0f, "Not implemented yet.",
-                 g_ui.font_body, 14.0f, 0.5f, 0.5f, 0.5f, 1.0f);
+                 g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
 }
 
 static void draw_leaf(Area *a, const UIRenderContext *ctx) {
     switch (a->panel_type) {
         case PANEL_SCENE:      draw_panel_scene(a, ctx); break;
-        case PANEL_OUTLINER:   ui_rect(a->x, a->y, a->w, a->h, 1,1,1,1); draw_panel_outliner(a, ctx); break;
-        case PANEL_PROPERTIES: ui_rect(a->x, a->y, a->w, a->h, 1,1,1,1); draw_panel_properties(a, ctx); break;
+        case PANEL_OUTLINER:   draw_panel_outliner(a, ctx); break;    /* fills its own background, see above */
+        case PANEL_PROPERTIES: draw_panel_properties(a, ctx); break;  /* ditto */
         case PANEL_CONSOLE:    draw_panel_console(a, ctx); break;
-        case PANEL_CHAT:       ui_rect(a->x, a->y, a->w, a->h, 1,1,1,1); draw_panel_chat(a, ctx); break;
-        case PANEL_NODE_EDITOR:  ui_rect(a->x, a->y, a->w, a->h, 1,1,1,1); draw_panel_stub(a, "Node Editor"); break;
-        case PANEL_CURVE_EDITOR: ui_rect(a->x, a->y, a->w, a->h, 1,1,1,1); draw_panel_stub(a, "Curve Editor"); break;
+        case PANEL_CHAT:       draw_panel_chat(a, ctx); break;        /* ditto */
+        case PANEL_NODE_EDITOR:  ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Node Editor"); break;
+        case PANEL_CURVE_EDITOR: ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Curve Editor"); break;
         default: break;
     }
     draw_area_chrome(a);
@@ -586,17 +664,18 @@ void ui_render(const UIRenderContext *ctx) {
     glViewport(0, 0, g_ui.screen_w, g_ui.screen_h);
     glDisable(GL_DEPTH_TEST);
     draw_branding_bar();
+    draw_menu_row();
 
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
         static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All" };
         int n = (int)(sizeof(items) / sizeof(items[0]));
         float menu_h = row_h * n;
-        ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, menu_h, 1.0f, 1.0f, 1.0f, 0.98f);
-        ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, 1.0f, UI_BORDER_R, UI_BORDER_G, UI_BORDER_B, 1.0f);
+        ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
+        ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
         for (int i = 0; i < n; i++) {
             ui_text_draw(g_ui.ctx_menu_x + 10.0f, g_ui.ctx_menu_y + i * row_h + 4.0f, items[i],
-                         g_ui.font_body, 13.0f, UI_TEXT_DARK_R, UI_TEXT_DARK_G, UI_TEXT_DARK_B, 1.0f);
+                         g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         }
     }
     gl_check("ui_render");
@@ -674,7 +753,7 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
         }
         if (button == 1 && pressed) { g_ui.ctx_menu_open = 0; return 1; }
     }
-    if (y < (int)UI_BAR_H) return 1;  /* branding bar claims the whole strip, nothing to route through it yet */
+    if (y < (int)UI_TOP_CHROME_H) return 1;  /* branding bar + menu row claim the whole strip, nothing to route through it yet */
     if (g_ui.root && hit_test_area(g_ui.root, x, y, button, pressed, ctx)) return 1;
     return 0;
 }

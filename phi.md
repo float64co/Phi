@@ -625,11 +625,16 @@ in Blender; Phi-specific data is simply data Blender doesn't render.
 Built in C, rendered entirely via WebGL 2. No third-party UI library — this is
 the resolved decision over Dear ImGui (see Hard Architectural Decisions).
 
-**Status (2026-08-09): first real editor shell landed** — build-verified on
-native, win32 (real Intel Arc hardware), and wasm. Strategic context: Phi is
-no longer aimed at being Qek's (the rocket-arena game's) engine specifically —
-Qek is its own separate project — Phi is now aimed at general UE5/Blender-
-territory editor work. This is the first UI that isn't Qek's HUD/dev console.
+**Status (2026-08-09): first real editor shell landed, then a same-day
+feedback round** — build-verified on native, win32 (real Intel Arc
+hardware), and wasm for the initial shell; this round's palette/menu-row/
+Outliner fixes (below) are native+win32 build-verified, wasm build-pending
+(no `emcc` toolchain in the environment this round ran in — no C-level risk
+since wasm shares the exact same `client/*.c`, but flag honestly rather than
+claim a check that didn't happen). Strategic context: Phi is no longer aimed
+at being Qek's (the rocket-arena game's) engine specifically — Qek is its
+own separate project — Phi is now aimed at general UE5/Blender-territory
+editor work. This is the first UI that isn't Qek's HUD/dev console.
 
 - **SDF text rendering** (`client/font.c`/`.h`) — real SDF, not a plain-
   bitmap compromise: `stb_truetype.h` (vendored, public domain/MIT, same
@@ -665,15 +670,44 @@ territory editor work. This is the first UI that isn't Qek's HUD/dev console.
   same way into Outliner (top) / Properties (bottom). Split edges aren't
   draggable yet — the tree structure supports it (each split already
   stores its own fraction), the mouse-drag interaction is follow-up work.
-- **Branding bar** — a fixed top strip whose design language is adapted
-  from a real site's actual page source (fetched and read, not guessed
-  at): a bold-italic brand-mark "pill" (colored background, white text)
-  rather than a logo image, light background with a thin border, small-
-  caps-style secondary text. The specific brand text ("Phi") and accent
-  color (warm gold/amber, tying into the golden-ratio identity —
-  deliberately distinct from that site's sky-blue) are Phi's own, not
-  copied. Undo/redo icon buttons live here (Zenith's icons, not yet wired
+- **Branding bar** — a fixed top strip using https://float64co.github.io's
+  *actual* color palette (`--bg #f5f7fa`, `--border #e0e4ea`, `--acc
+  #00bfff`, and the brand mark's own `#87CEEB` pill), not an adapted or
+  deliberately-distinct one: Phi is a Float64 project, so this is Phi's own
+  brand identity, correctly reused rather than avoided. Brand mark ("Phi")
+  keeps the bold-italic pill treatment (colored background, white text)
+  from that site's design language. Height is derived from `UI_PHI`, not a
+  flat pixel constant (`UI_MENU_H = UI_FONT_SIZE * UI_PHI`, `UI_BAR_H =
+  UI_MENU_H * UI_PHI`, together forming `UI_TOP_CHROME_H`) — a real,
+  noticeably shorter bar than the original flat 48px version, per explicit
+  request. Undo/redo icon buttons live here (Zenith's icons, not yet wired
   to a real undo stack — no undoable actions exist yet to drive one).
+- **Main menu row** — a second strip directly under the branding bar
+  (height `UI_MENU_H`), plain File/Edit/View/Help labels with no dropdown
+  content yet — proves the chrome has a place for a real menu system,
+  isn't a finished one. Everything below the branding bar (this row, every
+  panel's chrome/content, the type-switcher dropdown, the context menu)
+  uses a separate reference project's actual dark editor palette instead
+  of float64's (`col::PANEL_BG`/`WIDGET`/`WIDGET_H`/`TEXT`/`TEXT_DIM`/
+  `BORDER` from that project's `DrawBatch.h`, converted 0–255 → 0–1) — a
+  light branded top bar over a dark professional editor body, the split
+  VSCode/Blender and most serious creative tools use.
+- **Outliner row backgrounds** — full-panel-width zebra-striped row
+  highlights (`outliner_row_bg()`), replacing bare left-aligned text on an
+  otherwise blank panel. The Outliner is ~38% of window width by design
+  (the golden-ratio split), so short rows ("World Mesh (3798 verts)") were
+  reading as broken/empty space on the right rather than intentional
+  layout — this is Blender's own full-width list-row convention, applied
+  for the same reason Blender uses it.
+- **De-Qek'd `www/index.html`** — the WASM shell's HTML still carried Qek's
+  FPS-game framing: a "CLICK TO PLAY" overlay that auto-reappeared over the
+  *entire* editor on every pointer-unlock (alt-tab, clicking a panel — i.e.
+  constantly), plus "QEK" branding in the `<title>`/loading screen/overlay
+  heading. Fixed at the DOM/JS level (no C/WASM change needed): the overlay
+  no longer auto-shows on load or re-shows on unlock (an editor doesn't
+  gate itself behind a play button), the loading screen and overlay both
+  say "Phi", and clicking the canvas directly still opt-in re-engages
+  pointer-lock for camera look, unchanged.
 - **Panels**: Scene (the existing G-buffer pipeline, now hosted in an
   arbitrary sub-rectangle instead of always filling the window — see
   `gbuffer_set_viewport_offset()` below), Outliner (lists the real world
