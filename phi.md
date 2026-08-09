@@ -625,7 +625,7 @@ in Blender; Phi-specific data is simply data Blender doesn't render.
 Built in C, rendered entirely via WebGL 2. No third-party UI library — this is
 the resolved decision over Dear ImGui (see Hard Architectural Decisions).
 
-**Status (2026-08-09): first real editor shell landed, then two same-day
+**Status (2026-08-09): first real editor shell landed, then three same-day
 feedback rounds** — build-verified on native, win32 (real Intel Arc
 hardware), and wasm throughout, `emcc` reachable via `source
 ~/src/c/emsdk/emsdk_env.sh` (not on `PATH` by default). Strategic context:
@@ -633,6 +633,41 @@ Phi is no longer aimed at being Qek's (the rocket-arena game's) engine
 specifically — Qek is its own separate project — Phi is now aimed at
 general UE5/Blender-territory editor work. This is the first UI that isn't
 Qek's HUD/dev console.
+
+**Mouse-capture bug (found and fixed the same day)**: native and win32 both
+called their platform's pointer-lock-equivalent APIs *unconditionally* at
+startup — `input_install_callbacks()` did `XGrabPointer(..., confine_to=
+s_win, ...)` plus an invisible cursor and a per-motion-event recenter warp
+on native, and `ShowCursor(FALSE)` + `ClipCursor(&clip)` on win32 — a
+leftover from Qek's always-on FPS mouse-look, where the window just owns
+input unconditionally once focused. For an editor this is actively
+harmful two ways at once: (1) the confined, invisible, snap-to-center
+cursor makes it physically impossible to click any of the rendered panel/
+menu/outliner/context-menu chrome, and (2) `XGrabPointer`'s `confine_to`
+and `ClipCursor`'s clip rect restrict the OS cursor to the window's client
+area, which also makes it impossible to reach the window's own border/
+title-bar resize handles — almost certainly the actual cause behind "not
+responsive to window resizing" being reported in the same breath as the
+mouse-stealing complaint, not a separate bug in the resize-handling code
+itself. Fixed by not grabbing/hiding/confining/warping the cursor at
+startup at all; `InputState.pointer_locked` now starts (and stays) `0` on
+native/win32 until something opts back in, and `handle_motion` on both
+platforms now returns immediately when not locked rather than computing a
+delta and re-warping the cursor. No click-to-engage gesture (mirroring the
+web build's canvas-click → pointer lock) exists on native/win32 yet, so
+mouse-look for the FPS camera is off by default there now — reasonable
+given the editor-first pivot, and building an opt-in re-engage gesture is
+follow-up work, not done here. Verified live: resized the actual X11
+window (`XResizeWindow` via a throwaway `python-xlib` script, screenshotted
+with ImageMagick's `import -window`) from 1280×720 to 1600×900 while
+running — Scene/Outliner/Properties/branding bar/menu row all correctly
+re-laid-out at the new size, confirming the underlying per-frame
+`phi_platform_get_window_size()` → `ui_layout()` flow (already
+platform-agnostic, shared by all three targets, and already wired to each
+platform's own resize event — `ConfigureNotify`/`WM_SIZE`/
+`emscripten_set_resize_callback`) was already correct; win32 and wasm
+share that exact code path but weren't independently execute-tested here
+(no Windows runtime/Wine, no real browser in this environment).
 
 **Stale-viewport bug (found and fixed the same day)**: after the palette/
 menu-row round landed, the Outliner and Properties panels rendered visibly

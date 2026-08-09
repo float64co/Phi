@@ -210,23 +210,13 @@ void input_install_callbacks(InputState *inp) {
     s_inp  = inp;
     s_hwnd = phi_platform_win32_window();
 
-    /* Hides the system cursor and confines it to the client area — same
-     * pointer-lock look as X11's invisible-cursor + XGrabPointer, and the
-     * same "always locked, no click-to-engage gesture" simplification
-     * (Windows has no equivalent of the browser's pointer lock API either). */
-    ShowCursor(FALSE);
-
-    RECT rect;
-    GetClientRect(s_hwnd, &rect);
-    POINT ul = { rect.left,  rect.top    };
-    POINT lr = { rect.right, rect.bottom };
-    ClientToScreen(s_hwnd, &ul);
-    ClientToScreen(s_hwnd, &lr);
-    RECT clip = { ul.x, ul.y, lr.x, lr.y };
-    ClipCursor(&clip);
-
-    inp->pointer_locked = 1;
-    warp_to_center();
+    /* Deliberately NOT hiding/confining the cursor here anymore -- see the
+     * matching comment in the native (X11) branch's input_install_callbacks
+     * for why. Phi is an editor now; ShowCursor(FALSE) + ClipCursor
+     * unconditionally at startup made the panel/menu/outliner chrome
+     * unclickable. pointer_locked stays 0 (see handle_motion below); an
+     * opt-in engage/release gesture is follow-up work, not done here. */
+    inp->pointer_locked = 0;
 }
 
 void input_set_pointer_locked(int locked) {
@@ -292,7 +282,7 @@ static void handle_char(WPARAM wparam) {
 
 static void handle_motion(LPARAM lparam) {
     InputState *inp = s_inp;
-    if (!inp) return;
+    if (!inp || !inp->pointer_locked) return;  /* no lock engaged -- let the cursor move freely, don't warp it back */
     if (s_ignore_next_motion) { s_ignore_next_motion = 0; return; }
 
     int x = (short)LOWORD(lparam);  /* client-area coords, like X11's ev->xmotion.x/y */
@@ -392,23 +382,18 @@ void input_install_callbacks(InputState *inp) {
      * from a real release+press — breaks WASD and edge-detection alike. */
     XkbSetDetectableAutoRepeat(s_dpy, True, NULL);
 
-    /* Fully transparent 1x1 cursor, hides the system cursor while grabbed —
-     * matches the browser's pointer-lock look. Native has no click-to-engage
-     * gesture like pointer lock requires, so the window just owns input
-     * unconditionally once it has focus. */
-    char blankdata[1] = {0};
-    Pixmap blank = XCreateBitmapFromData(s_dpy, s_win, blankdata, 1, 1);
-    XColor black; memset(&black, 0, sizeof(black));
-    Cursor invisible = XCreatePixmapCursor(s_dpy, blank, blank, &black, &black, 0, 0);
-    XDefineCursor(s_dpy, s_win, invisible);
-    XFreePixmap(s_dpy, blank);
-    XFreeCursor(s_dpy, invisible);
-
-    XGrabPointer(s_dpy, s_win, True,
-                 PointerMotionMask | ButtonPressMask | ButtonReleaseMask,
-                 GrabModeAsync, GrabModeAsync, s_win, None, CurrentTime);
-    inp->pointer_locked = 1;
-    warp_to_center();
+    /* Deliberately NOT grabbing/hiding/warping the pointer here anymore.
+     * This used to run unconditionally at startup (XGrabPointer + an
+     * invisible cursor + a center warp every motion event), matching
+     * Qek's always-on FPS mouse-look -- but Phi is an editor now, and a
+     * confined, invisible, snap-to-center cursor makes it impossible to
+     * actually click any of the rendered panel/menu/outliner chrome. No
+     * click-to-engage gesture (mirroring the web build's canvas-click ->
+     * pointer lock) exists on native yet -- pointer_locked simply stays 0
+     * (see handle_motion below), leaving the cursor free for normal UI
+     * use; wiring up an opt-in engage/release gesture is follow-up work,
+     * not done here. */
+    inp->pointer_locked = 0;
 }
 
 void input_set_pointer_locked(int locked) {
@@ -471,7 +456,7 @@ static void handle_key(XKeyEvent *e, int down) {
 
 static void handle_motion(XMotionEvent *e) {
     InputState *inp = s_inp;
-    if (!inp) return;
+    if (!inp || !inp->pointer_locked) return;  /* no lock engaged -- let the cursor move freely, don't warp it back */
     if (s_ignore_next_motion) { s_ignore_next_motion = 0; return; }
 
     int w, h; phi_platform_get_window_size(&w, &h);
