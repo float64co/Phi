@@ -10,6 +10,7 @@
 #include "phi_platform.h"
 #include "halfedge_gltf.h"
 #include "meshobject.h"
+#include "mesh_edit.h"
 #include "gizmo.h"
 #include "font.h"
 #include "svg_icon.h"
@@ -43,6 +44,15 @@ static GameState    g_gs       = {0};
  * interaction, UI, or physics yet; see phi.md's Phase 1 section. */
 static MeshObject   g_test_mesh_object = {0};
 static int          g_test_mesh_loaded = 0;
+/* Which hem face (see meshobject_ray_pick_face) was under the cursor the
+ * moment the Scene context menu was last opened with the test object
+ * selected -- -1 if none/not applicable. Extrude/Inset/Loop Cut menu rows
+ * (CTX_ACTION_EXTRUDE_FACE etc.) act on this. Set once at rmb_click time
+ * rather than re-picked when the menu row is actually clicked, matching
+ * how a real editor's context menu captures "what was under the cursor
+ * when you right-clicked", not "what's under the cursor now". */
+static int          g_edit_face = -1;
+static Vec3f        g_edit_hit_local = {0, 0, 0};  /* local-space hit point paired with g_edit_face, see below */
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
 static EditorState  g_ed       = {0};
@@ -127,7 +137,11 @@ static void spawn_test_mesh_object(void) {
         for (int a = 0; a < 3; a++)
             hem->verts[i].pos[a] *= 16.0f;
     meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, hem, 4.0f);
-    halfedge_destroy(hem);
+    /* Kept alive (not halfedge_destroy'd) as the object's live editable
+     * representation -- extrude/inset/loop-cut (mesh_edit.c) mutate this
+     * in place and re-flatten, so it needs to survive past this one
+     * initial build the way it used to only ever be used for. */
+    g_test_mesh_object.hem = hem;
     g_test_mesh_loaded = 1;
     printf("[main] loaded assets/cube.gltf as MeshObject: %d triangles\n",
            g_test_mesh_object.render_mesh->count / 3);
@@ -146,8 +160,22 @@ static void delete_test_mesh_object(void) {
     }
     mesh_destroy(g_test_mesh_object.render_mesh);
     g_test_mesh_object.render_mesh = NULL;
+    halfedge_destroy(g_test_mesh_object.hem);
+    g_test_mesh_object.hem = NULL;
     g_test_mesh_loaded = 0;
     printf("[main] deleted MeshObject\n");
+}
+
+/* Re-flattens g_test_mesh_object.hem into its render_mesh after a mesh
+ * edit op mutates it (extrude/inset/loop-cut, see mesh_edit.c), and prints
+ * a before/after triangle count -- the topology sanity check this loop's
+ * own verification standard calls for (matching the same "real, checked
+ * behavior over cosmetic-only claims" bar the ray-picking/gizmo work
+ * already established this session), not just "it compiled". */
+static void rebuild_test_mesh_render(const char *op_name, int tris_before) {
+    meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, g_test_mesh_object.hem, 4.0f);
+    int tris_after = g_test_mesh_object.render_mesh->count / 3;
+    printf("[main] mesh edit '%s': %d -> %d triangles\n", op_name, tris_before, tris_after);
 }
 
 /* Every renderer_draw_* call for the frame's game content — extracted
@@ -351,6 +379,22 @@ static void main_loop(void *userdata) {
                 (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
                 (float)g_inp.mouse_y >= sy && (float)g_inp.mouse_y < sy + sh) {
                 ui_open_scene_context_menu(g_inp.mouse_x, g_inp.mouse_y);
+                /* Capture which face (if any) is under the cursor right
+                 * now, for the Extrude/Inset/Loop Cut rows this menu can
+                 * show -- see g_edit_face's own comment on why this is
+                 * captured here rather than re-picked at click-a-row time. */
+                g_edit_face = -1;
+                if (selected_is_test_mesh()) {
+                    Vec3f origin, dir;
+                    if (compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &origin, &dir)) {
+                        float t; int face;
+                        if (meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
+                            g_edit_face = face;
+                            Vec3f world_hit = { origin.x + dir.x * t, origin.y + dir.y * t, origin.z + dir.z * t };
+                            g_edit_hit_local = meshobject_world_to_local(&g_test_mesh_object, world_hit);
+                        }
+                    }
+                }
             }
         }
     }
@@ -395,6 +439,54 @@ static void main_loop(void *userdata) {
                 delete_test_mesh_object();
             } else {
                 printf("[main] context menu Delete: no MeshObject selected\n");
+            }
+            break;
+        case CTX_ACTION_EXTRUDE_FACE:
+            if (g_test_mesh_loaded && g_edit_face >= 0) {
+                int before = g_test_mesh_object.render_mesh->count / 3;
+                /* Fixed 4-unit offset along the face's own normal -- no
+                 * mouse-driven interactive extrude distance in this pass,
+                 * matching this loop's "minimal, correct, not Blender-grade
+                 * polish" bar (see mesh_edit.h). */
+                int cap = mesh_edit_extrude_face(g_test_mesh_object.hem, g_edit_face, 4.0f);
+                if (cap >= 0) {
+                    rebuild_test_mesh_render("Extrude Face", before);
+                    g_edit_face = cap;  /* new cap becomes the natural next target, e.g. a chained extrude */
+                } else {
+                    printf("[main] context menu Extrude Face: operation failed (non-triangle or stale face)\n");
+                }
+            } else {
+                printf("[main] context menu Extrude Face: no face under the last right-click\n");
+            }
+            break;
+        case CTX_ACTION_INSET_FACE:
+            if (g_test_mesh_loaded && g_edit_face >= 0) {
+                int before = g_test_mesh_object.render_mesh->count / 3;
+                int cap = mesh_edit_inset_face(g_test_mesh_object.hem, g_edit_face, 0.4f);
+                if (cap >= 0) {
+                    rebuild_test_mesh_render("Inset Face", before);
+                    g_edit_face = cap;
+                } else {
+                    printf("[main] context menu Inset Face: operation failed (non-triangle or stale face)\n");
+                }
+            } else {
+                printf("[main] context menu Inset Face: no face under the last right-click\n");
+            }
+            break;
+        case CTX_ACTION_LOOP_CUT:
+            if (g_test_mesh_loaded && g_edit_face >= 0) {
+                int before = g_test_mesh_object.render_mesh->count / 3;
+                int edge = mesh_edit_nearest_edge_of_face(g_test_mesh_object.hem, g_edit_face,
+                                                            g_edit_hit_local.x, g_edit_hit_local.y, g_edit_hit_local.z);
+                int mv = edge >= 0 ? mesh_edit_loop_cut_edge(g_test_mesh_object.hem, edge) : -1;
+                if (mv >= 0) {
+                    rebuild_test_mesh_render("Loop Cut", before);
+                } else {
+                    printf("[main] context menu Loop Cut: operation failed (no edge/stale face)\n");
+                }
+                g_edit_face = -1;  /* the picked face was deleted by the cut, don't keep pointing at it */
+            } else {
+                printf("[main] context menu Loop Cut: no face under the last right-click\n");
             }
             break;
         default:

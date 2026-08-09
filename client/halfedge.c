@@ -37,6 +37,14 @@ int halfedge_add_vertex(HalfEdgeMesh *hem, float x, float y, float z) {
  * rather than hash-mapped. */
 static int find_edge(const HalfEdgeMesh *hem, int from, int to) {
     for (int e = 0; e < hem->edge_count; e++) {
+        /* Skip edges belonging to a soft-deleted face (halfedge_delete_face)
+         * -- their origin/next fields are left untouched (tombstoning
+         * doesn't scrub edge data, see the struct comment), so without this
+         * check a newly-added face re-triangulating the same vertex
+         * neighborhood a deleted face used to occupy (extrude/inset/
+         * loop-cut all do exactly this, see mesh_edit.c) could accidentally
+         * twin against dead geometry instead of a real live neighbor. */
+        if (hem->faces[hem->edges[e].face].deleted) continue;
         if (hem->edges[e].origin == from && hem->edges[hem->edges[e].next].origin == to)
             return e;
     }
@@ -76,7 +84,20 @@ int halfedge_add_face(HalfEdgeMesh *hem, const int *vert_indices, int n) {
 
     hem->faces[face_idx].edge = first_edge;
     hem->faces[face_idx].count = n;
+    hem->faces[face_idx].deleted = 0;
     return face_idx;
+}
+
+void halfedge_delete_face(HalfEdgeMesh *hem, int f) {
+    HEFace *face = &hem->faces[f];
+    if (face->deleted) return;
+    int e = face->edge;
+    for (int i = 0; i < face->count; i++) {
+        HEEdge *he = &hem->edges[e];
+        if (he->twin >= 0) hem->edges[he->twin].twin = -1;
+        e = he->next;
+    }
+    face->deleted = 1;
 }
 
 HalfEdgeMesh *halfedge_build_from_triangles(const float *positions, int pos_count,
@@ -111,15 +132,24 @@ void halfedge_flatten_triangles(const HalfEdgeMesh *hem,
         (*out_positions)[i*3+2] = hem->verts[i].pos[2];
     }
 
-    /* Every face is a triangle in this pass (see halfedge.h) — 3 indices
-     * per face, no fan-triangulation of n-gons needed yet. */
-    *out_index_count = hem->face_count * 3;
+    /* Every LIVE face is a triangle in this pass (see halfedge.h) — 3
+     * indices per face, no fan-triangulation of n-gons needed yet. Deleted
+     * faces (soft-tombstoned by editing ops, see halfedge_delete_face) are
+     * skipped, so live_count can be less than face_count. */
+    int live_count = 0;
+    for (int f = 0; f < hem->face_count; f++)
+        if (!hem->faces[f].deleted) live_count++;
+
+    *out_index_count = live_count * 3;
     *out_indices = (unsigned short *)malloc(sizeof(unsigned short) * (size_t)*out_index_count);
+    int w = 0;
     for (int f = 0; f < hem->face_count; f++) {
+        if (hem->faces[f].deleted) continue;
         int verts[3];
         halfedge_face_verts(hem, f, verts);
-        (*out_indices)[f*3+0] = (unsigned short)verts[0];
-        (*out_indices)[f*3+1] = (unsigned short)verts[1];
-        (*out_indices)[f*3+2] = (unsigned short)verts[2];
+        (*out_indices)[w*3+0] = (unsigned short)verts[0];
+        (*out_indices)[w*3+1] = (unsigned short)verts[1];
+        (*out_indices)[w*3+2] = (unsigned short)verts[2];
+        w++;
     }
 }

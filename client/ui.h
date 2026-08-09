@@ -65,6 +65,15 @@ typedef enum {
     CTX_ACTION_FRAME_SELECTED,
     CTX_ACTION_FRAME_ALL,
     CTX_ACTION_DESELECT_ALL,
+    /* Mesh-editing ops (Phase 1, see mesh_edit.h) -- act on whichever face
+     * main.c's rmb_click handler last ray-picked on the selected
+     * MeshObject at the moment the menu was opened (see main.c's
+     * g_edit_face). Menu rows always show; main.c's switch on these is
+     * what reports "no face under the click" rather than the menu itself
+     * conditionally hiding them. */
+    CTX_ACTION_EXTRUDE_FACE,
+    CTX_ACTION_INSET_FACE,
+    CTX_ACTION_LOOP_CUT,
 } CtxMenuAction;
 
 typedef struct Area {
@@ -144,10 +153,10 @@ int  ui_is_context_menu_open(void);
 
 /* Drains and clears whichever scene-context-menu row was last clicked (if
  * any) -- same one-shot "drain it once per frame" convention as
- * InputState's lmb_click etc. (see input.h). Only CTX_ACTION_ADD_MESH/
- * CTX_ACTION_DELETE are wired to real behavior in main.c right now; the
- * Frame Selected/Frame All/Deselect All rows still just report which one
- * was clicked. */
+ * InputState's lmb_click etc. (see input.h).
+ * CTX_ACTION_ADD_MESH/DELETE/EXTRUDE_FACE/INSET_FACE/LOOP_CUT are wired to
+ * real behavior in main.c; Frame Selected/Frame All/Deselect All rows
+ * still just report which one was clicked. */
 CtxMenuAction ui_poll_context_menu_action(void);
 
 /* object_id follows the existing scheme (renderer.h/gbuffer.c): world=0,

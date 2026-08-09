@@ -18,6 +18,19 @@ typedef struct {
     Quat       orientation;
     RenderMesh *render_mesh;
     int        is_static;
+    /* The live, editable half-edge representation this object's
+     * render_mesh was last flattened from — NULL for objects that don't
+     * (yet) carry one (kept optional rather than required so existing
+     * non-editable callers aren't forced to populate it). Owned by this
+     * MeshObject once set (freed alongside render_mesh by whatever deletes
+     * the object). Editing operations (extrude/inset/loop-cut, see
+     * mesh_edit.h) mutate this in place and the caller re-flattens via
+     * meshobject_build_render_mesh_from_halfedge afterward — this field is
+     * what lets an already-spawned object be edited more than once instead
+     * of only ever being built-then-discarded (see main.c's earlier
+     * spawn_test_mesh_object, which used to halfedge_destroy() right after
+     * the first flatten). */
+    HalfEdgeMesh *hem;
 } MeshObject;
 
 Quat quat_identity(void);
@@ -50,3 +63,24 @@ void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeM
  * consistent (a normalized dir makes t a literal world-space distance,
  * which is what main.c's picking code uses it for). */
 int meshobject_ray_pick(const MeshObject *obj, Vec3f ray_origin, Vec3f ray_dir, float *out_t);
+
+/* Face-level picking against obj->hem directly (not render_mesh) — same
+ * Möller–Trumbore/world-space-transform technique as meshobject_ray_pick,
+ * but walks the live half-edge faces (skipping deleted ones, see
+ * halfedge_delete_face) so the returned *out_face index is something
+ * mesh_edit.c's operations can act on directly. Returns 0 (obj->hem is
+ * NULL, or no face hit) or 1 with *out_t and *out_face set to the nearest hit.
+ * Requires every live face to be a triangle (true of every face this
+ * codebase's editing ops ever produce, see halfedge.h's own "triangles
+ * only for now" note). */
+int meshobject_ray_pick_face(const MeshObject *obj, Vec3f ray_origin, Vec3f ray_dir,
+                              float *out_t, int *out_face);
+
+/* Un-transforms a world-space point into obj->hem's own local space
+ * (inverse of the position+orientation transform meshobject_ray_pick/
+ * meshobject_ray_pick_face apply going the other way) — the rotation
+ * matrix quat_to_mat4 produces is orthonormal, so its inverse is just its
+ * transpose, no separate matrix-inverse routine needed. Used to turn a
+ * world-space ray-pick hit point into the local-space point
+ * mesh_edit_nearest_edge_of_face expects. */
+Vec3f meshobject_world_to_local(const MeshObject *obj, Vec3f world_pos);

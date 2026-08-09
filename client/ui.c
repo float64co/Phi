@@ -723,7 +723,8 @@ void ui_render(const UIRenderContext *ctx) {
 
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
-        static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All" };
+        static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
+                                        "Extrude Face", "Inset Face", "Loop Cut" };
         int n = (int)(sizeof(items) / sizeof(items[0]));
         float menu_h = row_h * n;
         ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
@@ -795,13 +796,15 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
 int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderContext *ctx) {
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
-        static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All" };
+        static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
+                                        "Extrude Face", "Inset Face", "Loop Cut" };
         /* Order matches items[] above -- row index maps straight across.
          * Only ADD_MESH/DELETE are acted on by main.c right now; the rest
          * still just get reported via the printf below. */
         static const CtxMenuAction actions[] = {
             CTX_ACTION_ADD_MESH, CTX_ACTION_DELETE, CTX_ACTION_FRAME_SELECTED,
-            CTX_ACTION_FRAME_ALL, CTX_ACTION_DESELECT_ALL
+            CTX_ACTION_FRAME_ALL, CTX_ACTION_DESELECT_ALL,
+            CTX_ACTION_EXTRUDE_FACE, CTX_ACTION_INSET_FACE, CTX_ACTION_LOOP_CUT
         };
         int n = (int)(sizeof(items) / sizeof(items[0]));
         float menu_h = row_h * n;

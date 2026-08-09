@@ -109,6 +109,55 @@ int meshobject_ray_pick(const MeshObject *obj, Vec3f ray_origin, Vec3f ray_dir, 
     return 1;
 }
 
+/* Same ray/triangle test as meshobject_ray_pick, but against obj->hem's
+ * live faces directly rather than the flattened render_mesh, so the hit
+ * result is a hem face index editing operations (mesh_edit.c) can act on.
+ * See meshobject.h's own comment for why this exists as a separate
+ * function rather than teaching meshobject_ray_pick to also return a face
+ * index — that one has no hem to consult for callers that never set it. */
+int meshobject_ray_pick_face(const MeshObject *obj, Vec3f ray_origin, Vec3f ray_dir,
+                              float *out_t, int *out_face) {
+    if (!obj->hem) return 0;
+    const HalfEdgeMesh *hem = obj->hem;
+    float rot[16];
+    quat_to_mat4(&obj->orientation, rot);
+    float best_t = -1.0f;
+    int best_face = -1;
+    for (int f = 0; f < hem->face_count; f++) {
+        if (hem->faces[f].deleted) continue;
+        int verts[3];
+        halfedge_face_verts(hem, f, verts);
+        Vec3f world[3];
+        for (int k = 0; k < 3; k++) {
+            const float *p = hem->verts[verts[k]].pos;
+            Vec3f local = { p[0], p[1], p[2] };
+            world[k] = vec3_add(mat4_rotate_vec3(rot, local), obj->position);
+        }
+        float t;
+        if (ray_intersect_triangle(ray_origin, ray_dir, world[0], world[1], world[2], &t)) {
+            if (best_t < 0.0f || t < best_t) { best_t = t; best_face = f; }
+        }
+    }
+    if (best_face < 0) return 0;
+    *out_t = best_t;
+    *out_face = best_face;
+    return 1;
+}
+
+Vec3f meshobject_world_to_local(const MeshObject *obj, Vec3f world_pos) {
+    float rot[16];
+    quat_to_mat4(&obj->orientation, rot);
+    Vec3f d = vec3_sub(world_pos, obj->position);
+    /* Transpose-as-inverse: read rot's ROWS instead of its columns
+     * (mat4_rotate_vec3 reads columns for the forward local->world
+     * rotation; m[col*4+row] layout means row i is {m[i], m[4+i], m[8+i]}). */
+    return (Vec3f){
+        rot[0]*d.x + rot[1]*d.y + rot[2]*d.z,
+        rot[4]*d.x + rot[5]*d.y + rot[6]*d.z,
+        rot[8]*d.x + rot[9]*d.y + rot[10]*d.z
+    };
+}
+
 static void face_normal(const HalfEdgeMesh *hem, const int *verts, float *n) {
     const float *a = hem->verts[verts[0]].pos;
     const float *b = hem->verts[verts[1]].pos;
@@ -125,6 +174,7 @@ static void face_normal(const HalfEdgeMesh *hem, const int *verts, float *n) {
 void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeMesh *hem, float mat_id) {
     out->count = 0;
     for (int f = 0; f < hem->face_count; f++) {
+        if (hem->faces[f].deleted) continue;
         int verts[3];
         halfedge_face_verts(hem, f, verts);
         float n[3];

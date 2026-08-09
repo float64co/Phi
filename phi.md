@@ -997,6 +997,89 @@ after the fix.
   frame-30 diagnostic camera) confirmed exact expected pick/hit math.
   Rotate and scale are explicitly not implemented — shipping translate
   solidly was the stated priority over three half-working modes.
+- **Extrude / inset / loop cut** (`client/mesh_edit.c`/`.h`, new module,
+  built on `halfedge.c`'s existing append-only primitives rather than
+  extending that file directly — it's the "editing operations" layer its
+  own header comment already anticipated). `halfedge.c` gained one new
+  primitive to support this: `halfedge_delete_face()`, a soft-delete
+  tombstone (`HEFace.deleted`) rather than a real removal, since nothing
+  else in that structure supports in-place mutation or index reuse.
+  Deleting a face resets any twin pointing at one of its edges back to -1,
+  so a neighboring face correctly becomes boundary again instead of
+  dangling — and `find_edge()`'s twin-lookup scan now skips edges
+  belonging to a deleted face, since without that guard a freshly
+  re-triangulated area could accidentally twin against the very geometry
+  it just replaced (a real bug caught while writing this, not a
+  theoretical one — see the standalone test below).
+  - **Extrude**/**inset** share one mechanism (`mesh_edit.c`'s static
+    `extrude_or_inset`): add fresh vertices at the new (displaced-along-
+    normal, or shrunk-toward-centroid) positions, delete the original
+    face, add a new cap face at the fresh positions, then stitch a ring of
+    side-wall triangles connecting the *untouched* original boundary to
+    the new cap boundary — `halfedge_add_face`'s own twin-finding then
+    naturally reconnects the walls to whatever real neighbor already
+    bordered the original face. This produces the same topology real
+    extrude/inset do; the original face's array slot becomes a dead
+    tombstone rather than literally being the moved geometry, which is
+    invisible to anything that only reads live faces.
+  - **Loop cut** is scoped down honestly: it splits one picked edge (and
+    its immediate twin face, if any) at the midpoint, re-triangulating the
+    one or two adjacent triangles around it. This is the minimal real
+    primitive a full multi-face loop cut is built from, not a ring traced
+    across a whole quad-topology loop — this codebase's editable meshes
+    are triangles-only (see `halfedge.h`), so a "ring" in the Blender
+    sense doesn't strictly exist here. Shipping this honestly-scoped
+    primitive was the call, not a fake full-ring implementation.
+  - Reachable via the Scene right-click context menu (`CTX_ACTION_
+    EXTRUDE_FACE`/`INSET_FACE`/`LOOP_CUT`, new rows alongside the existing
+    Add/Delete ones). Right-clicking with the MeshObject selected first
+    ray-picks the face under the cursor against its live `HalfEdgeMesh`
+    directly (`meshobject_ray_pick_face`, same Möller–Trumbore technique
+    as object-level picking) and records it (`main.c`'s `g_edit_face`) —
+    the menu acts on whatever was under the cursor at open time, matching
+    real editor behavior. Loop Cut further narrows the face pick to a
+    specific edge (`mesh_edit_nearest_edge_of_face`, nearest edge-midpoint
+    to the local-space hit point — `meshobject_world_to_local` added for
+    this, the rotation matrix's transpose-as-inverse since it's
+    orthonormal). Extrude uses a fixed 4-unit offset, inset a fixed 0.4
+    shrink factor — no mouse-driven interactive distance in this pass,
+    matching this loop's "minimal, correct, not Blender-grade polish" bar.
+    The object's `HalfEdgeMesh` is now kept alive on `MeshObject.hem`
+    across its lifetime (previously `spawn_test_mesh_object` built the
+    render mesh once and immediately `halfedge_destroy()`'d it) so it can
+    be edited more than once; each op re-flattens via the existing
+    `meshobject_build_render_mesh_from_halfedge` and logs a before/after
+    triangle count.
+  - **Verified via a new standalone test harness** (`client/
+    mesh_edit_test_main.c`, `make mesh_edit_test` — no GL/window/X11
+    dependency at all, same spirit as `mp_test`/`mp_stress`), not a live
+    screenshot round this time: this iteration's background-job
+    environment turned out to have an unstable X11 connection (WSLg's
+    Xwayland; the native binary's window intermittently received
+    `WM_DELETE_WINDOW` and exited on its own after anywhere from ~15
+    seconds to ~12 minutes, and eventually direct `python-xlib` display
+    connections themselves started failing with `ConnectionResetError:
+    [Errno 104] Connection reset by peer`) — reproducing before any of
+    this feature's own code existed, so it's an environment issue for
+    this pass, not a regression, and not worth burning further loop
+    iterations chasing (the picking/gizmo work earlier used this exact
+    live-screenshot method successfully many times this same session).
+    Topology correctness doesn't actually need rendering to verify,
+    though, so the harness checks what matters directly against
+    `assets/cube.gltf` (8 verts, 12 triangles, watertight): extrude adds
+    exactly 3 vertices and nets +7 live triangles (-1 base +1 cap +6
+    walls), each new vertex sits exactly `dist` from its source vertex
+    along the face normal (measured, not assumed); inset does the same
+    topology math without the normal offset; loop-cutting a (twinned,
+    since the cube is closed) edge adds exactly 1 vertex and nets +2 live
+    triangles; every case is checked to stay fully watertight (zero
+    boundary edges) afterward and to have no live edge twinning a deleted
+    face (the exact bug class the `find_edge` fix above exists to
+    prevent); and out-of-range/already-deleted inputs fail cleanly (-1)
+    rather than crashing. All checks pass. The context-menu row wiring
+    and click routing itself (as opposed to the topology math it calls)
+    is code-reviewed but not live-screenshot-verified this pass — flagged
+    honestly rather than claimed either way.
 - **Gbuffer extension**: `gbuffer_set_viewport_offset(gb, x, y)` — a small,
   deliberate extension to Phase 0's (already shipped, browser-verified)
   deferred pipeline. Every pass except the very last (FXAA's blit to the

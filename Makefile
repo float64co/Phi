@@ -34,12 +34,13 @@ COMMON_SRCS := \
 	$(SRCDIR)/halfedge.c      \
 	$(SRCDIR)/halfedge_gltf.c \
 	$(SRCDIR)/meshobject.c    \
+	$(SRCDIR)/mesh_edit.c     \
 	$(SRCDIR)/gizmo.c         \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test
 
 all: wasm native
 
@@ -146,6 +147,24 @@ $(OUT_WIN32): $(WIN32_SRCS) $(HDRS) | $(BUILDDIR)
 	$(WIN32_CC) $(WIN32_CFLAGS) $(WIN32_SRCS) -o $(OUT_WIN32) $(WIN32_LDFLAGS)
 	chmod +x $(OUT_WIN32)
 	@echo "win32 build complete -> $(OUT_WIN32)"
+
+# ---------------------------------------------------------------
+# mesh_edit.c topology self-test (Phase 1 extrude/inset/loop-cut) — NOT
+# part of the game build. Exercises the real half-edge mutations against
+# assets/cube.gltf with no GL/window/X11 dependency at all, matching the
+# MicroPython self-test's own "prove the subsystem works in isolation
+# before/alongside it being wired into the real editor" precedent below.
+# ---------------------------------------------------------------
+MESH_EDIT_TEST_SRCS := $(SRCDIR)/mesh_edit_test_main.c $(SRCDIR)/halfedge.c \
+                        $(SRCDIR)/halfedge_gltf.c $(SRCDIR)/mesh_edit.c
+OUT_MESH_EDIT_TEST   := $(BUILDDIR)/mesh_edit_test
+
+mesh_edit_test: $(OUT_MESH_EDIT_TEST)
+	./$(OUT_MESH_EDIT_TEST)
+
+$(OUT_MESH_EDIT_TEST): $(MESH_EDIT_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(MESH_EDIT_TEST_SRCS) -o $(OUT_MESH_EDIT_TEST) -lm
+	@echo "mesh_edit_test build complete -> $(OUT_MESH_EDIT_TEST)"
 
 # ---------------------------------------------------------------
 # MicroPython embedding self-test (Phase 5 first slice) — NOT part of the

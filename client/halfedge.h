@@ -39,6 +39,7 @@ typedef struct {
 typedef struct {
     int edge;     /* one half-edge bordering this face */
     int count;    /* number of vertices/edges in this face's loop */
+    int deleted;  /* soft-delete tombstone, see halfedge_delete_face() */
 } HEFace;
 
 typedef struct {
@@ -58,6 +59,19 @@ int halfedge_add_vertex(HalfEdgeMesh *hem, float x, float y, float z);
  * already-existing opposite edges. Returns the new face's index. */
 int halfedge_add_face(HalfEdgeMesh *hem, const int *vert_indices, int n);
 
+/* Soft-deletes face `f`: marks it (and its edges) as gone and resets any
+ * twin link pointing at one of its edges back to -1, so a neighboring face
+ * across a shared edge correctly becomes boundary again rather than
+ * dangling. This is a tombstone, not a real removal (added() indices stay
+ * stable, matching this structure's append-only growth model — see the
+ * file comment) — halfedge_face_verts/flatten/meshobject_build_render_
+ * mesh_from_halfedge all skip deleted faces. Editing operations that
+ * displace or subdivide a face (extrude/inset/loop-cut, see mesh_edit.c)
+ * delete the original face and add fresh replacement faces rather than
+ * mutating vertex indices in place, since nothing else in this structure
+ * supports in-place face mutation. */
+void halfedge_delete_face(HalfEdgeMesh *hem, int f);
+
 /* Builds a half-edge mesh from a flat indexed triangle buffer (glTF's
  * on-disk representation) — positions is a flat xyz array of pos_count
  * vertices, indices is a flat triangle-list of index_count indices
@@ -72,11 +86,13 @@ HalfEdgeMesh *halfedge_build_from_triangles(const float *positions, int pos_coun
 void halfedge_face_verts(const HalfEdgeMesh *hem, int f, int *out_verts);
 
 /* Flattens back to a flat indexed triangle buffer (glTF's on-disk shape)
- * — every face is assumed already a triangle (see the struct comment;
- * n-gon triangulation isn't implemented in this pass). *out_positions and
- * *out_indices are malloc'd (caller frees); *out_pos_count and
- * *out_index_count receive their lengths (pos_count in vec3s, index_count
- * in indices). */
+ * — every LIVE (non-deleted) face is assumed already a triangle (see the
+ * struct comment; n-gon triangulation isn't implemented in this pass).
+ * Deleted faces (see halfedge_delete_face) are skipped entirely, so
+ * out_index_count reflects only what's actually still part of the mesh.
+ * *out_positions and *out_indices are malloc'd (caller frees);
+ * *out_pos_count and *out_index_count receive their lengths (pos_count in
+ * vec3s, index_count in indices). */
 void halfedge_flatten_triangles(const HalfEdgeMesh *hem,
                                  float **out_positions, int *out_pos_count,
                                  unsigned short **out_indices, int *out_index_count);
