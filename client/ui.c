@@ -389,23 +389,29 @@ static void draw_branding_bar(void) {
     ui_rect(0, 0, (float)g_ui.screen_w, UI_BAR_H, UI_BRAND_BG_R, UI_BRAND_BG_G, UI_BRAND_BG_B, 1.0f);
     ui_rect(0, UI_BAR_H - 1.0f, (float)g_ui.screen_w, 1.0f, UI_BRAND_BORDER_R, UI_BRAND_BORDER_G, UI_BRAND_BORDER_B, 1.0f);
 
-    /* Brand mark pill, left-aligned, vertically centered in the (now
-     * golden-ratio-reduced, see UI_BAR_H) bar -- sized down proportionally
-     * from a fixed 26px so it still fits comfortably inside the shorter bar. */
-    const char *brand = "\xCF\x86 Phi";  /* UTF-8 for U+03C6 GREEK SMALL LETTER PHI -- not in the
-                                             ASCII 32-126 glyph range this atlas bakes, so it'll
-                                             render as a blank/skipped glyph for now (see the
-                                             font_text_draw loop's range check) -- "Phi" alone still
-                                             reads fine; full Greek-letter glyph coverage is a small
-                                             follow-up once non-ASCII ranges matter elsewhere too. */
-    float brand_font = UI_BAR_H * 0.5f;   /* was a fixed 26px against a 48px bar -- same proportion, scaled to the new height */
-    float pill_pad_x = brand_font * 0.4f, pill_pad_y = brand_font * 0.22f;
-    float text_w = font_text_width(g_ui.font_brand, brand, brand_font);
-    float pill_w = text_w + pill_pad_x * 2.0f;
-    float pill_h = brand_font + pill_pad_y * 2.0f;
-    float pill_x = 16.0f, pill_y = (UI_BAR_H - pill_h) * 0.5f;
-    ui_rect(pill_x, pill_y, pill_w, pill_h, UI_BRAND_PILL_R, UI_BRAND_PILL_G, UI_BRAND_PILL_B, 1.0f);
-    ui_text_draw(pill_x + pill_pad_x, pill_y + pill_pad_y - brand_font * 0.12f, brand, g_ui.font_brand, brand_font, 1.0f, 1.0f, 1.0f, 1.0f);
+    /* Two conjoined brand-mark pills, matching float64co.github.io's own
+     * markup structure exactly: <span id=float64> (bold italic, white on
+     * #87CEEB) directly adjacent to <span id=welcome> (bold, white on
+     * black, not italic) -- no gap between them, one flush unit. Phi's
+     * version reads "Float64" + "Phi" instead of the site's own second
+     * word, since this bar is announcing Phi specifically. Per explicit
+     * request, the pills sit flush against the viewport's own left edge
+     * (x=0, not inset) and flush against the bar's own top and bottom
+     * (pill height == UI_BAR_H exactly, no vertical margin) -- unlike the
+     * site's version, which has nav padding around it and its own 5px
+     * pill padding inside a taller bar. */
+    float brand_font = UI_BAR_H * 0.52f;
+    float pad_x = brand_font * 0.42f;
+    const char *t1 = "Float64", *t2 = "Phi";
+    float w1 = font_text_width(g_ui.font_brand, t1, brand_font) + pad_x * 2.0f;
+    float w2 = font_text_width(g_ui.font_bold,  t2, brand_font) + pad_x * 2.0f;
+    float text_y = (UI_BAR_H - brand_font) * 0.5f - brand_font * 0.12f + 2.0f;
+
+    ui_rect(0.0f, 0.0f, w1, UI_BAR_H, UI_BRAND_PILL_R, UI_BRAND_PILL_G, UI_BRAND_PILL_B, 1.0f);
+    ui_text_draw(pad_x, text_y, t1, g_ui.font_brand, brand_font, 1.0f, 1.0f, 1.0f, 1.0f);
+
+    ui_rect(w1, 0.0f, w2, UI_BAR_H, 0.0f, 0.0f, 0.0f, 1.0f);
+    ui_text_draw(w1 + pad_x, text_y, t2, g_ui.font_bold, brand_font, 1.0f, 1.0f, 1.0f, 1.0f);
 
     /* Undo/redo, right-aligned (Zenith's icons, reused verbatim per
      * instruction). No real undo stack exists yet to drive these -- drawn
@@ -643,6 +649,20 @@ static void draw_leaf(Area *a, const UIRenderContext *ctx) {
         case PANEL_CURVE_EDITOR: ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Curve Editor"); break;
         default: break;
     }
+    /* draw_panel_scene's G-buffer FXAA blit leaves the GL viewport set to
+     * the Scene panel's own sub-rectangle (gbuffer_set_viewport_offset),
+     * not the full window -- every ui_rect/ui_text_draw/ui_icon_draw call
+     * (draw_area_chrome below, and every OTHER panel drawn after this one
+     * in the same walk_and_draw pass) computes its NDC position assuming a
+     * full-window viewport via u_screen_size, so without this reset those
+     * draws get remapped into whatever smaller viewport the Scene panel
+     * happened to leave behind -- e.g. the Outliner/Properties panels
+     * rendering squashed into the Scene panel's own on-screen rect instead
+     * of their own, to the right of it. Resetting unconditionally here
+     * (not just once at the end of ui_render) means every panel's chrome
+     * and every subsequent panel starts from a known-correct viewport,
+     * regardless of draw order or which panel type precedes it. */
+    glViewport(0, 0, g_ui.screen_w, g_ui.screen_h);
     draw_area_chrome(a);
 }
 

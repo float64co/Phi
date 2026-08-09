@@ -625,16 +625,36 @@ in Blender; Phi-specific data is simply data Blender doesn't render.
 Built in C, rendered entirely via WebGL 2. No third-party UI library — this is
 the resolved decision over Dear ImGui (see Hard Architectural Decisions).
 
-**Status (2026-08-09): first real editor shell landed, then a same-day
-feedback round** — build-verified on native, win32 (real Intel Arc
-hardware), and wasm for the initial shell; this round's palette/menu-row/
-Outliner fixes (below) are native+win32 build-verified, wasm build-pending
-(no `emcc` toolchain in the environment this round ran in — no C-level risk
-since wasm shares the exact same `client/*.c`, but flag honestly rather than
-claim a check that didn't happen). Strategic context: Phi is no longer aimed
-at being Qek's (the rocket-arena game's) engine specifically — Qek is its
-own separate project — Phi is now aimed at general UE5/Blender-territory
-editor work. This is the first UI that isn't Qek's HUD/dev console.
+**Status (2026-08-09): first real editor shell landed, then two same-day
+feedback rounds** — build-verified on native, win32 (real Intel Arc
+hardware), and wasm throughout, `emcc` reachable via `source
+~/src/c/emsdk/emsdk_env.sh` (not on `PATH` by default). Strategic context:
+Phi is no longer aimed at being Qek's (the rocket-arena game's) engine
+specifically — Qek is its own separate project — Phi is now aimed at
+general UE5/Blender-territory editor work. This is the first UI that isn't
+Qek's HUD/dev console.
+
+**Stale-viewport bug (found and fixed the same day)**: after the palette/
+menu-row round landed, the Outliner and Properties panels rendered visibly
+too far left — squashed into roughly the Scene panel's own on-screen
+rectangle instead of occupying their own column to its right, with a dead
+black strip along the window's right edge. Root cause: `draw_panel_scene`'s
+G-buffer FXAA blit sets `glViewport` to the Scene panel's own sub-rectangle
+(`gbuffer_set_viewport_offset`), and nothing reset it back to the full
+window before `draw_area_chrome` (Scene's own border/icon) or the *next*
+panels in the tree drew their 2D UI rects — every `ui_rect`/`ui_text_draw`/
+`ui_icon_draw` call computes its NDC position assuming a full-window
+viewport via the `u_screen_size` uniform, so those draws got remapped by
+the GPU into whatever smaller viewport the Scene panel had left behind. The
+previous single `glViewport` reset in `ui_render()` ran only once, after
+the *entire* panel tree had already been walked and drawn — too late for
+everything except the branding bar/menu row that come after it. Fixed by
+resetting the viewport to the full window unconditionally in `draw_leaf()`,
+right after each panel's own content-drawing call and before its chrome —
+diagnosed via a temporary `glReadPixels` full-frame PPM dump (added, used,
+then removed — not a shipped feature) rather than guessing from the
+symptom description, confirming the exact pixel boundaries before and
+after the fix.
 
 - **SDF text rendering** (`client/font.c`/`.h`) — real SDF, not a plain-
   bitmap compromise: `stb_truetype.h` (vendored, public domain/MIT, same
@@ -671,17 +691,24 @@ editor work. This is the first UI that isn't Qek's HUD/dev console.
   draggable yet — the tree structure supports it (each split already
   stores its own fraction), the mouse-drag interaction is follow-up work.
 - **Branding bar** — a fixed top strip using https://float64co.github.io's
-  *actual* color palette (`--bg #f5f7fa`, `--border #e0e4ea`, `--acc
-  #00bfff`, and the brand mark's own `#87CEEB` pill), not an adapted or
-  deliberately-distinct one: Phi is a Float64 project, so this is Phi's own
-  brand identity, correctly reused rather than avoided. Brand mark ("Phi")
-  keeps the bold-italic pill treatment (colored background, white text)
-  from that site's design language. Height is derived from `UI_PHI`, not a
-  flat pixel constant (`UI_MENU_H = UI_FONT_SIZE * UI_PHI`, `UI_BAR_H =
-  UI_MENU_H * UI_PHI`, together forming `UI_TOP_CHROME_H`) — a real,
-  noticeably shorter bar than the original flat 48px version, per explicit
-  request. Undo/redo icon buttons live here (Zenith's icons, not yet wired
-  to a real undo stack — no undoable actions exist yet to drive one).
+  *actual* color palette (`--bg #f5f7fa`, `--border #e0e4ea`, and the brand
+  mark's own two-span pill colors), not an adapted or deliberately-distinct
+  one: Phi is a Float64 project, so this is Phi's own brand identity,
+  correctly reused rather than avoided. The brand mark itself matches that
+  site's real markup structure exactly (`<span id=float64>` + `<span
+  id=welcome>`, two conjoined pills, no gap): "Float64" (bold italic, white
+  on `#87CEEB`) directly adjacent to "Phi" (bold, white on black, not
+  italic — the site's own second span isn't italic either despite the
+  parent's italic font-style). The pills sit flush against the viewport's
+  left edge (x=0) and flush against the bar's own top and bottom (pill
+  height == `UI_BAR_H` exactly), unlike the site's version which has nav
+  padding and its own internal pill padding. Bar height is derived from
+  `UI_PHI`, not a flat pixel constant (`UI_MENU_H = UI_FONT_SIZE * UI_PHI`,
+  `UI_BAR_H = UI_MENU_H * UI_PHI`, together forming `UI_TOP_CHROME_H`) — a
+  real, noticeably shorter bar than the original flat 48px version, per
+  explicit request. Undo/redo icon buttons live here (Zenith's icons, not
+  yet wired to a real undo stack — no undoable actions exist yet to drive
+  one).
 - **Main menu row** — a second strip directly under the branding bar
   (height `UI_MENU_H`), plain File/Edit/View/Help labels with no dropdown
   content yet — proves the chrome has a place for a real menu system,
