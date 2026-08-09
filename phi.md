@@ -958,6 +958,56 @@ server. UI-side focus/blur/type-away behavior itself still needs a real
 window to click through, same outstanding limitation as the rest of this
 panel's live-GUI verification.
 
+**Create + rename gaps closed, 2026-08-09.** The two things flagged as
+"not built this pass" above now are.
+
+*Create* needed two new pieces of infrastructure that didn't exist yet:
+`halfedge_save_glb_buffer` (`halfedge_gltf.c`) is `halfedge_save_gltf`'s
+twin, producing a self-contained GLB in a `malloc`'d memory buffer
+instead of writing loose `.gltf`+`.bin` files — needed because main.c has
+to build one at runtime from whatever `MeshObject` is currently selected,
+not offline from a script. `client/http_client_native.c`/`.h` (new,
+native-Linux-only — no win32/Winsock twin or wasm/`fetch()` equivalent
+yet, flagged rather than silently assumed) is a minimal blocking POST
+client reusing `ws_client_native.c`'s own `getaddrinfo`/`connect`
+pattern, plus a percent-encoder (asset names/tags can contain spaces) and
+a `ws://host:port/path` parser so the HTTP client points at the same
+server the WS connection is already talking to. The Scene context menu's
+new "Save as Asset" row (`CTX_ACTION_SAVE_AS_ASSET`) starts a pending
+create in the Asset Browser's edit form (see below) rather than
+uploading immediately — the actual flatten-encode-POST only happens once
+that form is submitted with a real name.
+
+*Rename* and *Create* ended up sharing one implementation, once it became
+clear they're the same interaction shape (a name field, a tags field,
+Save/Cancel) pointed at two different backends (`PKT_ASSET_UPDATE` for an
+existing asset vs. an HTTP POST for a new one). `AssetBrowserState` gained
+`editing_id` (a signed sentinel: `AB_EDITING_NONE` / `AB_EDITING_NEW` /
+an existing asset's real id) plus one shared `edit_name`/`edit_tags`
+buffer pair, and `AssetBrowserFocus` grew from a bool (just search) to a
+real enum covering search/edit-name/edit-tags, since three text fields
+can now compete with the Python console for keystrokes instead of one.
+The panel gained a Rename button alongside Load/Delete, and an edit form
+that appears above the list (pushing it down by its own height) whenever
+`editing_id != AB_EDITING_NONE` — Blender-style click-away blurs
+*keyboard focus* on the open form but never discards it (an in-progress
+edit is a draft, not lost work just because you clicked elsewhere or
+switched the panel to something else and back).
+
+Verified: a new integration test (ad hoc, not committed as a permanent
+harness — see the pattern below for what *is* kept) drove the exact
+sequence `main.c`'s `create_requested` branch runs — flatten
+`assets/cube.gltf`'s loaded `HalfEdgeMesh` to a GLB buffer, percent-encode
+a name with a space and an ampersand in it, parse host/port out of a real
+`ws://` URL, POST — against the live server, got back a real new asset
+id, and confirmed the uploaded file loads correctly through the same
+`halfedge_load_gltf` path Load already used. All three build targets
+(native/wasm/win32) still link clean; `mesh_edit_test`/`fracture_test`/
+`mp_console_test`/`asset_protocol_test` all still pass. Live GUI
+click-through (actually seeing the edit form, clicking Rename, watching
+the caret) is still not verified in this sandbox, same `XOpenDisplay()`
+limitation as everything else in this session that needs a real window.
+
 ### Native UI System
 
 Built in C, rendered entirely via WebGL 2. No third-party UI library — this is

@@ -13,6 +13,14 @@
 #include "font.h"
 #include "svg_icon.h"
 #include "asset_browser.h"
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+/* Asset Browser Create flow (HTTP POST) -- native-Linux-only for now, see
+ * http_client_native.h's own comment: no win32 (Winsock) twin or wasm
+ * (fetch()) equivalent exists yet, flagged rather than silently assumed
+ * to work everywhere net.c already does. */
+#include "http_client_native.h"
+#define PHI_HAVE_HTTP_CLIENT 1
+#endif
 #include "ui.h"
 
 #include <stdlib.h>
@@ -459,20 +467,32 @@ static void main_loop(void *userdata) {
                 printf("[main] context menu Fracture: no MeshObject selected\n");
             }
             break;
+        case CTX_ACTION_SAVE_AS_ASSET:
+            /* Starts a pending create in the Asset Browser's shared edit
+             * form (see asset_browser_begin_create) -- doesn't upload
+             * anything yet, that only happens once g_ab.create_requested
+             * fires from actually submitting the form (see above). */
+            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
+                asset_browser_begin_create(&g_ab, "MeshObject");
+            } else {
+                printf("[main] context menu Save as Asset: no MeshObject selected\n");
+            }
+            break;
         default:
             break;
     }
 
-    /* Exactly one text field gets this frame's keystrokes: the Asset
-     * Browser's search bar if it's focused (a click inside it, see ui.c's
-     * hit_test_area), otherwise the Python console -- which is back to
-     * being the unconditional default the moment search isn't focused,
-     * same as before this search bar existed. asset_browser_update_search
-     * is a no-op that leaves InputState untouched when unfocused, so
-     * falling through to pyconsole_update in that case is always correct,
-     * not just "usually". */
-    if (g_ab.search_focused) {
-        asset_browser_update_search(&g_ab, &g_inp);
+    /* Exactly one text field gets this frame's keystrokes: whichever of
+     * the Asset Browser's search/edit_name/edit_tags fields is focused
+     * (a click inside it, see ui.c's hit_test_area), otherwise the Python
+     * console -- which is back to being the unconditional default the
+     * moment nothing else is focused, same as before this panel's text
+     * fields existed. asset_browser_update_focused_text is a no-op that
+     * leaves InputState untouched when focus is AB_FOCUS_NONE, so falling
+     * through to pyconsole_update in that case is always correct, not
+     * just "usually". */
+    if (g_ab.focus != AB_FOCUS_NONE) {
+        asset_browser_update_focused_text(&g_ab, &g_inp);
     } else {
         pyconsole_update(&g_cs, &g_inp);
     }
@@ -505,6 +525,51 @@ static void main_loop(void *userdata) {
     if (g_ab.delete_requested) {
         g_ab.delete_requested = 0;
         net_send_asset_delete(&g_ns, g_ab.delete_requested_id);
+    }
+    if (g_ab.update_requested) {
+        g_ab.update_requested = 0;
+        /* editing_id is always >= 0 here -- asset_browser_update_focused_
+         * text only ever sets update_requested from the AB_FOCUS_EDIT_TAGS
+         * case, and only when editing_id >= 0 (see its own switch). */
+        net_send_asset_update(&g_ns, (uint32_t)g_ab.editing_id, g_ab.edit_name, g_ab.edit_tags);
+        asset_browser_cancel_edit(&g_ab);
+    }
+    if (g_ab.create_requested) {
+        g_ab.create_requested = 0;
+#ifdef PHI_HAVE_HTTP_CLIENT
+        if (!g_test_mesh_loaded || !g_test_mesh_object.hem) {
+            printf("[main] asset browser: create requested, but no MeshObject is loaded to save\n");
+        } else {
+            uint8_t *glb; int glb_len;
+            if (!halfedge_save_glb_buffer(g_test_mesh_object.hem, &glb, &glb_len)) {
+                printf("[main] asset browser: failed to flatten the current MeshObject to GLB\n");
+            } else {
+                char name_enc[192], tags_enc[192], path_and_query[512];
+                http_url_encode(g_ab.edit_name[0] ? g_ab.edit_name : "Untitled", name_enc, sizeof(name_enc));
+                http_url_encode(g_ab.edit_tags, tags_enc, sizeof(tags_enc));
+                snprintf(path_and_query, sizeof(path_and_query), "/assets?name=%s&tags=%s", name_enc, tags_enc);
+
+                char host[128]; int port;
+                if (http_parse_ws_host_port(g_ns.ws_url, host, sizeof(host), &port) != 0) {
+                    printf("[main] asset browser: couldn't parse a host:port to POST to from '%s'\n", g_ns.ws_url);
+                } else {
+                    char resp[256]; int status;
+                    int ok = http_post_native(host, port, path_and_query, glb, glb_len, resp, sizeof(resp), &status);
+                    printf("[main] asset browser: POST %s -> ok=%d status=%d resp=\"%s\"\n",
+                           path_and_query, ok, status, resp);
+                    if (ok && status == 200) {
+                        asset_browser_cancel_edit(&g_ab);
+                        g_ab.refresh_requested = 1;   /* picked up next frame -- shows the new asset immediately */
+                    }
+                }
+                free(glb);
+            }
+        }
+#else
+        printf("[main] asset browser: create isn't available on this build target "
+               "(no HTTP client -- see http_client_native.h's comment)\n");
+        asset_browser_cancel_edit(&g_ab);
+#endif
     }
 
     /* --- Render --- */

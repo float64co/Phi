@@ -152,3 +152,92 @@ int halfedge_save_gltf(const HalfEdgeMesh *hem, const char *gltf_path) {
     free(positions); free(indices); free(bin_path);
     return 1;
 }
+
+int halfedge_save_glb_buffer(const HalfEdgeMesh *hem, uint8_t **out_data, int *out_len) {
+    float *positions; unsigned short *indices;
+    int pos_count, index_count;
+    halfedge_flatten_triangles(hem, &positions, &pos_count, &indices, &index_count);
+    if (pos_count <= 0) {
+        printf("[halfedge_gltf] halfedge_save_glb_buffer: empty mesh, nothing to save\n");
+        free(positions); free(indices);
+        return 0;
+    }
+
+    size_t pos_bytes = sizeof(float) * 3 * (size_t)pos_count;
+    size_t idx_bytes = sizeof(unsigned short) * (size_t)index_count;
+    size_t bin_bytes = pos_bytes + idx_bytes;
+
+    float pmin[3], pmax[3];
+    pmin[0] = pmax[0] = positions[0];
+    pmin[1] = pmax[1] = positions[1];
+    pmin[2] = pmax[2] = positions[2];
+    for (int i = 1; i < pos_count; i++) {
+        for (int a = 0; a < 3; a++) {
+            float v = positions[i*3+a];
+            if (v < pmin[a]) pmin[a] = v;
+            if (v > pmax[a]) pmax[a] = v;
+        }
+    }
+
+    /* Same JSON shape halfedge_save_gltf emits above, minus the buffer's
+     * "uri" -- GLB's buffer 0 is implicitly the BIN chunk that follows,
+     * no uri needed or allowed per the glTF 2.0 binary container spec. */
+    const char *json_fmt =
+        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"phi halfedge_save_glb_buffer\"},"
+        "\"buffers\":[{\"byteLength\":%zu}],"
+        "\"bufferViews\":["
+        "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%zu,\"target\":34962},"
+        "{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu,\"target\":34963}"
+        "],"
+        "\"accessors\":["
+        "{\"bufferView\":0,\"byteOffset\":0,\"componentType\":5126,\"count\":%d,\"type\":\"VEC3\","
+        "\"min\":[%g,%g,%g],\"max\":[%g,%g,%g]},"
+        "{\"bufferView\":1,\"byteOffset\":0,\"componentType\":5123,\"count\":%d,\"type\":\"SCALAR\"}"
+        "],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1,\"mode\":4}]}],"
+        "\"nodes\":[{\"mesh\":0}],"
+        "\"scenes\":[{\"nodes\":[0]}],"
+        "\"scene\":0}";
+
+    int json_len = snprintf(NULL, 0, json_fmt, bin_bytes, pos_bytes, pos_bytes, idx_bytes,
+                             pos_count, (double)pmin[0], (double)pmin[1], (double)pmin[2],
+                             (double)pmax[0], (double)pmax[1], (double)pmax[2], index_count);
+    if (json_len < 0) { free(positions); free(indices); return 0; }
+
+    char *json_txt = (char *)malloc((size_t)json_len + 1);
+    snprintf(json_txt, (size_t)json_len + 1, json_fmt, bin_bytes, pos_bytes, pos_bytes, idx_bytes,
+             pos_count, (double)pmin[0], (double)pmin[1], (double)pmin[2],
+             (double)pmax[0], (double)pmax[1], (double)pmax[2], index_count);
+
+    int json_pad = (4 - (json_len % 4)) % 4;
+    int bin_pad  = (4 - ((int)bin_bytes % 4)) % 4;
+    int json_chunk_len = json_len + json_pad;
+    int bin_chunk_len  = (int)bin_bytes + bin_pad;
+    int total_len = 12 + 8 + json_chunk_len + 8 + bin_chunk_len;
+
+    uint8_t *buf = (uint8_t *)malloc((size_t)total_len);
+    uint8_t *p = buf;
+
+    memcpy(p, "glTF", 4); p += 4;
+    uint32_t version = 2; memcpy(p, &version, 4); p += 4;
+    uint32_t total_len_u32 = (uint32_t)total_len; memcpy(p, &total_len_u32, 4); p += 4;
+
+    uint32_t jclen = (uint32_t)json_chunk_len; memcpy(p, &jclen, 4); p += 4;
+    uint32_t jctype = 0x4E4F534A; memcpy(p, &jctype, 4); p += 4;   /* 'JSON' */
+    memcpy(p, json_txt, (size_t)json_len); p += json_len;
+    for (int i = 0; i < json_pad; i++) *p++ = ' ';
+
+    uint32_t bclen = (uint32_t)bin_chunk_len; memcpy(p, &bclen, 4); p += 4;
+    uint32_t bctype = 0x004E4942; memcpy(p, &bctype, 4); p += 4;   /* 'BIN\0' */
+    memcpy(p, positions, pos_bytes); p += pos_bytes;
+    memcpy(p, indices, idx_bytes); p += idx_bytes;
+    for (int i = 0; i < bin_pad; i++) *p++ = 0;
+
+    free(json_txt);
+    free(positions);
+    free(indices);
+
+    *out_data = buf;
+    *out_len = total_len;
+    return 1;
+}

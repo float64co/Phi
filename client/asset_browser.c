@@ -7,6 +7,7 @@ static AssetBrowserState *s_ab = NULL;
 void asset_browser_init(AssetBrowserState *ab) {
     memset(ab, 0, sizeof(*ab));
     ab->selected = -1;
+    ab->editing_id = AB_EDITING_NONE;
 }
 
 void asset_browser_set_target(AssetBrowserState *ab) {
@@ -58,13 +59,15 @@ void asset_browser_mark_dirty(void) {
     if (s_ab) s_ab->refresh_requested = 1;
 }
 
-void asset_browser_update_search(AssetBrowserState *ab, InputState *inp) {
-    if (!ab->search_focused) return;   /* leave InputState untouched -- main.c falls back to pyconsole_update this frame */
-
+/* Feeds InputState's typed_chars/backspace into (buf, *len_ptr) up to
+ * cap-1, draining InputState the same way every text field here always
+ * has. No history concept for any of these fields -- histup/histdown are
+ * dropped rather than left to leak into whichever field is focused next
+ * frame. Returns whether Enter was pressed this frame; callers decide
+ * what that means per field. */
+static int consume_text_input(char *buf, int *len_ptr, int cap, InputState *inp) {
     int enter  = inp->enter_edge;     inp->enter_edge     = 0;
     int backsp = inp->backspace_edge; inp->backspace_edge = 0;
-    /* No history concept for a search box -- drop rather than let these
-     * leak into whichever field is focused next frame. */
     inp->histup_edge = inp->histdown_edge = 0;
 
     char chars[TYPED_CHAR_QUEUE_SIZE];
@@ -74,15 +77,67 @@ void asset_browser_update_search(AssetBrowserState *ab, InputState *inp) {
 
     for (int i = 0; i < nchars; i++) {
         char c = chars[i];
-        if (ab->search_len < ASSET_SEARCH_LEN - 1) {
-            ab->search[ab->search_len++] = c;
-            ab->search[ab->search_len]   = 0;
+        if (*len_ptr < cap - 1) {
+            buf[(*len_ptr)++] = c;
+            buf[*len_ptr] = 0;
         }
     }
-    if (backsp && ab->search_len > 0) {
-        ab->search[--ab->search_len] = 0;
+    if (backsp && *len_ptr > 0) {
+        buf[--(*len_ptr)] = 0;
     }
-    if (enter) {
-        ab->refresh_requested = 1;   /* submit -- main.c sends the current search text, same as clicking Refresh */
+    return enter;
+}
+
+void asset_browser_update_focused_text(AssetBrowserState *ab, InputState *inp) {
+    switch (ab->focus) {
+    case AB_FOCUS_SEARCH: {
+        int enter = consume_text_input(ab->search, &ab->search_len, ASSET_SEARCH_LEN, inp);
+        if (enter) ab->refresh_requested = 1;   /* same as clicking Refresh, using whatever's currently typed */
+        break;
     }
+    case AB_FOCUS_EDIT_NAME: {
+        int enter = consume_text_input(ab->edit_name, &ab->edit_name_len, ASSET_NAME_LEN, inp);
+        if (enter) ab->focus = AB_FOCUS_EDIT_TAGS;   /* Tab-like: Enter in Name moves to Tags, doesn't submit yet */
+        break;
+    }
+    case AB_FOCUS_EDIT_TAGS: {
+        int enter = consume_text_input(ab->edit_tags, &ab->edit_tags_len, ASSET_TAGS_LEN, inp);
+        if (enter) {
+            if (ab->editing_id == AB_EDITING_NEW) ab->create_requested = 1;
+            else if (ab->editing_id >= 0) ab->update_requested = 1;
+        }
+        break;
+    }
+    case AB_FOCUS_NONE:
+    default:
+        return;   /* no-op -- leave InputState untouched so main.c falls back to pyconsole_update this frame */
+    }
+}
+
+void asset_browser_begin_rename(AssetBrowserState *ab, int index) {
+    if (index < 0 || index >= ab->count) return;
+    const AssetSummary *a = &ab->items[index];
+    ab->editing_id = (int32_t)a->id;
+    strncpy(ab->edit_name, a->name, ASSET_NAME_LEN - 1);
+    ab->edit_name[ASSET_NAME_LEN - 1] = 0;
+    ab->edit_name_len = (int)strlen(ab->edit_name);
+    strncpy(ab->edit_tags, a->tags, ASSET_TAGS_LEN - 1);
+    ab->edit_tags[ASSET_TAGS_LEN - 1] = 0;
+    ab->edit_tags_len = (int)strlen(ab->edit_tags);
+    ab->focus = AB_FOCUS_EDIT_NAME;
+}
+
+void asset_browser_begin_create(AssetBrowserState *ab, const char *default_name) {
+    ab->editing_id = AB_EDITING_NEW;
+    strncpy(ab->edit_name, default_name, ASSET_NAME_LEN - 1);
+    ab->edit_name[ASSET_NAME_LEN - 1] = 0;
+    ab->edit_name_len = (int)strlen(ab->edit_name);
+    ab->edit_tags[0] = 0;
+    ab->edit_tags_len = 0;
+    ab->focus = AB_FOCUS_EDIT_NAME;
+}
+
+void asset_browser_cancel_edit(AssetBrowserState *ab) {
+    ab->editing_id = AB_EDITING_NONE;
+    ab->focus = AB_FOCUS_NONE;
 }

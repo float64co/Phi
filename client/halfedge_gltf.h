@@ -1,5 +1,6 @@
 #pragma once
 #include "halfedge.h"
+#include <stdint.h>
 
 /* glTF load/save boundary for HalfEdgeMesh (see halfedge.h's top comment —
  * glTF is the interchange format, this structure is the live in-memory
@@ -21,3 +22,16 @@ HalfEdgeMesh *halfedge_load_gltf(const char *path);
  * this was built to round-trip against. Returns 1 on success, 0 on
  * failure (e.g. couldn't open either output file for writing). */
 int halfedge_save_gltf(const HalfEdgeMesh *hem, const char *gltf_path);
+
+/* Same flatten as halfedge_save_gltf, but packages the result as a single
+ * self-contained GLB binary buffer in memory (malloc'd via *out_data,
+ * caller frees) instead of writing loose .gltf+.bin files -- this is the
+ * form the Asset Browser's CRUD upload endpoint requires (see phi.md's
+ * "Wire protocol: CRUD over a hybrid HTTP + WS split": create only
+ * accepts .glb). Same container shape tools/gen_test_assets.py's own
+ * write_glb hand-rolls in Python (12-byte header + JSON chunk + BIN
+ * chunk, Khronos glTF 2.0 binary spec) -- this is the C-side twin of
+ * that, needed because main.c has to build one at runtime from whatever
+ * MeshObject is currently selected, not offline from a script. Returns 1
+ * on success, 0 on failure (e.g. hem has no vertices). */
+int halfedge_save_glb_buffer(const HalfEdgeMesh *hem, uint8_t **out_data, int *out_len);

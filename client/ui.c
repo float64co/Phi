@@ -696,8 +696,9 @@ static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
  * (hit_test_area, further down) so the two can never drift apart -- same
  * pattern type_icon_rect() already established for the per-panel type-
  * switcher icon. */
-#define ASSET_BROWSER_ROW_H 20.0f
-#define ASSET_BROWSER_BTN_H 22.0f
+#define ASSET_BROWSER_ROW_H   20.0f
+#define ASSET_BROWSER_BTN_H   22.0f
+#define ASSET_BROWSER_FIELD_H 18.0f
 
 static void asset_browser_refresh_rect(Area *a, float *x, float *y, float *w, float *h) {
     *w = 64.0f; *h = 18.0f;
@@ -720,24 +721,73 @@ static void asset_browser_search_rect(Area *a, float *x, float *y, float *w, flo
     if (*w < 24.0f) *w = 24.0f;   /* degenerate-narrow-panel guard */
 }
 
-static float asset_browser_list_top(Area *a) {
+/* Where the list (or the edit form, when one's open) starts -- constant
+ * regardless of edit state, since the edit form always sits right here
+ * and pushes the list down by its own height (see asset_browser_list_top
+ * below), not the other way around. */
+static float asset_browser_content_top(Area *a) {
     return a->y + UI_PANEL_PAD + 26.0f;
 }
 
-static void asset_browser_row_rect(Area *a, int index, float *x, float *y, float *w, float *h) {
+/* Name field, tags field, and Save/Cancel buttons for the rename/create
+ * edit form -- shown whenever ab->editing_id != AB_EDITING_NONE (see
+ * asset_browser_begin_rename/begin_create), sharing one pair of buffers
+ * for both since only one edit can be active at a time. Header label text
+ * itself isn't a hit-testable rect, drawn directly in draw_panel_asset_
+ * browser. */
+static void asset_browser_edit_name_rect(Area *a, float *x, float *y, float *w, float *h) {
     *x = a->x + UI_PANEL_PAD;
-    *y = asset_browser_list_top(a) + (float)index * ASSET_BROWSER_ROW_H;
+    *y = asset_browser_content_top(a) + 16.0f;   /* below the "New Asset"/"Rename #N" header line */
+    *w = a->w - UI_PANEL_PAD * 2.0f;
+    *h = ASSET_BROWSER_FIELD_H;
+}
+static void asset_browser_edit_tags_rect(Area *a, float *x, float *y, float *w, float *h) {
+    asset_browser_edit_name_rect(a, x, y, w, h);
+    *y += ASSET_BROWSER_FIELD_H + 4.0f;
+}
+static void asset_browser_edit_buttons_rect(Area *a, float *save_x, float *save_y, float *save_w,
+                                             float *cancel_x, float *cancel_y, float *cancel_w, float *h) {
+    float tx, ty, tw, th;
+    asset_browser_edit_tags_rect(a, &tx, &ty, &tw, &th);
+    *h = ASSET_BROWSER_BTN_H;
+    *save_y = *cancel_y = ty + th + 6.0f;
+    *save_w = 70.0f; *cancel_w = 70.0f;
+    *save_x = a->x + UI_PANEL_PAD;
+    *cancel_x = *save_x + *save_w + 8.0f;
+}
+/* Total vertical space the edit form occupies, from asset_browser_
+ * content_top(a) down to where the list should actually start when the
+ * form is showing -- header(16) + name field + gap + tags field + gap +
+ * button row + trailing gap before the list. */
+static float asset_browser_edit_form_height(Area *a) {
+    float bx, by, bw, bh;
+    asset_browser_edit_buttons_rect(a, &bx, &by, &bw, &bx, &by, &bw, &bh);
+    return (by + bh + 8.0f) - asset_browser_content_top(a);
+}
+
+static float asset_browser_list_top(Area *a, const AssetBrowserState *ab) {
+    float top = asset_browser_content_top(a);
+    if (ab->editing_id != AB_EDITING_NONE) top += asset_browser_edit_form_height(a);
+    return top;
+}
+
+static void asset_browser_row_rect(Area *a, const AssetBrowserState *ab, int index,
+                                    float *x, float *y, float *w, float *h) {
+    *x = a->x + UI_PANEL_PAD;
+    *y = asset_browser_list_top(a, ab) + (float)index * ASSET_BROWSER_ROW_H;
     *w = a->w - UI_PANEL_PAD * 2.0f;
     *h = ASSET_BROWSER_ROW_H;
 }
 
 static void asset_browser_action_rects(Area *a, float *load_x, float *load_y, float *load_w,
+                                        float *rename_x, float *rename_y, float *rename_w,
                                         float *del_x, float *del_y, float *del_w, float *h) {
     *h = ASSET_BROWSER_BTN_H;
-    *load_y = *del_y = a->y + a->h - UI_PANEL_PAD - *h;
-    *load_w = 90.0f; *del_w = 70.0f;
-    *load_x = a->x + UI_PANEL_PAD;
-    *del_x  = *load_x + *load_w + 8.0f;
+    *load_y = *rename_y = *del_y = a->y + a->h - UI_PANEL_PAD - *h;
+    *load_w = 60.0f; *rename_w = 70.0f; *del_w = 70.0f;
+    *load_x   = a->x + UI_PANEL_PAD;
+    *rename_x = *load_x + *load_w + 8.0f;
+    *del_x    = *rename_x + *rename_w + 8.0f;
 }
 
 /* Finds the first leaf Area of the given panel type, or NULL if none is
@@ -756,11 +806,36 @@ static Area *find_area_by_type_r(Area *a, PanelType t) {
  * UI_PANEL_PAD`), just precomputed once here since hit-testing needs the
  * same count, not just the draw loop. */
 static int asset_browser_visible_row_count(Area *a, const AssetBrowserState *ab) {
-    float lx, ly, lw, dx, dy, dw, bh;
-    asset_browser_action_rects(a, &lx, &ly, &lw, &dx, &dy, &dw, &bh);
-    float avail = ly - 6.0f - asset_browser_list_top(a);
+    float lx, ly, lw, rnx, rny, rnw, dx, dy, dw, bh;
+    asset_browser_action_rects(a, &lx, &ly, &lw, &rnx, &rny, &rnw, &dx, &dy, &dw, &bh);
+    float avail = ly - 6.0f - asset_browser_list_top(a, ab);
     int max_rows = avail > 0.0f ? (int)(avail / ASSET_BROWSER_ROW_H) : 0;
     return ab->count < max_rows ? ab->count : max_rows;
+}
+
+/* Draws one text-entry field (used for both the search bar and the
+ * rename/create edit form's name/tags fields): background, focus accent,
+ * current text or a dimmed placeholder, and a blinking caret when this
+ * exact field owns focus. `is_focused` decides the accent/caret; the
+ * caret's x position accounts for whatever's already typed via
+ * font_text_width, same measurement draw_panel_console's own caret uses. */
+static void draw_text_field(float x, float y, float w, float h, const char *text,
+                             const char *placeholder, int is_focused) {
+    ui_rect(x, y, w, h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
+    if (is_focused) {
+        ui_rect(x, y, w, 2.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
+    }
+    if (text[0]) {
+        ui_text_draw(x + 6.0f, y + 3.0f, text, g_ui.font_body, 12.0f,
+                     UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    } else if (!is_focused && placeholder) {
+        ui_text_draw(x + 6.0f, y + 3.0f, placeholder, g_ui.font_body, 12.0f,
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+    }
+    if (is_focused && fmod(phi_platform_now(), 1.0) < 0.5) {
+        float caret_x = x + 6.0f + (text[0] ? font_text_width(g_ui.font_body, text, 12.0f) : 0.0f);
+        ui_rect(caret_x, y + 2.0f, 6.0f, h - 4.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.9f);
+    }
 }
 
 static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
@@ -781,34 +856,41 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
 
     float sx, sy, sw, sh;
     asset_browser_search_rect(a, &sx, &sy, &sw, &sh);
-    ui_rect(sx, sy, sw, sh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
-    if (ab->search_focused) {
-        /* Thin accent line along the top edge -- cheap, unambiguous focus
-         * indicator, doesn't need a second widget color to exist. */
-        ui_rect(sx, sy, sw, 2.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
-    }
-    if (ab->search[0]) {
-        ui_text_draw(sx + 6.0f, sy + 3.0f, ab->search, g_ui.font_body, 12.0f,
-                     UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
-    } else if (!ab->search_focused) {
-        ui_text_draw(sx + 6.0f, sy + 3.0f, "Search...", g_ui.font_body, 12.0f,
+    draw_text_field(sx, sy, sw, sh, ab->search, "Search...", ab->focus == AB_FOCUS_SEARCH);
+
+    if (ab->editing_id != AB_EDITING_NONE) {
+        float content_top = asset_browser_content_top(a);
+        char header[48];
+        if (ab->editing_id == AB_EDITING_NEW) snprintf(header, sizeof(header), "New Asset");
+        else snprintf(header, sizeof(header), "Rename #%d", ab->editing_id);
+        ui_text_draw(a->x + UI_PANEL_PAD, content_top, header, g_ui.font_body, 12.0f,
                      UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-    }
-    /* Caret -- same ~1Hz wall-clock blink as the Python console's, see
-     * draw_panel_console. */
-    if (ab->search_focused && fmod(phi_platform_now(), 1.0) < 0.5) {
-        float caret_x = sx + 6.0f + (ab->search[0] ? font_text_width(g_ui.font_body, ab->search, 12.0f) : 0.0f);
-        ui_rect(caret_x, sy + 2.0f, 6.0f, sh - 4.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.9f);
+
+        float nx, ny, nw, nh;
+        asset_browser_edit_name_rect(a, &nx, &ny, &nw, &nh);
+        draw_text_field(nx, ny, nw, nh, ab->edit_name, "Name...", ab->focus == AB_FOCUS_EDIT_NAME);
+
+        float tx, ty, tw, th;
+        asset_browser_edit_tags_rect(a, &tx, &ty, &tw, &th);
+        draw_text_field(tx, ty, tw, th, ab->edit_tags, "tags, comma, separated", ab->focus == AB_FOCUS_EDIT_TAGS);
+
+        float bsx, bsy, bsw, bcx, bcy, bcw, bbh;
+        asset_browser_edit_buttons_rect(a, &bsx, &bsy, &bsw, &bcx, &bcy, &bcw, &bbh);
+        ui_rect(bsx, bsy, bsw, bbh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
+        ui_text_draw(bsx + 8.0f, bsy + 4.0f, ab->editing_id == AB_EDITING_NEW ? "Create" : "Save",
+                     g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+        ui_rect(bcx, bcy, bcw, bbh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
+        ui_text_draw(bcx + 8.0f, bcy + 4.0f, "Cancel", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     }
 
     if (ab->count == 0) {
-        ui_text_draw(a->x + UI_PANEL_PAD, asset_browser_list_top(a), "No assets indexed. Click Refresh.",
+        ui_text_draw(a->x + UI_PANEL_PAD, asset_browser_list_top(a, ab), "No assets indexed. Click Refresh.",
                      g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
     }
     int visible = asset_browser_visible_row_count(a, ab);
     for (int i = 0; i < visible; i++) {
         float x, y, w, h;
-        asset_browser_row_rect(a, i, &x, &y, &w, &h);
+        asset_browser_row_rect(a, ab, i, &x, &y, &w, &h);
         if (i == ab->selected) {
             ui_rect(x, y - 2.0f, w, h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.35f);
         }
@@ -821,12 +903,14 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
         ui_text_draw(x + 4.0f, y, line, g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     }
 
-    float lx, ly, lw, dx, dy, dw, bh;
-    asset_browser_action_rects(a, &lx, &ly, &lw, &dx, &dy, &dw, &bh);
+    float lx, ly, lw, rnx, rny, rnw, dx, dy, dw, bh;
+    asset_browser_action_rects(a, &lx, &ly, &lw, &rnx, &rny, &rnw, &dx, &dy, &dw, &bh);
     int have_sel = ab->selected >= 0 && ab->selected < ab->count;
     float dim = have_sel ? 1.0f : 0.4f;
     ui_rect(lx, ly, lw, bh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, dim);
     ui_text_draw(lx + 8.0f, ly + 4.0f, "Load", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, dim);
+    ui_rect(rnx, rny, rnw, bh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, dim);
+    ui_text_draw(rnx + 8.0f, rny + 4.0f, "Rename", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, dim);
     ui_rect(dx, dy, dw, bh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, dim);
     ui_text_draw(dx + 8.0f, dy + 4.0f, "Delete", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, dim);
 }
@@ -910,7 +994,8 @@ void ui_render(const UIRenderContext *ctx) {
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
         static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
-                                        "Extrude Face", "Inset Face", "Loop Cut", "Fracture (Voronoi)" };
+                                        "Extrude Face", "Inset Face", "Loop Cut", "Fracture (Voronoi)",
+                                        "Save as Asset" };
         int n = (int)(sizeof(items) / sizeof(items[0]));
         float menu_h = row_h * n;
         ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
@@ -949,12 +1034,14 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
                 int row = (int)(((float)y - menu_y) / row_h);
                 if (row >= 0 && row < PANEL_TYPE_COUNT) {
                     /* Switching this leaf away from PANEL_ASSET_BROWSER
-                     * makes its search bar disappear from the layout --
-                     * drop its focus too, or the console would stay
+                     * makes its search/edit fields disappear from the
+                     * layout -- drop focus (not editing_id: an in-progress
+                     * rename/create is a draft, not discarded just because
+                     * its panel got hidden) or the console would stay
                      * silently locked out with no visible box left to
                      * click to blur it. */
                     if (a->panel_type == PANEL_ASSET_BROWSER && ctx->asset_browser)
-                        ctx->asset_browser->search_focused = 0;
+                        ctx->asset_browser->focus = AB_FOCUS_NONE;
                     a->panel_type = (PanelType)row;
                 }
                 a->type_menu_open = 0;
@@ -999,11 +1086,37 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
         float sx, sy, sw, sh;
         asset_browser_search_rect(a, &sx, &sy, &sw, &sh);
         if (point_in_rect((float)x, (float)y, sx, sy, sw, sh)) {
-            ab->search_focused = 1;
+            ab->focus = AB_FOCUS_SEARCH;
             return 1;
         }
 
-        float list_top = asset_browser_list_top(a);
+        if (ab->editing_id != AB_EDITING_NONE) {
+            float nx, ny, nw, nh;
+            asset_browser_edit_name_rect(a, &nx, &ny, &nw, &nh);
+            if (point_in_rect((float)x, (float)y, nx, ny, nw, nh)) {
+                ab->focus = AB_FOCUS_EDIT_NAME;
+                return 1;
+            }
+            float tx, ty, tw, th;
+            asset_browser_edit_tags_rect(a, &tx, &ty, &tw, &th);
+            if (point_in_rect((float)x, (float)y, tx, ty, tw, th)) {
+                ab->focus = AB_FOCUS_EDIT_TAGS;
+                return 1;
+            }
+            float bsx, bsy, bsw, bcx, bcy, bcw, bbh;
+            asset_browser_edit_buttons_rect(a, &bsx, &bsy, &bsw, &bcx, &bcy, &bcw, &bbh);
+            if (point_in_rect((float)x, (float)y, bsx, bsy, bsw, bbh)) {
+                if (ab->editing_id == AB_EDITING_NEW) ab->create_requested = 1;
+                else ab->update_requested = 1;
+                return 1;
+            }
+            if (point_in_rect((float)x, (float)y, bcx, bcy, bcw, bbh)) {
+                asset_browser_cancel_edit(ab);
+                return 1;
+            }
+        }
+
+        float list_top = asset_browser_list_top(a, ab);
         if ((float)y >= list_top - 2.0f) {
             int visible = asset_browser_visible_row_count(a, ab);
             int row = (int)(((float)y - (list_top - 2.0f)) / ASSET_BROWSER_ROW_H);
@@ -1013,12 +1126,16 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
             }
         }
 
-        float lx, ly, lw, dx, dy, dw, bh;
-        asset_browser_action_rects(a, &lx, &ly, &lw, &dx, &dy, &dw, &bh);
+        float lx, ly, lw, rnx, rny, rnw, dx, dy, dw, bh;
+        asset_browser_action_rects(a, &lx, &ly, &lw, &rnx, &rny, &rnw, &dx, &dy, &dw, &bh);
         if (ab->selected >= 0 && ab->selected < ab->count) {
             if (point_in_rect((float)x, (float)y, lx, ly, lw, bh)) {
                 ab->load_requested = 1;
                 ab->load_requested_id = ab->items[ab->selected].id;
+                return 1;
+            }
+            if (point_in_rect((float)x, (float)y, rnx, rny, rnw, bh)) {
+                asset_browser_begin_rename(ab, ab->selected);
                 return 1;
             }
             if (point_in_rect((float)x, (float)y, dx, dy, dw, bh)) {
@@ -1036,15 +1153,16 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
         static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
-                                        "Extrude Face", "Inset Face", "Loop Cut", "Fracture (Voronoi)" };
+                                        "Extrude Face", "Inset Face", "Loop Cut", "Fracture (Voronoi)",
+                                        "Save as Asset" };
         /* Order matches items[] above -- row index maps straight across.
-         * Only ADD_MESH/DELETE are acted on by main.c right now; the rest
-         * still just get reported via the printf below. */
+         * Frame Selected/Frame All/Deselect All still just get reported
+         * via the printf below; everything else is acted on by main.c. */
         static const CtxMenuAction actions[] = {
             CTX_ACTION_ADD_MESH, CTX_ACTION_DELETE, CTX_ACTION_FRAME_SELECTED,
             CTX_ACTION_FRAME_ALL, CTX_ACTION_DESELECT_ALL,
             CTX_ACTION_EXTRUDE_FACE, CTX_ACTION_INSET_FACE, CTX_ACTION_LOOP_CUT,
-            CTX_ACTION_FRACTURE
+            CTX_ACTION_FRACTURE, CTX_ACTION_SAVE_AS_ASSET
         };
         int n = (int)(sizeof(items) / sizeof(items[0]));
         float menu_h = row_h * n;
@@ -1062,24 +1180,32 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
         if (button == 1 && pressed) { g_ui.ctx_menu_open = 0; return 1; }
     }
 
-    /* Asset Browser search bar blur: any click that doesn't land inside
-     * the search bar itself drops its focus -- same click-away-dismisses
-     * convention the type-switcher dropdown and context menu above
-     * already use, just for a text field instead of a dropdown. Checked
-     * before anything else claims the click (including clicks inside the
-     * chrome strip below, or in a completely different panel), so a
-     * click that goes on to do something else still blurs the search box
-     * first -- there's no scenario where a real click should leave a
-     * stale caret blinking in a box that no longer has focus. */
-    if (button == 0 && pressed && ctx->asset_browser && ctx->asset_browser->search_focused) {
+    /* Asset Browser text field blur: any click that doesn't land inside
+     * whichever field (search/edit_name/edit_tags) currently owns focus
+     * drops that focus -- same click-away-dismisses convention the
+     * type-switcher dropdown and context menu above already use, just for
+     * a text field instead of a dropdown. Checked before anything else
+     * claims the click (including clicks inside the chrome strip below,
+     * or in a completely different panel), so a click that goes on to do
+     * something else still blurs first -- there's no scenario where a
+     * real click should leave a stale caret blinking in a box that no
+     * longer has focus. Blurring never touches editing_id (see the
+     * type-switcher-away comment above) -- an in-progress rename/create
+     * stays open, just not receiving keystrokes, until Save/Cancel. */
+    if (button == 0 && pressed && ctx->asset_browser && ctx->asset_browser->focus != AB_FOCUS_NONE) {
+        AssetBrowserState *ab = ctx->asset_browser;
         Area *ab_area = g_ui.root ? find_area_by_type_r(g_ui.root, PANEL_ASSET_BROWSER) : NULL;
         int inside = 0;
         if (ab_area) {
-            float sx, sy, sw, sh;
-            asset_browser_search_rect(ab_area, &sx, &sy, &sw, &sh);
-            inside = point_in_rect((float)x, (float)y, sx, sy, sw, sh);
+            float fx, fy, fw, fh;
+            switch (ab->focus) {
+                case AB_FOCUS_SEARCH:     asset_browser_search_rect(ab_area, &fx, &fy, &fw, &fh); inside = point_in_rect((float)x, (float)y, fx, fy, fw, fh); break;
+                case AB_FOCUS_EDIT_NAME:  asset_browser_edit_name_rect(ab_area, &fx, &fy, &fw, &fh); inside = point_in_rect((float)x, (float)y, fx, fy, fw, fh); break;
+                case AB_FOCUS_EDIT_TAGS:  asset_browser_edit_tags_rect(ab_area, &fx, &fy, &fw, &fh); inside = point_in_rect((float)x, (float)y, fx, fy, fw, fh); break;
+                default: break;
+            }
         }
-        if (!inside) ctx->asset_browser->search_focused = 0;
+        if (!inside) ab->focus = AB_FOCUS_NONE;
     }
 
     if (y < (int)UI_TOP_CHROME_H) return 1;  /* branding bar + menu row claim the whole strip, nothing to route through it yet */

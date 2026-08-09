@@ -80,6 +80,12 @@ typedef enum {
      * three rows above. Fixed fragment count/seed/output path for this
      * pass (no interactive count-picker UI), see main.c's handler. */
     CTX_ACTION_FRACTURE,
+    /* Asset Browser Create flow (see phi.md's "Wire protocol..." and
+     * asset_browser.h) -- flattens the selected MeshObject and starts a
+     * pending create (asset_browser_begin_create), NOT an immediate
+     * upload; the actual POST only happens once the user fills in a name/
+     * tags and submits from the Asset Browser panel's edit form. */
+    CTX_ACTION_SAVE_AS_ASSET,
 } CtxMenuAction;
 
 typedef struct Area {
