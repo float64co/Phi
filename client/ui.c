@@ -120,7 +120,7 @@ typedef struct {
     Font *font_mono;    /* IBM Plex Mono Regular -- console/chat */
 
     SvgIcon icon_scene, icon_outliner, icon_properties, icon_console, icon_chat;
-    SvgIcon icon_node_editor, icon_curve_editor, icon_undo, icon_redo;
+    SvgIcon icon_node_editor, icon_curve_editor, icon_undo, icon_redo, icon_asset_browser;
 
     Area *root;
     Area *panels[16];   /* flat list of every leaf, for hit-testing/iteration */
@@ -250,6 +250,7 @@ int ui_init(void) {
     g_ui.icon_curve_editor= svg_icon_load("assets/icons/curve_editor.svg", 32);
     g_ui.icon_undo         = svg_icon_load("assets/icons/undo.svg", 24);
     g_ui.icon_redo         = svg_icon_load("assets/icons/redo.svg", 24);
+    g_ui.icon_asset_browser = svg_icon_load("assets/icons/asset_browser.svg", 32);
 
     /* Default layout: golden-ratio split, Scene | (Outliner / Properties).
      * See ui.h's Area comment and phi.md's Native UI System section for
@@ -280,10 +281,10 @@ int ui_init(void) {
     g_ui.panels[0] = scene_leaf; g_ui.panels[1] = outliner_leaf; g_ui.panels[2] = properties_leaf;
     g_ui.panel_count = 3;
 
-    printf("[ui] init ok: fonts body=%p bold=%p brand=%p mono=%p, icons scene=%u outliner=%u properties=%u console=%u chat=%u\n",
+    printf("[ui] init ok: fonts body=%p bold=%p brand=%p mono=%p, icons scene=%u outliner=%u properties=%u console=%u chat=%u asset_browser=%u\n",
            (void *)g_ui.font_body, (void *)g_ui.font_bold, (void *)g_ui.font_brand, (void *)g_ui.font_mono,
            g_ui.icon_scene.texture, g_ui.icon_outliner.texture, g_ui.icon_properties.texture,
-           g_ui.icon_console.texture, g_ui.icon_chat.texture);
+           g_ui.icon_console.texture, g_ui.icon_chat.texture, g_ui.icon_asset_browser.texture);
     gl_check("ui_init");
     return 1;
 }
@@ -295,6 +296,7 @@ void ui_destroy(void) {
     svg_icon_destroy(&g_ui.icon_properties); svg_icon_destroy(&g_ui.icon_console);
     svg_icon_destroy(&g_ui.icon_chat); svg_icon_destroy(&g_ui.icon_node_editor);
     svg_icon_destroy(&g_ui.icon_curve_editor); svg_icon_destroy(&g_ui.icon_undo); svg_icon_destroy(&g_ui.icon_redo);
+    svg_icon_destroy(&g_ui.icon_asset_browser);
 }
 
 /* ---- Layout ---- */
@@ -327,6 +329,7 @@ static SvgIcon *icon_for_panel(PanelType t) {
         case PANEL_CHAT: return &g_ui.icon_chat;
         case PANEL_NODE_EDITOR: return &g_ui.icon_node_editor;
         case PANEL_CURVE_EDITOR: return &g_ui.icon_curve_editor;
+        case PANEL_ASSET_BROWSER: return &g_ui.icon_asset_browser;
         default: return NULL;
     }
 }
