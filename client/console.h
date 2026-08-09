@@ -6,20 +6,18 @@
 #define CONSOLE_INPUT_LEN  96
 #define CONSOLE_HISTORY    16
 
-/* Drop-down Python console (` to toggle) — a real REPL over the embedded
- * MicroPython interpreter (mp_port.h), not a bespoke dev-command shell.
- * We're in Phi now, not Qek: every one of Qek's old console commands
- * (pos/tp/grid/mat/noclip/god/hp/give/speed/gravity/fov/sensitivity/name/
- * players/kill/save/load/newmap/maps/addbot/delbot/bind/unbind, plus this
- * session's own matcolor/matmetal/matrough/matemit stopgap) has been
- * removed rather than ported forward — anything typed here just runs as
- * Python, full stop. That's also why this header no longer depends on
- * editor.h/net.h/physics.h/renderer.h/meshobject.h: console.c has no
- * reason to touch any of that game/editor state anymore. Text fields are
- * exposed directly (not opaque) so main.c can hand them straight to a DOM
- * overlay the same way it already does for the HUD via EM_ASM. */
+/* Python panel — a real REPL over the embedded MicroPython interpreter
+ * (mp_port.h), acting as an always-focused text input: keyboard input
+ * flows here every frame, apart from the few reserved shortcuts input.c
+ * keeps (function keys only, so they can't collide with typing). There is
+ * no open/close focus toggle — Qek's backquote-toggled modal drop-down
+ * console paradigm is gone, along with every one of its dev-commands
+ * (removed rather than ported forward; anything typed here just runs as
+ * Python, full stop). That's also why this header depends only on
+ * input.h: console.c has no reason to touch any game/editor state.
+ * Text fields are exposed directly (not opaque) so ui.c's panel drawing
+ * can read them straight out of the struct. */
 typedef struct {
-    int  open;
     char input[CONSOLE_INPUT_LEN];
     int  input_len;
 

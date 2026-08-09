@@ -3,7 +3,6 @@
 #include "svg_icon.h"
 #include "octree_render.h"
 #include "meshobject.h"
-#include "physics.h"
 #include "console.h"
 #include "renderer.h"
 #include "gbuffer.h"
@@ -116,9 +115,6 @@ void ui_layout(int window_w, int window_h);
 typedef struct {
     Renderer   *renderer;
     GBuffer    *gbuf;
-    RenderMesh *world_mesh;
-    GameState  *gs;
-    int         local_player_id;
     MeshObject *test_obj;        /* Phase 1's assets/cube.gltf test object, see main.c */
     int         test_obj_loaded;
     int         edit_face;       /* main.c's g_edit_face -- last ray-picked hem face, -1 if none. Properties reads this for the per-face material readout. */
@@ -127,11 +123,14 @@ typedef struct {
     float       sky_color[3];
     /* Called by the Scene panel between gbuffer_begin_geometry_pass() and
      * gbuffer_render_shadow_map() — issues every renderer_draw_* call for
-     * the frame's game content (world/ground/players/rockets/mesh objects/
-     * editor overlay). Kept as a callback rather than ui.c calling those
-     * directly, so this UI system doesn't need to know about Qek-specific
-     * entities (players/rockets) at all — main.c already owns exactly
-     * this sequence for its own (pre-panel-system) render loop. */
+     * the frame's game content (mesh objects, the transform gizmo). Kept
+     * as a callback rather than ui.c calling those directly, so this UI
+     * system doesn't need to know about scene-content specifics at all —
+     * main.c owns exactly this sequence. Used to also draw Qek's world
+     * mesh/players/rockets and the octree carve-editor overlay; those are
+     * gone along with the rest of that code (see phi.md's Phase 1 status,
+     * "Client/server model"), so this callback currently only draws
+     * MeshObjects + gizmo, not "nothing else ever will." */
     void (*draw_scene_content)(void *userdata);
     void *draw_scene_userdata;
 } UIRenderContext;
@@ -165,9 +164,10 @@ int  ui_is_context_menu_open(void);
  * still just report which one was clicked. */
 CtxMenuAction ui_poll_context_menu_action(void);
 
-/* object_id follows the existing scheme (renderer.h/gbuffer.c): world=0,
- * ground=1, players=1000+id, rockets=2000+slot, wire-box=3,
- * MeshObjects=4000+id. 0xFFFFFFFF = nothing selected. */
+/* object_id follows the existing scheme (renderer.h/gbuffer.c): wire-box=3,
+ * MeshObjects=4000+id. 0xFFFFFFFF = nothing selected. (world=0/ground=1/
+ * players=1000+id/rockets=2000+slot belonged to Qek's now-removed world/
+ * gameplay draw calls -- those ranges are simply unused now.) */
 void         ui_set_selected_object(unsigned int object_id);
 unsigned int ui_get_selected_object(void);
 

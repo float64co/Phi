@@ -90,10 +90,12 @@ static void console_submit(ConsoleState *cs) {
 }
 
 void console_update(ConsoleState *cs, InputState *inp) {
-    /* Consume-on-read: always clear these edges so an unopened/just-closed
-     * console never leaves them stuck for next frame. */
-    int toggle = inp->console_toggle; inp->console_toggle = 0;
-    int escape = inp->escape_edge;    inp->escape_edge    = 0;
+    /* The Python panel is an always-focused text input -- there is no
+     * open/close focus toggle (the old backquote-toggled modal drop-down
+     * was Qek's console paradigm, deliberately not carried forward).
+     * Keyboard input flows here every frame, apart from the few reserved
+     * shortcuts input.c keeps as function keys. Consume-on-read: clear
+     * every edge as it's read so nothing sticks across frames. */
     int enter  = inp->enter_edge;     inp->enter_edge      = 0;
     int backsp = inp->backspace_edge; inp->backspace_edge  = 0;
     int hup    = inp->histup_edge;    inp->histup_edge     = 0;
@@ -103,46 +105,8 @@ void console_update(ConsoleState *cs, InputState *inp) {
     memcpy(chars, inp->typed_chars, (size_t)nchars);
     inp->typed_count = 0;
 
-    if (toggle) {
-        cs->open = !cs->open;
-        input_set_console_open(inp, cs->open);
-        cs->history_pos = -1;
-    }
-
-    /* Escape is browser-reserved to exit pointer lock and that can't be
-     * blocked — Chrome in particular won't even deliver the Escape keydown
-     * to us when it's what triggered the unlock, so our own escape_edge
-     * handling below can't be relied on to close the console in that case.
-     * Watching pointer_locked directly catches it regardless of whether we
-     * ever see the keydown.
-     *
-     * Only fires on the *transition* from locked to unlocked (tracked via
-     * s_was_pointer_locked below), not "currently unlocked" as a standing
-     * condition — pointer lock now defaults off and has no click-to-engage
-     * gesture on any platform (see this session's "stop stealing the
-     * mouse" fix), so treating "not locked" as reason enough to force-close
-     * meant the console closed itself one frame after every open and could
-     * never actually be used. The original scenario this guards against
-     * (Escape drops lock, console should close too) is still handled: that
-     * IS a locked->unlocked transition. */
-    static int s_was_pointer_locked = 0;
-    if (cs->open && s_was_pointer_locked && !inp->pointer_locked) {
-        cs->open = 0;
-        input_set_console_open(inp, 0);
-    }
-    s_was_pointer_locked = inp->pointer_locked;
-
-    if (!cs->open) return;
-
-    if (escape) {
-        cs->open = 0;
-        input_set_console_open(inp, 0);
-        return;
-    }
-
     for (int i = 0; i < nchars; i++) {
         char c = chars[i];
-        if (c == '`') continue;   /* the key that opened the console */
         if (cs->input_len < CONSOLE_INPUT_LEN - 1) {
             cs->input[cs->input_len++] = c;
             cs->input[cs->input_len]   = 0;

@@ -18,94 +18,6 @@
     height: 100vh;
     cursor: crosshair;
   }
-  #overlay {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0,0,0,0.82);
-    z-index: 10;
-    gap: 18px;
-  }
-  #overlay h1 {
-    font-size: 3rem;
-    letter-spacing: 0.25em;
-    color: #ff6a00;
-    text-shadow: 0 0 30px #ff6a0088;
-  }
-  #overlay p {
-    font-size: 1rem;
-    opacity: 0.7;
-    text-align: center;
-    line-height: 1.8;
-  }
-  #overlay button {
-    padding: 12px 36px;
-    background: #ff6a00;
-    border: none;
-    color: #fff;
-    font-size: 1.1rem;
-    letter-spacing: 0.1em;
-    cursor: pointer;
-    border-radius: 2px;
-    transition: background 0.15s;
-  }
-  #overlay button:hover { background: #ff8c00; }
-  /* Both display:none by default now -- this is an editor, not the FPS
-     game these came from, and having Qek's HP/ammo/bots readout and aim
-     reticle permanently on screen over the panel UI reads as leftover
-     gameplay chrome, not something the editor needs. Still updated by
-     main.c's update_hud() every frame (harmless on a hidden element) so a
-     future "play mode" toggle can un-hide them for free rather than
-     needing to also restore the JS logic. */
-  #hud {
-    display: none;
-    position: fixed;
-    bottom: 18px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(0,0,0,0.55);
-    padding: 6px 20px;
-    border-radius: 3px;
-    font-size: 0.85rem;
-    letter-spacing: 0.08em;
-    pointer-events: none;
-    z-index: 5;
-  }
-  #crosshair {
-    display: none;
-    position: fixed;
-    top: 50%; left: 50%;
-    transform: translate(-50%,-50%);
-    width: 14px; height: 14px;
-    pointer-events: none;
-    z-index: 5;
-  }
-  #crosshair::before,
-  #crosshair::after {
-    content: '';
-    position: absolute;
-    background: rgba(255,255,255,0.85);
-  }
-  #crosshair::before { width: 2px; height: 100%; left: 50%; transform: translateX(-50%); }
-  #crosshair::after  { height: 2px; width: 100%; top: 50%;  transform: translateY(-50%); }
-  #editor-status {
-    position: fixed;
-    top: 18px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(0,0,0,0.55);
-    padding: 5px 16px;
-    border-radius: 3px;
-    font-size: 0.8rem;
-    letter-spacing: 0.06em;
-    pointer-events: none;
-    z-index: 5;
-    color: #7cfc9a;
-    display: none;
-  }
   #loading {
     position: fixed;
     inset: 0;
@@ -148,19 +60,7 @@
     min-height: 1em;
     text-transform: uppercase;
   }
-  .controls-table {
-    border-collapse: collapse;
-    font-size: 0.82rem;
-  }
-  .controls-table td {
-    padding: 2px 14px;
-    opacity: 0.75;
-  }
-  .controls-table td:first-child {
-    color: #ff6a00;
-    font-weight: bold;
-    text-align: right;
-  }
+}
 </style>
 </head>
 <body>
@@ -173,29 +73,6 @@
 
 <canvas id="canvas"></canvas>
 
-<div id="overlay" style="display:none">
-  <h1>PHI</h1>
-  <p>Click to enable mouse-look in the Scene panel (optional — the editor itself doesn't need it)</p>
-  <table class="controls-table">
-    <tr><td>WASD</td><td>Move</td></tr>
-    <tr><td>SPACE</td><td>Jump</td></tr>
-    <tr><td>C</td><td>Crouch (rocket-jump aim)</td></tr>
-    <tr><td>MOUSE</td><td>Look</td></tr>
-    <tr><td>LMB</td><td>Fire rocket</td></tr>
-    <tr><td>F4</td><td>Export map as STL</td></tr>
-    <tr><td>E</td><td>Toggle octree editor</td></tr>
-    <tr><td>`</td><td>Toggle console</td></tr>
-    <tr><td colspan="2" style="text-align:center; opacity:0.6; padding-top:6px;">
-      in editor: LMB build &middot; RMB carve &middot; M+LMB paint &middot; [ ]/wheel grid &middot; , . material &middot; X/Z fly
-    </td></tr>
-  </table>
-  <button id="play-btn">CLICK TO PLAY</button>
-</div>
-
-<div id="crosshair"></div>
-<div id="hud">HP: 100 &nbsp;|&nbsp; Connecting...</div>
-<div id="editor-status"></div>
-
 <script>
 // Resize canvas to window
 function resizeCanvas() {
@@ -207,35 +84,10 @@ resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 
 
-// Play button → request pointer lock (the only remaining way to engage it —
-// there used to also be a "click anywhere on the canvas" auto-relock
-// handler here, but every 2D UI panel click IS a canvas click, so it was
-// silently hijacking UI clicks into an invisible-cursor FPS-look mode.
-// Matches native/win32, which dropped click-to-engage entirely this
-// session; a real opt-in gesture that only fires for Scene-panel content
-// clicks is follow-up work, not this button, which is currently
-// unreachable since nothing shows #overlay by default anymore either.)
-document.getElementById('play-btn').addEventListener('click', function() {
-  document.getElementById('overlay').style.display = 'none';
-  document.getElementById('canvas').requestPointerLock();
-});
-
-// RMB is used by the editor to carve — suppress the browser context menu
+// RMB opens the Scene panel's context menu (see main.c) — suppress the
+// browser's own context menu so it doesn't appear underneath it.
 document.getElementById('canvas').addEventListener('contextmenu', function(e) {
   e.preventDefault();
-});
-
-// Pointer lock state → tell C code. Losing pointer lock (Escape, alt-tab,
-// clicking a panel) no longer re-shows the "CLICK TO PLAY" overlay — Phi is
-// an editor now, not an FPS game, and the overlay covering the whole UI on
-// every unlock is exactly the "pause menu getting in the way" this session
-// was asked to fix. The overlay still exists as an opt-in way to re-engage
-// mouse-look (see the play button), it just isn't a mandatory gate anymore.
-document.addEventListener('pointerlockchange', function() {
-  var locked = document.pointerLockElement === document.getElementById('canvas');
-  if (Module._input_set_pointer_locked) {
-    Module._input_set_pointer_locked(locked ? 1 : 0);
-  }
 });
 
 // Loading bar helpers
@@ -283,9 +135,8 @@ var Module = {
 
   onRuntimeInitialized: function() {
     _setLoadProgress(100, 'Ready');
-    /* Just dismiss the loading screen -- straight into the editor, not a
-     * blocking "CLICK TO PLAY" gate over it (see the pointerlockchange
-     * comment above for why that changed). */
+    /* Dismiss the loading screen straight into the editor -- no gating
+     * overlay to click through first. */
     setTimeout(function() {
       document.getElementById('loading').style.display = 'none';
     }, 320);

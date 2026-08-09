@@ -95,15 +95,37 @@ CRDTs, because deltas are small and edits are human-paced.
 
 ### Where AI fits
 
-An Anthropic API key can be configured on the authoring server (never shipped
-to any client, never embedded in `engine.wasm`) to power an in-editor
-assistant: defining `@phi.panel` UI from a description, scaffolding a
-`@phi.node` function, writing a first pass of NPC coroutine behaviour, or
-suggesting fixes to a script. The assistant participates in the same
-client-authored/server-persisted loop as a human would — it proposes edits,
-the server applies and persists them the same way it would for a mouse drag,
-and every connected client sees the result. It never gets a privileged path
-that bypasses the authoritative server, and no client ever holds the key.
+Claude runs *inside* the editor, not beside it as a chat-window bolt-on. An
+Anthropic API key configured on the authoring server (never shipped to any
+client, never embedded in `engine.wasm`) lets Claude act as a first-class
+editor participant with the same reach a human co-author has — modeling and
+editing meshes, laying out scenes, writing gameplay logic and NPC behaviour,
+defining node types, scaffolding `@phi.panel` UI, organizing and tagging
+assets, even proposing what a game *should be* when a user's (or a group of
+users') brief is loose. This is deliberately broad rather than a fixed menu
+of assist actions: the boundary of what Claude can help build is meant to be
+the boundary of the editor's own tools, not a hand-picked subset of them —
+"free to define basically anything about a game a user or set of users want
+to make" is the working framing, not a specific scoped feature list. Earlier
+language here described a narrower "in-editor assistant" (defining
+`@phi.panel` UI from a description, scaffolding a `@phi.node` function,
+writing a first NPC-behaviour pass, suggesting script fixes) — those are all
+still true, they're examples of this broader role now rather than its edge.
+
+None of that needs a privileged path. Claude proposes edits through the
+exact same client-authored/server-persisted loop a human editing client
+uses — it applies a delta, the server validates and persists it the same way
+it would for a mouse drag, and every connected client sees the result. It
+never bypasses the authoritative server, and no client (including whatever
+session is driving Claude's edits) ever holds the API key itself — the key
+lives only on the authoring server, gating whether Claude gets invoked at
+all, not how its edits reach the world.
+
+**2026-08-09**: this reframing is also why the networking layer inherited
+from Qek (the original rocket-arena game this codebase was extracted from,
+see Phase 1's status section) is being *repurposed* rather than deleted
+during the ongoing Qek-cleanup pass — see "Client/server model" under Phase
+1 for exactly what that means for `net.c`/the wire protocol/`server.py`.
 
 ### Authoring vs. shipping
 
@@ -616,8 +638,10 @@ isn't being pursued under Phase 1 despite being listed here originally).
 
 ### Architecture
 
-A new `MeshObject` entity type sits alongside `Player` and `Rocket` in the game
-state. WebGL 2 is the rendering target from day one (`USE_WEBGL2=1`,
+A new `MeshObject` entity type is the scene's own content — `Player`/`Rocket`
+were Qek's gameplay types this sat alongside originally; both are gone now
+(see "Client/server model" above), so `MeshObject` no longer shares the game
+state with anything else. WebGL 2 is the rendering target from day one (`USE_WEBGL2=1`,
 `FULL_ES3=1`), so the vertex format carries a full PBR material index rather than
 a flat-palette slot, and integer vertex attributes (bone indices) work natively.
 A quaternion replaces Euler angles for the object transform to support arbitrary
@@ -671,6 +695,49 @@ precomputed convex hulls for Bullet — rides in glTF's standard
 `PHI_physics_hull` extension) rather than forking the format or falling back
 to a side-channel file. A `.glb` produced by Phi's editor still opens cleanly
 in Blender; Phi-specific data is simply data Blender doesn't render.
+
+### Asset tracking and the Asset Browser panel
+
+**Status: not started — design intention, recorded 2026-08-09.** A flat
+directory of `.glb`/`.gltf` files (the mesh/skeleton/animation-clip assets
+already described under Distribution Model) doesn't stay findable once a
+project accumulates more than a handful of them — no search by name, no way
+to group related assets, nothing browsable in the editor. The plan:
+
+- **A directory of glTF files remains the actual asset store** — this
+  doesn't change; the Core Pattern already has the server persisting each
+  edited asset to its own `.glb` on disk. What's new is an **index**, not a
+  new source of truth: a SQLite database on the authoring server that
+  tracks each asset's file path, display name, and a simple many-to-many
+  tag table (`asset(id, path, name, created_at, ...)` /
+  `tag(asset_id, tag)` — the obvious normalized shape for "search by name
+  or by tag intersection", not yet finalized). The index is rebuildable by
+  re-scanning the asset directory if it's ever lost or gets out of sync —
+  a deliberate constraint, so the SQLite file is a cache/index the
+  filesystem can always regenerate, never the only copy of anything that
+  matters.
+- **A new Asset Browser panel** — another entry in the Native UI System's
+  panel type-switcher (`ui.h`'s `PanelType` enum: currently
+  `PANEL_SCENE`/`OUTLINER`/`PROPERTIES`/`CONSOLE`/`CHAT`/`NODE_EDITOR`/
+  `CURVE_EDITOR`), listing/searching indexed assets by name or tag and
+  letting a user pick one into the current scene — the same role
+  Blender's/UE5's asset browser plays, scoped to Phi's own glTF-centric
+  asset model rather than a generic multi-format one.
+- **Scope for now**: glTF assets specifically (meshes/skeletons/animation
+  clips, per Project Identity's file-extension list), since that's the
+  asset type that exists today. The index's schema is asset-type-generic
+  by construction (path + name + tags doesn't care what the file *is*),
+  so `.panim` (Phase 4) and `.pscene` (scene files, referenced under
+  Distribution Model) are expected to land in the same index later rather
+  than each phase inventing its own separate tracking mechanism — but
+  that extension isn't designed yet, flagged as a real open question
+  rather than assumed to just work.
+- Where exactly this lives relative to the authoring/shipping split (see
+  "Authoring vs. shipping" above) — whether a shipped/published game's
+  runtime ever needs live asset search, or whether publishing always
+  bakes a fixed asset set the way it already bakes everything else — is
+  also not decided yet; recorded as an open question rather than resolved
+  by assumption.
 
 ### Native UI System
 
@@ -1445,6 +1512,127 @@ after the fix.
     speculatively.
   - All three targets (`native`/`win32`/`wasm`) rebuilt clean after this
     pass, zero new warnings from any touched file.
+- **Python panel is now an always-focused text input** (`input.c`/
+  `console.c`/`ui.c`, same cleanup arc as the bots/commands removal above)
+  — no more backquote-toggled open/close modality
+  (`ConsoleState.open`/`input_set_console_open()`/`console_toggle`/
+  `escape_edge`, all removed). Every keystroke flows to the panel every
+  frame now; the only reserved shortcut left is F4 (STL export — a
+  function key, so it can't collide with typing). Qek's WASD/Space/X/Z/M/
+  Shift/C movement-and-fly bindings and its E/[/]/,/. octree-editor keys
+  are gone from all three platform backends (wasm, win32, X11) — those
+  letters just type into the panel now. Scroll wheel is currently
+  unassigned (handler shells kept, not torn out — its natural next owner
+  is Scene-panel camera zoom once real editor navigation lands, not
+  something to guess at here). The `InputState` fields those bindings used
+  to drive (`forward`/`back`/`left`/`right`/`jump`/`up`/`down`/
+  `paint_mod`/`shift`/`crouch`/`edit_toggle`/`grid_inc`/`grid_dec`/
+  `mat_inc`/`mat_dec`) still exist and still compile against `editor.c`/
+  `main.c` — deliberately left inert here rather than deleted, since
+  they're squarely inside the octree-editor/movement scope being decided
+  in the next bullet, not this input-model change's own scope. Also
+  added: a blinking block caret (`ui.c`'s `draw_panel_console`, wall-
+  clock-driven ~1 Hz blink, positioned via real `font_text_width`
+  measurement — the panel had no focus indicator at all before this) and
+  a `>>> ` input-row prompt matching `console_submit`'s own echo prefix.
+  Verified by compiling clean on all three targets; live keystroke
+  verification wasn't possible (the X server in this environment has
+  stayed down since earlier in this same work — see the MicroPython
+  console section above), so this is compile-clean-and-reviewed, not
+  click-tested, the same honest bar the rest of this Phase 1 pass has
+  used when live GUI verification wasn't available.
+- **Client/server model: repurposing Qek's networking layer, not deleting
+  it** — a scope decision for the next Qek-cleanup pass, agreed but not
+  yet executed; recorded here before the removal PRs land rather than
+  only after, matching this project's own practice elsewhere. A full-
+  codebase review turned up four remaining buckets of Qek-specific
+  material:
+  - **(A) Gameplay simulation — remove.** `physics.c`'s combat/movement
+    sim (rockets, splash damage, knockback, Quake-style air-accel/
+    friction/`STOP_SPEED`, respawn timers), the `Player`/`Rocket`/
+    `GameState` types, `renderer_draw_players`/`renderer_draw_rockets`,
+    `hp`/`god`/`alive`, and the HUD (`update_hud`, `www/index.html`'s
+    `#hud`/`#crosshair`). Nothing in Phi's own roadmap uses any of it —
+    Phase 2's Bullet physics is a wholly separate system, sharing no code.
+  - **(C) The octree voxel world — remove.** `octree.c`/
+    `octree_render.c`/`cmap.c`/`octree_stl.c`/`editor.c` (Sauerbraten-
+    style voxel carve/paint editing), STL export, and
+    `PKT_EDIT_REGION`/`MAP_FULL`/`SAVE_MAP`/`LOAD_MAP`/`NEW_MAP`/
+    `LIST_MAPS`. Phi's mesh editor is half-edge/glTF-based (see "Editable
+    mesh structure vs. glTF" above) and shares no code or data model with
+    the octree. This removes the only scene content that currently exists
+    besides the Phase 1 test cube — the world is expected to render
+    visually empty for a stretch until real scene-authoring content (see
+    "Asset tracking and the Asset Browser panel" earlier in this phase)
+    replaces it. An accepted consequence of the decision, not a surprise
+    to be discovered later.
+  - **(D) Cheap, low-risk cleanup — remove/rename.** The now-inert
+    `InputState` fields from the bullet above, `KEY_FORWARD`/etc. flags
+    and `input_get_key_flags`, `pointer_locked`/FPS mouse-look
+    (`sensitivity`, yaw/pitch clamping, cursor-warp-to-center — an editor
+    wants orbit/pan camera control, not FPS look, and pointer lock
+    currently has no way to even engage on native/win32 in the first
+    place, see the Native UI System mouse-capture-bug note above, so
+    nothing regresses by removing the machinery behind it). Also a
+    naming pass: `ConsoleState`/`console_*`/`PKT_CONSOLE_MSG` still say
+    "console" throughout the codebase even though the panel is
+    conceptually Phi's Python panel now, not Qek's dev console — worth
+    reconciling once the removal settles rather than mid-flight.
+  - **(B) Networking — keep and repurpose, do not delete.** `net.c`/
+    `net.h`, `ws_client_native.c`/`ws_client_win32.c`, `server/server.py`,
+    and the underlying wire-protocol transport. The client/server shape
+    itself — a client connects to a server that tracks authoritative
+    asset and game state — is exactly the transport the Core Pattern's
+    client-authored/server-persisted loop and Claude's in-editor
+    participation (see "Where AI fits" above) need: general multiplayer
+    game authoring and generic multiplayer gameplay for whatever a user
+    (or set of users) defines, not just Qek's FPS state sync. What
+    actually gets removed from B is just the Qek-specific packet
+    payloads riding on top of it once A and C are gone
+    (`PKT_SPAWN_ROCKET`/`EXPLODE`/`DAMAGE`/`OBITUARY`/`FIRE` for A;
+    `PKT_EDIT_REGION`/`MAP_FULL`/etc. for C, already listed there) — the
+    connection/transport/persistence machinery itself stays and becomes
+    the foundation the asset-tracking system and future scene/gameplay
+    sync build on.
+
+**A/C/D removed, B repurposed — landed.** The plan above is now executed,
+not just recorded. `octree.c`/`.h`, `octree_stl.c`/`.h`, `cmap.c`/`.h`,
+`editor.c`/`.h`, and `physics.c`/`.h` are deleted outright. `octree_render.c`/
+`.h` survives under its old filename (the `ConsoleState`-style naming pass
+this decision explicitly deferred is still deferred) but is now a plain
+generic `RenderMesh` module — `mesh_rebuild`/`mesh_push_vertex`/
+`mesh_push_quad`/`neighbor_solid`/`emit_node_faces` (the octree-flattening
+half) are gone, `mesh_create`/`destroy`/`upload`/`upload_stride`/`draw` (the
+half MeshObject's own rendering already depended on) stay. `Vec3f`/`Vec3i`
+moved to a new `client/vec3.h` — they'd lived in `octree.h` purely by
+historical accident and are used throughout the codebase independent of any
+octree. `renderer_set_camera` no longer takes a `Player*`; it takes a raw
+`Vec3f eye, float yaw, float pitch`, since there's no more `Player` to read
+those from — `main.c` now sets a single fixed vantage point once at startup
+and never touches it again. That's the one honest gap this pass leaves open:
+there is no real editor camera navigation (orbit/pan/zoom/fly) yet, just a
+fixed "look at roughly the right place" default — not built here, not
+silently pretended to exist either. `net.h`'s packet set is down to
+`PKT_HELLO` and `PKT_CONSOLE_MSG`; `server.py` lost `Vec3`/`Player`/`Rocket`/
+`GameWorld` and its 20Hz tick thread entirely and now just accepts a
+connection, assigns an id, and relays; `mapdata.py` (octree.c's Python port,
+100% voxel-specific) is deleted. `www/index.html` lost the `#hud`/
+`#crosshair`/`#editor-status` divs, the WASD/octree-editor controls table,
+and the pointer-lock JS glue (`input_set_pointer_locked` no longer exists on
+the C side, so nothing calls it anymore).
+
+Verification: native and wasm both link cleanly with zero warnings under
+`-Wall -Wextra` (win32 not yet re-verified after this pass). The three
+standalone no-GL harnesses (`mesh_edit_test`, `fracture_test`,
+`mp_console_test`) all still pass — expected, since none of that code path
+touches anything A/C/D removed, but confirmed rather than assumed. Live
+native execution could not be verified this pass: `phi_native` hung, and a
+`gdb` backtrace on the stuck process showed it blocked inside `XOpenDisplay()`
+itself, before `main()`'s first line of application code runs — a sandbox
+X11-connection issue, not a regression from this change (same category of
+environment flakiness already noted earlier in this phase's own history).
+Real-browser wasm verification (the project's own established bar for GL
+work) is still outstanding for this specific pass.
 
 **Design reference**: evaluated a separate, mature CAD tool's C++/Python UI
 codebase as reference material (brought in temporarily, read-only, removed

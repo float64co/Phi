@@ -32,15 +32,10 @@ MP_INCLUDES   := -I$(MP_EMBED_DIR) -I$(MP_EMBED_DIR)/port
 
 COMMON_SRCS := \
 	$(SRCDIR)/main.c          \
-	$(SRCDIR)/octree.c        \
 	$(SRCDIR)/octree_render.c \
-	$(SRCDIR)/octree_stl.c    \
-	$(SRCDIR)/cmap.c          \
-	$(SRCDIR)/physics.c       \
 	$(SRCDIR)/renderer.c      \
 	$(SRCDIR)/net.c           \
 	$(SRCDIR)/input.c         \
-	$(SRCDIR)/editor.c        \
 	$(SRCDIR)/console.c       \
 	$(SRCDIR)/halfedge.c      \
 	$(SRCDIR)/halfedge_gltf.c \
@@ -81,7 +76,7 @@ EMFLAGS := \
 	-s USE_PTHREADS=0 \
 	-s ALLOW_MEMORY_GROWTH=1 \
 	-s INITIAL_MEMORY=134217728 \
-	-s EXPORTED_FUNCTIONS='["_main","_net_connect_js","_malloc","_free","_input_set_pointer_locked"]' \
+	-s EXPORTED_FUNCTIONS='["_main","_net_connect_js","_malloc","_free"]' \
 	-s EXPORTED_RUNTIME_METHODS='["allocateUTF8","ccall","cwrap"]' \
 	-s NO_EXIT_RUNTIME=1 \
 	-s MODULARIZE=0 \

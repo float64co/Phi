@@ -1,5 +1,5 @@
 #pragma once
-#include "octree.h"         /* Vec3f */
+#include "vec3.h"            /* Vec3f */
 #include "octree_render.h"  /* RenderMesh */
 #include "halfedge.h"
 

@@ -1,7 +1,6 @@
 #pragma once
-#include "octree.h"
+#include "vec3.h"
 #include "octree_render.h"
-#include "physics.h"
 #include "meshobject.h"
 
 typedef struct {
@@ -20,9 +19,15 @@ typedef struct {
                          * uniform location) on wasm, whose shader doesn't
                          * declare it */
 
-    /* Set by each draw_* call before drawing (world=0, ground=1,
-     * players=1000+id, rockets=2000+slot) — read by the geometry-pass
-     * shader's u_object_id uniform. Meaningless on wasm (see above). */
+    /* Set by each draw_* call before drawing (currently just
+     * MeshObjects=4000+id, and gizmo.c's own wire-box id=3 set directly by
+     * the caller via renderer_set_object_id) — read by the geometry-pass
+     * shader's u_object_id uniform. Meaningless on wasm (see above). The
+     * world=0/ground=1/players=1000+id/rockets=2000+slot conventions this
+     * comment used to also list belonged to Qek's octree world/gameplay
+     * draw calls, removed along with the rest of that code (see phi.md's
+     * Phase 1 status) -- those object-id ranges are simply unused now,
+     * not reassigned to anything. */
     unsigned int cur_object_id;
 
     /* Attribute locations */
@@ -58,16 +63,10 @@ typedef struct {
      * velocity buffer. Scoped to camera motion only: each draw reuses its
      * own CURRENT model matrix for the "previous" reprojection too (no
      * per-object previous-transform tracking), so a genuinely fast-moving
-     * player/rocket's own motion isn't captured, only the parallax from
+     * object's own motion isn't captured, only the parallax from
      * camera movement — see gbuffer.h's TAA comment for the honest caveat
      * this implies (mild ghosting/blur on fast movers specifically). */
     float prev_vp[16];
-
-    /* Rocket billboard mesh */
-    unsigned int rocket_vbo;
-
-    /* Flat-shade color palette (one vec3 per material id 0..255) */
-    float palette[256][3];
 } Renderer;
 
 Renderer *renderer_create(int width, int height);
@@ -79,8 +78,12 @@ void renderer_set_fov(Renderer *r, float degrees);
 void renderer_set_sky_color(float r, float g, float b);
 void renderer_get_sky_color(float *out3);  /* out3[0..2] = r,g,b — see gbuffer.c's lighting pass */
 
-/* Set camera from local player */
-void renderer_set_camera(Renderer *r, const Player *p);
+/* Sets the camera directly from a world-space eye position and yaw/pitch
+ * (radians) -- previously read these off a Player struct
+ * (renderer_set_camera(Renderer*, const Player*)), which no longer exists
+ * now that Qek's gameplay/Player code is gone (see phi.md's Phase 1
+ * status). main.c owns a minimal standalone camera state now instead. */
+void renderer_set_camera(Renderer *r, Vec3f eye, float yaw, float pitch);
 
 /* Snapshots this frame's view-projection matrix into prev_vp, for the
  * NEXT frame's velocity-buffer computation. Call once per frame, after
@@ -101,25 +104,9 @@ int renderer_get_inverse_view_proj(const Renderer *r, float *out16);
  * that want to override that. No-op on wasm (see Renderer.u_object_id). */
 void renderer_set_object_id(Renderer *r, unsigned int id);
 
-/* Draw world mesh */
-void renderer_draw_world(Renderer *r, RenderMesh *mesh);
-
 /* Phase 1 foundation: draw a single MeshObject at its own position/
  * orientation transform (see meshobject.h). */
 void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj);
-
-/* Draw all players (simple box) */
-void renderer_draw_players(Renderer *r, const GameState *gs, int local_id);
-
-/* Draw all active rockets */
-void renderer_draw_rockets(Renderer *r, const GameState *gs);
-
-/* Light-grey reference floor at y=15.5, spanning the world footprint —
- * physics.c hard-clamps every player to y>=16 regardless of octree content,
- * so this keeps that implicit ground visible/paintable even where the
- * octree itself has been carved fully empty. Depth-tests normally, so real
- * (carved/built) geometry at y=16 always draws over it. */
-void renderer_draw_ground_plane(Renderer *r);
 
 /* Editor: draw a full-bright wireframe box in world space (hover/selection highlight) */
 void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,

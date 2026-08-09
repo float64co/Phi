@@ -458,79 +458,6 @@ static unsigned int link_pbr_program(const char *vsrc, const char *fsrc) {
     return p;
 }
 
-/* ---- Box VBO (pos+normal, 6 floats/vert, 36 verts) ---- */
-static void build_box_vbo(unsigned int *vbo, float hw, float h, float hd) {
-    float verts[36 * 6];
-    float *p = verts;
-#define PUSH(px,py,pz,nx,ny,nz) \
-    do{*p++=(px);*p++=(py);*p++=(pz);*p++=(nx);*p++=(ny);*p++=(nz);}while(0)
-#define QUAD(ax,ay,az,bx,by,bz,cx,cy,cz,dx,dy,dz,nx,ny,nz) do{ \
-    PUSH(ax,ay,az,nx,ny,nz);PUSH(bx,by,bz,nx,ny,nz);PUSH(cx,cy,cz,nx,ny,nz); \
-    PUSH(ax,ay,az,nx,ny,nz);PUSH(cx,cy,cz,nx,ny,nz);PUSH(dx,dy,dz,nx,ny,nz);}while(0)
-    QUAD(-hw,0,-hd, -hw,h,-hd, -hw,h,hd,  -hw,0,hd,   -1,0,0);
-    QUAD( hw,0, hd,  hw,h, hd,  hw,h,-hd,  hw,0,-hd,   1,0,0);
-    QUAD(-hw,0, hd,  hw,0, hd,  hw,0,-hd, -hw,0,-hd,   0,-1,0);
-    QUAD(-hw,h,-hd,  hw,h,-hd,  hw,h, hd, -hw,h, hd,   0,1,0);
-    QUAD(-hw,0,-hd,  hw,0,-hd,  hw,h,-hd, -hw,h,-hd,   0,0,-1);
-    QUAD( hw,0, hd, -hw,0, hd, -hw,h, hd,  hw,h, hd,   0,0,1);
-#undef QUAD
-#undef PUSH
-    glGenBuffers(1, vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, *vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    gl_check("build_box_vbo");
-}
-
-/* Same as build_box_vbo(), but Y spans [-h/2, h/2] instead of [0, h] — i.e.
- * the local origin is the box's true center, not its base. build_box_vbo's
- * "sits on top of position" convention is correct for players (position is
- * feet) but wrong for anything that ROTATES (like the rocket): rotating a
- * base-anchored box swings that offset to point in whatever direction the
- * rotation's local +Y maps to, instead of staying "above" in world space —
- * i.e. the rendered box visibly drifts away from the object's true (correct)
- * physics position depending on which way it's travelling.
- *
- * (No GPU readback here — glGetBufferSubData doesn't exist in GLES2/WebGL1,
- * which is this project's target; the geometry is just regenerated with a
- * shifted Y range instead of reusing build_box_vbo's upload.) */
-static void build_box_vbo_centered(unsigned int *vbo, float hw, float h, float hd) {
-    float h0 = -h * 0.5f, h1 = h * 0.5f;
-    float verts[36 * 6];
-    float *p = verts;
-#define PUSH(px,py,pz,nx,ny,nz) \
-    do{*p++=(px);*p++=(py);*p++=(pz);*p++=(nx);*p++=(ny);*p++=(nz);}while(0)
-#define QUAD(ax,ay,az,bx,by,bz,cx,cy,cz,dx,dy,dz,nx,ny,nz) do{ \
-    PUSH(ax,ay,az,nx,ny,nz);PUSH(bx,by,bz,nx,ny,nz);PUSH(cx,cy,cz,nx,ny,nz); \
-    PUSH(ax,ay,az,nx,ny,nz);PUSH(cx,cy,cz,nx,ny,nz);PUSH(dx,dy,dz,nx,ny,nz);}while(0)
-    QUAD(-hw,h0,-hd, -hw,h1,-hd, -hw,h1,hd,  -hw,h0,hd,   -1,0,0);
-    QUAD( hw,h0, hd,  hw,h1, hd,  hw,h1,-hd,  hw,h0,-hd,   1,0,0);
-    QUAD(-hw,h0, hd,  hw,h0, hd,  hw,h0,-hd, -hw,h0,-hd,   0,-1,0);
-    QUAD(-hw,h1,-hd,  hw,h1,-hd,  hw,h1, hd, -hw,h1, hd,   0,1,0);
-    QUAD(-hw,h0,-hd,  hw,h0,-hd,  hw,h1,-hd, -hw,h1,-hd,   0,0,-1);
-    QUAD( hw,h0, hd, -hw,h0, hd, -hw,h1, hd,  hw,h1, hd,   0,0,1);
-#undef QUAD
-#undef PUSH
-    glGenBuffers(1, vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, *vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    gl_check("build_box_vbo_centered");
-}
-
-/* ---- Material palette ---- */
-static void init_palette(Renderer *r) {
-    static const float pal[][3] = {
-        {0.50f,0.50f,0.55f},{0.55f,0.40f,0.25f},{0.30f,0.55f,0.25f},
-        {0.65f,0.60f,0.50f},{0.25f,0.30f,0.65f},{0.70f,0.20f,0.20f},
-        {0.80f,0.75f,0.60f},{0.20f,0.20f,0.20f},
-    };
-    int n = (int)(sizeof(pal)/sizeof(pal[0]));
-    for (int i = 0; i < 256; i++) {
-        r->palette[i][0] = pal[i%n][0];
-        r->palette[i][1] = pal[i%n][1];
-        r->palette[i][2] = pal[i%n][2];
-    }
-}
-
 static void build_vp(const Renderer *r, float *vp);  /* defined below, needed by renderer_create/renderer_end_frame */
 
 /* ================================================================
@@ -588,8 +515,6 @@ Renderer *renderer_create(int width, int height) {
     printf("[renderer] pbr_prog=%u pbr_mvp=%d pbr_prev_mvp=%d\n",
            r->pbr_program, r->pbr_u_mvp, r->pbr_u_prev_mvp);
 
-    build_box_vbo_centered(&r->rocket_vbo, 3.0f, 3.0f, 12.0f);
-    init_palette(r);
     renderer_resize(r, width, height);
     /* Seed prev_vp with this frame's own vp — gives exactly zero velocity
      * on the very first frame (nothing to compare against yet) rather than
@@ -628,12 +553,12 @@ void renderer_resize(Renderer *r, int w, int h) {
     glViewport(0, 0, r->vp_w, r->vp_h);
 }
 
-void renderer_set_camera(Renderer *r, const Player *p) {
-    r->cam_pos[0] = p->pos.x;
-    r->cam_pos[1] = p->pos.y + player_eye_h(p);
-    r->cam_pos[2] = p->pos.z;
-    r->cam_yaw    = p->yaw;
-    r->cam_pitch  = p->pitch;
+void renderer_set_camera(Renderer *r, Vec3f eye, float yaw, float pitch) {
+    r->cam_pos[0] = eye.x;
+    r->cam_pos[1] = eye.y;
+    r->cam_pos[2] = eye.z;
+    r->cam_yaw    = yaw;
+    r->cam_pitch  = pitch;
 }
 
 void renderer_set_object_id(Renderer *r, unsigned int id) {
@@ -687,51 +612,6 @@ int renderer_get_inverse_view_proj(const Renderer *r, float *out16) {
     float vp[16];
     build_vp(r, vp);
     return mat4_inverse(vp, out16);
-}
-
-void renderer_draw_world(Renderer *r, RenderMesh *mesh) {
-    if (!mesh || mesh->count == 0) { printf("[renderer] mesh empty\n"); return; }
-
-    mesh_upload(mesh);
-    if (!mesh->vbo) { printf("[renderer] vbo=0 after upload\n"); return; }
-
-    float vp[16];
-    build_vp(r, vp);
-
-    r->cur_object_id = 0;
-
-    glUseProgram(r->program);
-    bind_renderer_vao(r);
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
-    /* World mesh vertices are already in world space (no model matrix), so
-     * the "previous frame" reprojection is just prev_vp directly — see
-     * prev_vp's comment in renderer.h. */
-    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);
-    float ld[3] = {0.577f, 0.577f, 0.577f};
-    glUniform3fv(r->u_light_dir, 1, ld);
-    glUniform3f(r->u_mat_color, 0.50f, 0.50f, 0.55f);
-    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
-     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
-     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
-     * that reason). */
-    glUniform1ui(r->u_object_id, r->cur_object_id);
-
-    glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
-    int stride = VERTEX_STRIDE * (int)sizeof(float);
-
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));
-
-    glDrawArrays(GL_TRIANGLES, 0, mesh->count);
-    gl_check("draw_world");
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(2);
 }
 
 /* Phase 1 foundation: draws a MeshObject (glTF-sourced, via the half-edge
@@ -790,206 +670,6 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     glDisableVertexAttribArray(3);
     glDisableVertexAttribArray(4);
     glDisableVertexAttribArray(5);
-}
-
-static void draw_box(const Renderer *r, unsigned int vbo,
-                     float px, float py, float pz,
-                     float cr, float cg, float cb,
-                     const float *vp) {
-    float t[16], mvp[16], prev_mvp[16];
-    mat4_translate(t, px, py, pz);
-    mat4_mul(mvp, vp, t);
-    /* Camera-motion-only scope (see prev_vp's comment in renderer.h):
-     * reuses this frame's own (current) model matrix t for the "previous"
-     * reprojection too, so this object's own movement isn't captured, only
-     * parallax from camera motion. */
-    mat4_mul(prev_mvp, r->prev_vp, t);
-
-    glUseProgram(r->program);
-    bind_renderer_vao(r);
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
-    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, prev_mvp);
-    glUniform3f(r->u_mat_color, cr, cg, cb);
-    float ld[3] = {0.577f, 0.577f, 0.577f};
-    glUniform3fv(r->u_light_dir, 1, ld);
-    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
-     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
-     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
-     * that reason). */
-    glUniform1ui(r->u_object_id, r->cur_object_id);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    int stride = 6 * (int)sizeof(float);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glDisableVertexAttribArray(2);
-    glVertexAttrib1f(2, 0.0f);
-
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-}
-
-/* Rotation that maps local +Z (the rocket box's long axis, see
- * build_box_vbo(3,3,12) in renderer_create) onto a direction vector, so a
- * drawn rocket visibly points the way it's actually travelling instead of
- * always rendering axis-aligned regardless of aim. */
-static void mat4_look_rotation(float *m, float dx, float dy, float dz) {
-    float len = sqrtf(dx*dx + dy*dy + dz*dz);
-    if (len < 1e-6f) { mat4_identity(m); return; }
-    float fx = dx/len, fy = dy/len, fz = dz/len;
-
-    float upx = 0.0f, upy = 1.0f, upz = 0.0f;
-    if (fabsf(fx*upx + fy*upy + fz*upz) > 0.999f) { upx = 1.0f; upy = 0.0f; upz = 0.0f; }
-
-    /* cross(forward, up), not cross(up, forward) — the latter (what this
-     * used to compute) comes out as the exact negative of mat4_look_dir's
-     * right vector at every yaw/pitch, i.e. this basis was mirrored
-     * left-right relative to the camera's own convention. */
-    float rx = fy*upz - fz*upy, ry = fz*upx - fx*upz, rz = fx*upy - fy*upx;
-    float rl = sqrtf(rx*rx + ry*ry + rz*rz);
-    rx /= rl; ry /= rl; rz /= rl;
-
-    /* cross(right, forward), not cross(forward, right) — swapping the right
-     * vector's cross-product order above flips its sign, which cascades
-     * into this one too if left as-is; swap this order as well to cancel
-     * it back out so both axes match the camera basis exactly. */
-    float ux = ry*fz - rz*fy, uy = rz*fx - rx*fz, uz = rx*fy - ry*fx;
-
-    mat4_identity(m);
-    m[0] = rx; m[1] = ry; m[2] = rz;
-    m[4] = ux; m[5] = uy; m[6] = uz;
-    m[8] = fx; m[9] = fy; m[10] = fz;
-}
-
-static void draw_box_oriented(const Renderer *r, unsigned int vbo,
-                              float px, float py, float pz,
-                              float dx, float dy, float dz,
-                              float cr, float cg, float cb,
-                              const float *vp) {
-    float rot[16], t[16], model[16], mvp[16], prev_mvp[16];
-    mat4_look_rotation(rot, dx, dy, dz);
-    mat4_translate(t, px, py, pz);
-    mat4_mul(model, t, rot);
-    mat4_mul(mvp, vp, model);
-    /* Camera-motion-only scope, same reasoning as draw_box above — reuses
-     * this frame's own model matrix for the "previous" reprojection. */
-    mat4_mul(prev_mvp, r->prev_vp, model);
-
-    glUseProgram(r->program);
-    bind_renderer_vao(r);
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
-    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, prev_mvp);
-    glUniform3f(r->u_mat_color, cr, cg, cb);
-    float ld[3] = {0.577f, 0.577f, 0.577f};
-    glUniform3fv(r->u_light_dir, 1, ld);
-    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
-     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
-     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
-     * that reason). */
-    glUniform1ui(r->u_object_id, r->cur_object_id);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    int stride = 6 * (int)sizeof(float);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glDisableVertexAttribArray(2);
-    glVertexAttrib1f(2, 0.0f);
-
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-}
-
-static unsigned int s_player_vbo = 0;
-
-void renderer_draw_players(Renderer *r, const GameState *gs, int local_id) {
-    if (!s_player_vbo)
-        build_box_vbo(&s_player_vbo, PLAYER_HALFWIDTH, PLAYER_HEIGHT, PLAYER_HALFWIDTH);
-    float vp[16]; build_vp(r, vp);
-    for (int i = 0; i < gs->num_players; i++) {
-        const Player *p = &gs->players[i];
-        if (!p->alive || p->id == (uint8_t)local_id) continue;
-        r->cur_object_id = 1000u + p->id;
-        draw_box(r, s_player_vbo, p->pos.x, p->pos.y, p->pos.z, 0.8f, 0.2f, 0.2f, vp);
-    }
-}
-
-void renderer_draw_rockets(Renderer *r, const GameState *gs) {
-    float vp[16]; build_vp(r, vp);
-    for (int i = 0; i < MAX_ROCKETS; i++) {
-        const Rocket *rk = &gs->rockets[i];
-        if (!rk->active) continue;
-        r->cur_object_id = 2000u + (unsigned int)i;
-        draw_box_oriented(r, r->rocket_vbo,
-                 rk->pos.x, rk->pos.y, rk->pos.z,
-                 rk->vel.x, rk->vel.y, rk->vel.z,
-                 1.0f, 0.6f, 0.1f, vp);
-    }
-}
-
-static unsigned int s_ground_vbo = 0;
-
-void renderer_draw_ground_plane(Renderer *r) {
-    if (!s_ground_vbo) {
-        float y  = 15.5f;   /* just under y=16 so real floor geometry there always wins depth test */
-        /* Exactly WORLD_SIZE, no margin — the highlight/editable area is
-         * clamped to WORLD_SIZE too, so a padded plane would visually
-         * extend past where anything can actually be targeted/built. */
-        float x0 = 0.0f, x1 = (float)WORLD_SIZE;
-        float z0 = 0.0f, z1 = (float)WORLD_SIZE;
-        /* Same corner order as FACE_POS_Y quads in octree_render.c
-         * (a=x0z0, b=x0z1, c=x1z1, d=x1z0; tris a,b,c and a,c,d) so winding
-         * matches the engine's convention and isn't back-face culled. */
-        float verts[6*6] = {
-            x0,y,z0,  0,1,0,
-            x0,y,z1,  0,1,0,
-            x1,y,z1,  0,1,0,
-
-            x0,y,z0,  0,1,0,
-            x1,y,z1,  0,1,0,
-            x1,y,z0,  0,1,0,
-        };
-        glGenBuffers(1, &s_ground_vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, s_ground_vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    }
-
-    r->cur_object_id = 1;
-
-    float vp[16]; build_vp(r, vp);
-    glUseProgram(r->program);
-    bind_renderer_vao(r);
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
-    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);  /* world space, no model matrix — see draw_world */
-    glUniform3f(r->u_mat_color, 0.78f, 0.78f, 0.80f);   /* light grey */
-    float ld[3] = {0.577f, 0.577f, 0.577f};
-    glUniform3fv(r->u_light_dir, 1, ld);
-    /* Safe on both backends now that wasm is WebGL2/GLES3, which has
-     * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
-     * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
-     * that reason). */
-    glUniform1ui(r->u_object_id, r->cur_object_id);
-
-    glBindBuffer(GL_ARRAY_BUFFER, s_ground_vbo);
-    int stride = 6 * (int)sizeof(float);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glDisableVertexAttribArray(2);
-    glVertexAttrib1f(2, 0.0f);
-
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
 }
 
 static unsigned int s_wire_vbo = 0;

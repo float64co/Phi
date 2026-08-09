@@ -1,11 +1,7 @@
-#include "octree.h"
 #include "octree_render.h"
-#include "octree_stl.h"
-#include "physics.h"
 #include "renderer.h"
 #include "net.h"
 #include "input.h"
-#include "editor.h"
 #include "console.h"
 #include "phi_platform.h"
 #include "halfedge_gltf.h"
@@ -32,11 +28,8 @@
 #include "gbuffer.h"
 
 /* ---- Global state ---- */
-static Octree      *g_world    = NULL;
-static RenderMesh  *g_mesh     = NULL;
 static Renderer    *g_renderer = NULL;
 static GBuffer      *g_gbuf     = NULL;  /* deferred renderer, see gbuffer.h — both build targets now */
-static GameState    g_gs       = {0};
 
 /* Phase 1 foundation test object: loads assets/cube.gltf (a hand-authored
  * unit cube, see the asset's own generator script) through the glTF ->
@@ -57,55 +50,8 @@ static int          g_edit_face = -1;
 static Vec3f        g_edit_hit_local = {0, 0, 0};  /* local-space hit point paired with g_edit_face, see below */
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
-static EditorState  g_ed       = {0};
 static ConsoleState g_cs       = {0};
 static double       g_last_t   = 0.0;
-static float        g_net_timer = 0.0f;
-static uint16_t     g_input_seq = 0;
-
-/* ---- HUD overlay (via JS) ---- */
-#ifdef __EMSCRIPTEN__
-static void update_hud(int hp, int local_id) {
-    EM_ASM({
-        var hud = document.getElementById('hud');
-        if (hud) {
-            hud.innerHTML =
-                'HP: <b>' + $0 + '</b>' +
-                ' &nbsp;|&nbsp; AMMO: <b>∞</b>' +
-                ' &nbsp;|&nbsp; ID: ' + $1 +
-                ' &nbsp;|&nbsp; <span style="opacity:0.5">[F4] STL &nbsp; [E] Edit &nbsp; [`] Console</span>';
-        }
-    }, hp, local_id);
-}
-#else
-static void update_hud(int hp, int local_id) {
-    (void)hp; (void)local_id;
-}
-#endif
-
-#ifdef __EMSCRIPTEN__
-static void update_editor_ui(const EditorState *ed) {
-    EM_ASM({
-        var el = document.getElementById('editor-status');
-        if (!el) return;
-        if ($0) { el.style.display = 'block'; el.textContent = UTF8ToString($1); }
-        else    { el.style.display = 'none'; }
-    }, ed->active, ed->status);
-}
-#else
-static void update_editor_ui(const EditorState *ed) { (void)ed; }
-#endif
-
-/* The DOM overlay this used to show (a fixed bar across the top of the
- * page, orange border, its own scrollback div) is superseded by the real
- * in-canvas Console panel (draw_panel_console in ui.c, reading this exact
- * same ConsoleState) — showing both was redundant and confusing. Kept as
- * a deliberate no-op rather than deleted, since cs->open/console_open
- * still does real work: it's what console.c/input.c gate WASD movement
- * and mouse clicks behind while the console is "open" for typing (see
- * console.c's input_set_console_open calls) — only the now-redundant DOM
- * visibility toggle was removed, not that underlying state. */
-static void update_console_ui(const ConsoleState *cs) { (void)cs; }
 
 /* Loads assets/cube.gltf into g_test_mesh_object the same way main()'s
  * startup code originally did inline — factored out so the scene
@@ -122,10 +68,6 @@ static void spawn_test_mesh_object(void) {
         return;
     }
     g_test_mesh_object.id = 1;
-    /* Elevated well above normal player ground-level traffic (~y=16 floor)
-     * — early native testing found the diagnostic camera's line of sight
-     * getting occluded by ground-level arena traffic at ground-level test
-     * positions, an environmental artifact, not a rendering bug. */
     g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
     g_test_mesh_object.orientation = quat_identity();
     g_test_mesh_object.is_static = 1;
@@ -179,34 +121,31 @@ static void rebuild_test_mesh_render(const char *op_name, int tris_before) {
     printf("[main] mesh edit '%s': %d -> %d triangles\n", op_name, tris_before, tris_after);
 }
 
-/* Every renderer_draw_* call for the frame's game content — extracted
+/* Every renderer_draw_* call for the frame's scene content — extracted
  * into a callback (see UIRenderContext.draw_scene_content in ui.h) so the
  * Scene panel can drive it between gbuffer_begin_geometry_pass() and
- * gbuffer_render_shadow_map() without ui.c needing to know about
- * Qek-specific entities (players/rockets) at all. */
+ * gbuffer_render_shadow_map(). Used to also draw Qek's octree world mesh,
+ * ground plane, players, and rockets, plus the octree carve-editor
+ * overlay — all gone along with that code (see phi.md's Phase 1 status,
+ * "Client/server model"). The MeshObject + gizmo below are the only scene
+ * content that exists right now. */
 static int selected_is_test_mesh(void);  /* defined below, needed here for the gizmo draw */
 
 static void scene_content_cb(void *userdata) {
     (void)userdata;
-    renderer_draw_world(g_renderer, g_mesh);
-    renderer_draw_ground_plane(g_renderer);
-    renderer_draw_players(g_renderer, &g_gs, g_ns.local_id);
-    renderer_draw_rockets(g_renderer, &g_gs);
     if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
     if (selected_is_test_mesh()) gizmo_draw(g_renderer, g_test_mesh_object.position);
-    editor_render(&g_ed, g_renderer);
 }
 
 /* Constructs a world-space ray from a screen point inside the Scene
  * panel's own content rect, through the same camera basis renderer.c's
- * build_vp/mat4_look_dir and editor.c's view_dir already use
- * (fwd = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch)),
- * right = (cos(yaw), 0, -sin(yaw)) — matched exactly, not re-derived, so
- * a constructed ray always agrees with what's actually rendered). Shared
- * by object picking and the gizmo (both hit-testing and per-frame drag
- * updates need "the ray under the current mouse position" using the
- * identical math). Returns 0 (leaving origin/dir untouched) if the
- * Scene rect is degenerate. */
+ * build_vp/mat4_look_dir uses (fwd = (-sin(yaw)cos(pitch), sin(pitch),
+ * -cos(yaw)cos(pitch)), right = (cos(yaw), 0, -sin(yaw)) — matched
+ * exactly, not re-derived, so a constructed ray always agrees with what's
+ * actually rendered). Shared by object picking and the gizmo (both
+ * hit-testing and per-frame drag updates need "the ray under the current
+ * mouse position" using the identical math). Returns 0 (leaving
+ * origin/dir untouched) if the Scene rect is degenerate. */
 static int compute_scene_ray(float scene_x, float scene_y, float scene_w, float scene_h,
                               int px, int py, Vec3f *origin, Vec3f *dir) {
     if (scene_w < 1.0f || scene_h < 1.0f) return 0;
@@ -251,9 +190,9 @@ static int selected_is_test_mesh(void) {
  * begins a drag instead of re-picking — grabbing the gizmo must win over
  * whatever's directly behind it. Otherwise tests against
  * g_test_mesh_object's real triangle data (meshobject.c's
- * meshobject_ray_pick, Möller–Trumbore, not a bounding-box guess); a hit
- * selects (same 4000+id convention Outliner/gbuffer picking already use),
- * a miss deselects, matching normal editor click-away-to-deselect
+ * meshobject_ray_pick_face, Möller–Trumbore, not a bounding-box guess); a
+ * hit selects (same 4000+id convention Outliner/gbuffer picking already
+ * use), a miss deselects, matching normal editor click-away-to-deselect
  * behavior. */
 static void try_pick_object(float scene_x, float scene_y, float scene_w, float scene_h, int click_x, int click_y) {
     Vec3f origin, dir;
@@ -292,33 +231,18 @@ static void main_loop(void *userdata) {
     float dt = (float)(now - g_last_t);
     g_last_t = now;
     if (dt > 0.05f) dt = 0.05f;   /* cap at 50ms */
+    (void)dt;   /* no per-frame simulation reads this yet -- kept for whatever real game-state tick lands on the repurposed networking layer next */
 
 #ifndef __EMSCRIPTEN__
     net_poll_native();  /* wasm gets messages via an async JS callback instead */
 #endif
 
-    /* --- Apply any authoritative map swap from the server before physics/render --- */
-    if (g_ns.has_pending_map) {
-        g_ns.has_pending_map = 0;
-        octree_destroy(g_world);
-        g_world       = g_ns.pending_map;
-        g_ns.pending_map = NULL;
-        g_gs.world    = g_world;
-        mesh_rebuild(g_mesh, g_world);
-        mesh_upload(g_mesh);
-        printf("[main] Swapped in server map (%d verts)\n", g_mesh->count);
-    }
-
-    /* --- UI layout + click routing --- must happen before the gameplay
-     * input processing below: a UI click that's consumed (the panel
-     * type-switcher icon toggling its dropdown, a dropdown row swapping a
-     * panel, an Outliner row selection) must NOT also register as a
-     * gameplay "fire" edge on that same physical LMB press. ui_layout()
-     * needs to run before hit-testing (it's what computes every Area's
-     * on-screen rect), and UIRenderContext is built once here and reused
-     * for the ui_render() call further down too — one source of truth for
-     * what got clicked vs. what actually gets drawn this frame, rather
-     * than two separately-constructed contexts that could drift apart. */
+    /* --- UI layout + click routing --- ui_layout() needs to run before
+     * hit-testing (it's what computes every Area's on-screen rect), and
+     * UIRenderContext is built once here and reused for the ui_render()
+     * call further down too — one source of truth for what got clicked
+     * vs. what actually gets drawn this frame, rather than two separately-
+     * constructed contexts that could drift apart. */
     int cw, ch;
     phi_platform_get_window_size(&cw, &ch);
     ui_layout(cw, ch);
@@ -329,9 +253,6 @@ static void main_loop(void *userdata) {
     UIRenderContext ui_ctx = {0};
     ui_ctx.renderer = g_renderer;
     ui_ctx.gbuf = g_gbuf;
-    ui_ctx.world_mesh = g_mesh;
-    ui_ctx.gs = &g_gs;
-    ui_ctx.local_player_id = g_ns.local_id;
     ui_ctx.test_obj = &g_test_mesh_object;
     ui_ctx.test_obj_loaded = g_test_mesh_loaded;
     ui_ctx.edit_face = g_edit_face;
@@ -341,28 +262,17 @@ static void main_loop(void *userdata) {
     ui_ctx.draw_scene_content = scene_content_cb;
 
     /* Real clicks (lmb_click/rmb_click) — same "rising edge, drained and
-     * cleared here" convention as fire/export_stl below. Routes into the
-     * panel type-switcher icon/dropdown and Outliner row selection. A
-     * consumed click must not ALSO fire a rocket on the same LMB press. */
+     * cleared here" convention as enter_edge etc. Routes into the panel
+     * type-switcher icon/dropdown and Outliner row selection first, then
+     * (if nothing claimed it) a real ray-vs-mesh pick inside the Scene
+     * panel's own content (see try_pick_object) — a Scene-panel click is
+     * always a select-or-deselect editorial action now (hit selects, miss
+     * deselects). */
     int ui_consumed_click = 0;
     if (g_inp.lmb_click) {
         g_inp.lmb_click = 0;
         ui_consumed_click = ui_on_mouse_button(g_inp.mouse_x, g_inp.mouse_y, 0, 1, &ui_ctx);
-        /* Same "offer to UI chrome first, then Scene content, then only if
-         * the editor isn't active" pattern as the rmb_click branch below —
-         * a real ray-vs-mesh pick (see try_pick_object) rather than only
-         * being selectable via the Outliner row. A Scene-panel click here
-         * is now ALWAYS interpreted as a select-or-deselect editorial
-         * action (hit selects, miss deselects — see try_pick_object), so
-         * it counts as UI-consumed for the fire-gating below too: without
-         * that, every object-pick click would ALSO fire a rocket on the
-         * same LMB press, the same double-action problem the UI-chrome
-         * gating already solves for panel clicks. This does mean plain
-         * clicking no longer fires within the Scene panel outside octree-
-         * edit mode -- a deliberate call, not an oversight: Phi is editor-
-         * first now (see phi.md), and conflating "select this object" with
-         * "fire a rocket" on the same click reads as a bug, not a feature. */
-        if (!ui_consumed_click && !g_ed.active) {
+        if (!ui_consumed_click) {
             float sx, sy, sw, sh;
             if (ui_get_scene_rect(&sx, &sy, &sw, &sh) &&
                 (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
@@ -378,14 +288,10 @@ static void main_loop(void *userdata) {
          * already-open context/type-switcher menu, same as any other
          * right-click ui_on_mouse_button already handles). If nothing
          * claimed it and the click landed inside the Scene panel's own
-         * content rect (not its chrome) — and the octree editor isn't
-         * active, which already owns RMB for carve-drags, same reasoning
-         * the fire-gating above uses for LMB — open the scene context
-         * menu there. This is what actually feeds
-         * ui_open_scene_context_menu(x, y) the input phi.md's Native UI
-         * System section previously flagged as its missing source. */
+         * content rect (not its chrome), open the scene context menu
+         * there. */
         int rmb_consumed = ui_on_mouse_button(g_inp.mouse_x, g_inp.mouse_y, 1, 1, &ui_ctx);
-        if (!rmb_consumed && !g_ed.active) {
+        if (!rmb_consumed) {
             float sx, sy, sw, sh;
             if (ui_get_scene_rect(&sx, &sy, &sw, &sh) &&
                 (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
@@ -410,7 +316,6 @@ static void main_loop(void *userdata) {
             }
         }
     }
-    if (ui_consumed_click) g_inp.fire = 0;
 
     /* Gizmo drag: unlike the click flags above, this needs to run every
      * frame the LMB stays held (gizmo_begin_drag already ran on the press
@@ -434,9 +339,10 @@ static void main_loop(void *userdata) {
     }
 
     /* Scene context-menu action, drained once per frame like the click
-     * flags above. Only Add Mesh Object / Delete are wired to real
-     * behavior — Frame Selected/Frame All/Deselect All are still
-     * placeholder rows (see ui_poll_context_menu_action's own comment). */
+     * flags above. Only Add Mesh Object / Delete / Extrude / Inset / Loop
+     * Cut / Fracture are wired to real behavior — Frame Selected/Frame
+     * All/Deselect All are still placeholder rows (see
+     * ui_poll_context_menu_action's own comment). */
     switch (ui_poll_context_menu_action()) {
         case CTX_ACTION_ADD_MESH:
             if (g_test_mesh_loaded) {
@@ -533,112 +439,22 @@ static void main_loop(void *userdata) {
             break;
     }
 
-    /* --- Input processing --- */
-    Player *local = NULL;
-    for (int i = 0; i < g_gs.num_players; i++) {
-        if (g_gs.players[i].id == (uint8_t)g_ns.local_id) {
-            local = &g_gs.players[i]; break;
-        }
-    }
-
-    if (local && local->alive) {
-        console_update(&g_cs, &g_inp);
-        editor_update(&g_ed, &g_gs, local, &g_inp, &g_ns, dt);
-
-        if (g_ed.world_dirty) {
-            mesh_rebuild(g_mesh, g_world);
-            mesh_upload(g_mesh);
-        }
-
-        if (!g_ed.active) {
-            /* Check ground BEFORE applying input so ground accel works on frame 1 */
-            local->on_ground = physics_check_ground(g_gs.world, local->pos);
-            local->crouching = g_inp.crouch;
-
-            /* Apply input to local player prediction */
-            physics_apply_input(local,
-                                 g_inp.forward, g_inp.back, g_inp.left, g_inp.right,
-                                 g_inp.jump,
-                                 g_inp.yaw, g_inp.pitch,
-                                 dt, local->on_ground);
-
-            /* Fire rocket on rising edge — locally if no server, via net if connected */
-            if (g_inp.fire) {
-                if (g_ns.connected) {
-                    net_send_fire(&g_ns, g_inp.yaw, g_inp.pitch, local->crouching);
-                } else {
-                    physics_fire_rocket(&g_gs, local);
-                }
-                g_inp.fire = 0;
-            }
-        } else {
-            /* Editor mode owns movement (fly_move) and LMB/RMB (edit drags);
-             * discard any fire edge so editing clicks never also shoot. */
-            g_inp.fire = 0;
-        }
-    }
-
-    /* STL export */
-    if (g_inp.export_stl) {
-        g_inp.export_stl = 0;
-        printf("[main] Exporting STL...\n");
-        octree_stl_download(g_world);
-    }
-
-    /* --- Physics tick (client-side prediction) --- */
-    physics_update(&g_gs, dt);
-
-    /* --- Network: send input at 20Hz --- */
-    g_net_timer += dt;
-    if (g_net_timer >= 0.05f && g_ns.connected) {
-        g_net_timer = 0.0f;
-        uint8_t flags = input_get_key_flags(&g_inp);
-        if (g_ed.active)       flags |= KEY_EDITING;
-        if (local && local->god) flags |= KEY_GOD;
-        net_send_input(&g_ns, g_input_seq++, g_inp.yaw, g_inp.pitch, flags);
-    }
+    /* The Python panel is an always-focused text input now (see
+     * console.c) -- no Player-alive gate needed to run it, unlike the Qek
+     * console this replaced. */
+    console_update(&g_cs, &g_inp);
 
     /* --- Render --- */
-    if (local && local->alive) {
-        renderer_set_camera(g_renderer, local);
-    }
-
-    /* One-shot diagnostic camera override, native testing only in
-     * practice (no automated screenshot tooling on either target — see
-     * the comment further down): the real gameplay camera's position/yaw
-     * at any given frame depends on physics (free-fall to the floor) and
-     * possibly server-driven state, so it can't be relied on to actually
-     * be looking at the Phase 1 test MeshObject. Point the camera
-     * directly at it for exactly this one frame instead, to get a
-     * deterministic visibility check — next frame's renderer_set_camera
-     * call above overwrites this back to the real player camera, no
-     * explicit restore needed. */
-    static int s_cam_diag_frame = 0;
-    ++s_cam_diag_frame;
-    int mesh_obj_diag_frame = g_test_mesh_loaded && s_cam_diag_frame == 30;
-    if (mesh_obj_diag_frame) {
-        g_renderer->cam_pos[0] = g_test_mesh_object.position.x;
-        g_renderer->cam_pos[1] = g_test_mesh_object.position.y;
-        g_renderer->cam_pos[2] = g_test_mesh_object.position.z + 30.0f;
-        g_renderer->cam_yaw = 0.0f;
-        g_renderer->cam_pitch = 0.0f;
-    }
-
-    /* [geometry]/[shadow]/[lighting]/.../[fxaa] all now happen inside the
+    /* [geometry]/[shadow]/[lighting]/.../[fxaa] all happen inside the
      * Scene panel specifically (ui.c's draw_panel_scene), scoped to that
      * panel's own screen sub-rectangle rather than always filling the
      * whole window — see gbuffer_set_viewport_offset()'s comment in
      * gbuffer.h for why this needed a small Phase-0 extension. ui_render()
      * draws the branding bar and every panel (Scene included, via the
-     * draw_scene_content callback below) in one call. ui_layout() already
+     * draw_scene_content callback above) in one call. ui_layout() already
      * ran and ui_ctx was already built above, before the click-routing
      * that needed both — reused here rather than redone. */
     ui_render(&ui_ctx);
-
-    /* HUD */
-    update_hud(local ? local->hp : 0, g_ns.local_id);
-    update_editor_ui(&g_ed);
-    update_console_ui(&g_cs);
 
     /* Visual-correctness check: no automated screenshot tooling is
      * available on either target, so sample the center pixel via
@@ -680,10 +496,6 @@ static void main_loop(void *userdata) {
         unsigned int picked = gbuffer_pick_object_id(g_gbuf, g_gbuf->w / 2, g_gbuf->h / 2);
         printf("[main] frame %d Scene panel center pixel object_id = %u (0xFFFFFFFF = nothing drawn there)\n",
                s_frame, picked);
-    }
-    if (local && s_frame % 120 == 0) {
-        printf("[main] frame %d pos=(%.1f,%.1f,%.1f) yaw=%.3f\n",
-               s_frame, local->pos.x, local->pos.y, local->pos.z, local->yaw);
     }
 
     /* One-shot: confirm the Phase 1 test MeshObject (object_id 4001, see
@@ -730,12 +542,7 @@ int main(void) {
      * phi_platform_set_main_loop() only returns on a window-close message. */
     setvbuf(stdout, NULL, _IONBF, 0);
 #endif
-    printf("[main] Initialising octree world...\n");
-
-    /* World */
-    g_world = octree_create();
-    octree_make_default_map(g_world);
-    g_gs.world = g_world;
+    printf("[main] Initialising Phi...\n");
 
     /* Platform + GL context — must exist BEFORE building mesh VBOs */
     PhiPlatformConfig pcfg = { .title = "Phi", .width = 1280, .height = 720 };
@@ -746,41 +553,35 @@ int main(void) {
     g_gbuf = gbuffer_create(w, h);
     if (!ui_init()) printf("[main] WARNING: ui_init() failed -- editor UI will not render correctly\n");
 
-    /* Build mesh NOW that GL context exists */
-    g_mesh = mesh_create();
-    mesh_rebuild(g_mesh, g_world);
-    mesh_upload(g_mesh);
-
     /* Phase 1 foundation test object — see g_test_mesh_object's comment
      * and spawn_test_mesh_object() above (also reused by the scene
      * context menu's "Add > Mesh Object", see CTX_ACTION_ADD_MESH). */
     spawn_test_mesh_object();
 
-    /* Add local player immediately at ID=1 so camera works before server ACKs */
-    g_ns.local_id = 1;
-    {
-        Player *lp = &g_gs.players[0];
-        memset(lp, 0, sizeof(*lp));
-        lp->id    = 1;
-        lp->pos   = (Vec3f){128, 48, 128};   /* y=32 sat inside the central platform's solid base — stuck-in-wall bug */
-        lp->hp    = 100;
-        lp->alive = 1;
-        g_gs.num_players = 1;
-    }
+    /* Fixed initial camera vantage point, close enough to the test
+     * object's own spawn position to see it -- there is no real editor
+     * camera navigation (orbit/pan/zoom/fly) yet, this is deliberately
+     * just "look at approximately the right place on startup" rather than
+     * pretending a camera-control feature exists. Previously driven by
+     * Qek's Player position/mouse-look every frame; that's gone along
+     * with the rest of that code (see phi.md's Phase 1 status, "Client/
+     * server model"), so this is set once here and never touched again
+     * unless/until real camera controls land. */
+    renderer_set_camera(g_renderer, (Vec3f){128.0f, 100.0f, 120.0f}, 0.0f, 0.0f);
 
     /* Input */
     input_init(&g_inp);
     input_install_callbacks(&g_inp);
 
-    /* Editor / console */
-    editor_init(&g_ed);
+    /* Console / Python panel */
     console_init(&g_cs);
     phi_mp_init(&mp_stack_top);
 
-    /* Network */
-    memset(&g_ns, 0, sizeof(g_ns));
-    g_ns.local_id = 1;  /* will be overwritten by server HELLO */
-    net_set_game_state(&g_gs);
+    /* Network -- see phi.md's Phase 1 status, "Client/server model": this
+     * is Qek's connection/transport machinery, repurposed rather than
+     * removed, now carrying just a HELLO handshake and a generic
+     * server->client text-message channel (see net.h) rather than FPS/
+     * octree state sync. */
 #ifdef __EMSCRIPTEN__
     /* Build WS URL in C from location, pass as C string */
     EM_ASM({

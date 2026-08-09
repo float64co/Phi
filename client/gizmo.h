@@ -1,5 +1,5 @@
 #pragma once
-#include "octree.h"   /* Vec3f */
+#include "vec3.h"     /* Vec3f */
 #include "renderer.h"
 
 /* Phase 1 transform gizmo — translate only for this first pass (rotate/

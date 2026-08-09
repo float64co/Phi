@@ -527,7 +527,16 @@ static void draw_panel_scene(Area *a, const UIRenderContext *ctx) {
 
     gbuffer_begin_geometry_pass(ctx->gbuf, ctx->sky_color);
     if (ctx->draw_scene_content) ctx->draw_scene_content(ctx->draw_scene_userdata);
-    gbuffer_render_shadow_map(ctx->gbuf, ctx->world_mesh, ctx->light_dir);
+    /* No shadow-casting geometry source right now: this used to be the
+     * octree world mesh (VERTEX_STRIDE=7, the generic format
+     * gbuffer_render_shadow_map's shader assumes), gone along with the
+     * rest of that code. The Phase 1 test MeshObject uses a different,
+     * incompatible vertex stride (MESHOBJ_VERTEX_STRIDE, see
+     * meshobject.h) and doesn't opt into shadow casting -- passing NULL
+     * here is honest about that rather than silently reusing the wrong
+     * stride. gbuffer_render_shadow_map itself already no-ops safely on
+     * NULL/empty input. */
+    gbuffer_render_shadow_map(ctx->gbuf, NULL, ctx->light_dir);
     float inv_vp[16];
     renderer_get_inverse_view_proj(ctx->renderer, inv_vp);
     gbuffer_resolve(ctx->gbuf, ctx->light_dir, ctx->sky_color, inv_vp, ctx->renderer->cam_pos);
@@ -566,12 +575,6 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
     y += row_h + 6.0f;
 
     char line[128];
-    if (ctx->world_mesh) {
-        outliner_row_bg(a, y, row_h, row_index++);
-        snprintf(line, sizeof(line), "World Mesh (%d verts)", ctx->world_mesh->count);
-        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
-        y += row_h;
-    }
     if (ctx->test_obj_loaded && ctx->test_obj) {
         int sel = (g_ui.selected_object_id == 4000u + (unsigned int)ctx->test_obj->id);
         if (sel) {
@@ -584,18 +587,10 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
         ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         y += row_h;
     }
-    if (ctx->gs) {
-        for (int i = 0; i < ctx->gs->num_players; i++) {
-            const Player *p = &ctx->gs->players[i];
-            if (!p->alive) continue;
-            outliner_row_bg(a, y, row_h, row_index++);
-            snprintf(line, sizeof(line), "Player #%d%s", p->id,
-                     p->id == (uint8_t)ctx->local_player_id ? " (you)" : "");
-            ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
-            y += row_h;
-            if (y > a->y + a->h - row_h) break;  /* no scrolling yet -- first pass, see phi.md */
-        }
-    }
+    /* Used to also list the octree World Mesh row and every connected
+     * Qek Player -- both gone along with that code (see phi.md's Phase 1
+     * status, "Client/server model"). The MeshObject above is the only
+     * scene content that exists right now. */
 }
 
 static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
@@ -674,16 +669,13 @@ static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
     snprintf(prompt, sizeof(prompt), ">>> %s", ctx->console->input);
     ui_text_draw(x, y, prompt, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
 
-    /* Caret, only while the console actually HAS keyboard focus (open;
-     * toggled by backquote, see console_update) -- this is deliberately
-     * the panel's only focus indicator: without it there is no visual
-     * difference between "typing goes here" and "typing goes to the
-     * game", which is a real ambiguity since the panel itself is always
-     * visible whether or not it's capturing input. Standard ~1Hz blink
-     * (0.5s on / 0.5s off) driven by wall-clock time rather than frame
-     * count, since native's uncapped frame rate makes frame-count blink
-     * periods meaningless. */
-    if (ctx->console->open && fmod(phi_platform_now(), 1.0) < 0.5) {
+    /* Caret -- always present, since the Python panel is an always-focused
+     * text input now (see console.c: keyboard input flows here every
+     * frame, no open/close toggle). Standard ~1Hz blink (0.5s on / 0.5s
+     * off) driven by wall-clock time rather than frame count, since
+     * native's uncapped frame rate makes frame-count blink periods
+     * meaningless. */
+    if (fmod(phi_platform_now(), 1.0) < 0.5) {
         float caret_x = x + font_text_width(g_ui.font_mono, prompt, 13.0f) + 2.0f;
         ui_rect(caret_x, y + 1.0f, 7.0f, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.9f);
     }
