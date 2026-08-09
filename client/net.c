@@ -176,7 +176,7 @@ void net_on_message(NetState *ns, const uint8_t *data, int len) {
         int n = (int)(slen < sizeof(buf) - 1 ? slen : sizeof(buf) - 1);
         memcpy(buf, p, (size_t)n);
         buf[n] = 0;
-        console_append(buf);
+        pyconsole_append(buf);
         break;
     }
 

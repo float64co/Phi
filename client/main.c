@@ -50,7 +50,7 @@ static int          g_edit_face = -1;
 static Vec3f        g_edit_hit_local = {0, 0, 0};  /* local-space hit point paired with g_edit_face, see below */
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
-static ConsoleState g_cs       = {0};
+static PyConsoleState g_cs     = {0};
 static double       g_last_t   = 0.0;
 
 /* Loads assets/cube.gltf into g_test_mesh_object the same way main()'s
@@ -442,7 +442,7 @@ static void main_loop(void *userdata) {
     /* The Python panel is an always-focused text input now (see
      * console.c) -- no Player-alive gate needed to run it, unlike the Qek
      * console this replaced. */
-    console_update(&g_cs, &g_inp);
+    pyconsole_update(&g_cs, &g_inp);
 
     /* --- Render --- */
     /* [geometry]/[shadow]/[lighting]/.../[fxaa] all happen inside the
@@ -574,7 +574,7 @@ int main(void) {
     input_install_callbacks(&g_inp);
 
     /* Console / Python panel */
-    console_init(&g_cs);
+    pyconsole_init(&g_cs);
     phi_mp_init(&mp_stack_top);
 
     /* Network -- see phi.md's Phase 1 status, "Client/server model": this

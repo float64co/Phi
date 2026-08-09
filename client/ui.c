@@ -137,7 +137,7 @@ typedef struct {
 static UIState g_ui;
 
 static const char *PANEL_NAMES[PANEL_TYPE_COUNT] = {
-    "Scene", "Outliner", "Properties", "Console", "Chat", "Node Editor (not implemented yet)", "Curve Editor (not implemented yet)"
+    "Scene", "Outliner", "Properties", "Python Console", "Chat", "Node Editor (not implemented yet)", "Curve Editor (not implemented yet)"
 };
 
 /* ---- Draw primitives ---- */
@@ -662,7 +662,7 @@ static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
 
     /* Input row pinned to the bottom, log scrolling up from just above it
      * -- newest line closest to the input, matching normal terminal/chat
-     * scrollback orientation. ">>> " matches console_submit's own echo
+     * scrollback orientation. ">>> " matches pyconsole_submit's own echo
      * prefix (Python-REPL convention) so the live input row and its
      * echoed history read identically. */
     char prompt[CONSOLE_INPUT_LEN + 8];

@@ -1598,8 +1598,7 @@ after the fix.
 **A/C/D removed, B repurposed — landed.** The plan above is now executed,
 not just recorded. `octree.c`/`.h`, `octree_stl.c`/`.h`, `cmap.c`/`.h`,
 `editor.c`/`.h`, and `physics.c`/`.h` are deleted outright. `octree_render.c`/
-`.h` survives under its old filename (the `ConsoleState`-style naming pass
-this decision explicitly deferred is still deferred) but is now a plain
+`.h` survives under its old filename, but is now a plain
 generic `RenderMesh` module — `mesh_rebuild`/`mesh_push_vertex`/
 `mesh_push_quad`/`neighbor_solid`/`emit_node_faces` (the octree-flattening
 half) are gone, `mesh_create`/`destroy`/`upload`/`upload_stride`/`draw` (the
@@ -1621,9 +1620,11 @@ connection, assigns an id, and relays; `mapdata.py` (octree.c's Python port,
 and the pointer-lock JS glue (`input_set_pointer_locked` no longer exists on
 the C side, so nothing calls it anymore).
 
-Verification: native and wasm both link cleanly with zero warnings under
-`-Wall -Wextra` (win32 not yet re-verified after this pass). The three
-standalone no-GL harnesses (`mesh_edit_test`, `fracture_test`,
+Verification: native, wasm, and win32 all link cleanly (win32 via the usual
+WSL-interop MinGW-w64 toolchain), zero warnings under `-Wall -Wextra` beyond
+two pre-existing ones unrelated to this change (a `strncpy` truncation
+warning in `net.c`/`console.c`, a sign-compare warning in vendored nanosvg).
+The three standalone no-GL harnesses (`mesh_edit_test`, `fracture_test`,
 `mp_console_test`) all still pass — expected, since none of that code path
 touches anything A/C/D removed, but confirmed rather than assumed. Live
 native execution could not be verified this pass: `phi_native` hung, and a
@@ -1631,8 +1632,27 @@ native execution could not be verified this pass: `phi_native` hung, and a
 itself, before `main()`'s first line of application code runs — a sandbox
 X11-connection issue, not a regression from this change (same category of
 environment flakiness already noted earlier in this phase's own history).
-Real-browser wasm verification (the project's own established bar for GL
-work) is still outstanding for this specific pass.
+**Real-browser wasm verification passed**: loaded in an actual browser
+against the rewritten `server.py`, renders, zero JS console errors.
+
+**The deferred `ConsoleState`-style naming pass also landed**, once the
+removal above settled (as planned). `ConsoleState` → `PyConsoleState`;
+`console_init`/`console_update`/`console_append`/`console_submit` →
+`pyconsole_init`/`pyconsole_update`/`pyconsole_append`/`pyconsole_submit`;
+the type-switcher's panel label is now "Python Console" instead of bare
+"Console" (matches how e.g. Blender itself labels the same kind of panel —
+"Console" was never wrong terminology on its own, the actual problem was
+a reader mistaking it for Qek's old backquote-toggled cheat-command
+console, which "Python Console" forecloses without needing an unrelated
+new word). Deliberately left alone: the `console.c`/`console.h` filenames
+(the module's own doc comment already says plainly what it is; renaming
+files buys no reader clarity beyond what the symbol rename already gives,
+for real Makefile/`#include` churn risk), the `PANEL_CONSOLE` enum tag
+(already scoped under `PanelType`, reads fine as-is), and `PKT_CONSOLE_MSG`
+(a wire-protocol constant whose name must stay documentation-only anyway,
+already commented as "the client's Python panel log", and renaming it
+would touch `server.py`'s matching constant for zero behavioral or
+readability gain).
 
 **Design reference**: evaluated a separate, mature CAD tool's C++/Python UI
 codebase as reference material (brought in temporarily, read-only, removed

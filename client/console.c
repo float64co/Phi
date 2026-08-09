@@ -4,9 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static ConsoleState *s_cs = NULL;
+static PyConsoleState *s_cs = NULL;
 
-static void log_push(ConsoleState *cs, const char *line) {
+static void log_push(PyConsoleState *cs, const char *line) {
     if (cs->log_count < CONSOLE_LOG_LINES) {
         strncpy(cs->log[cs->log_count], line, CONSOLE_LINE_LEN - 1);
         cs->log[cs->log_count][CONSOLE_LINE_LEN - 1] = 0;
@@ -25,7 +25,7 @@ static void log_push(ConsoleState *cs, const char *line) {
  * separately, so the scrollback shows real line breaks instead of one
  * giant run-on entry. Any single line longer than CONSOLE_LINE_LEN gets
  * truncated by log_push itself, same as every other console message. */
-static void log_push_multiline(ConsoleState *cs, const char *text) {
+static void log_push_multiline(PyConsoleState *cs, const char *text) {
     if (!text || !text[0]) return;
     const char *start = text;
     const char *nl;
@@ -41,7 +41,7 @@ static void log_push_multiline(ConsoleState *cs, const char *text) {
     if (*start) log_push(cs, start);   /* trailing partial line, no final newline */
 }
 
-static void history_push(ConsoleState *cs, const char *line) {
+static void history_push(PyConsoleState *cs, const char *line) {
     if (line[0] == 0) return;
     if (cs->history_count < CONSOLE_HISTORY) {
         strncpy(cs->history[cs->history_count], line, CONSOLE_INPUT_LEN - 1);
@@ -55,7 +55,7 @@ static void history_push(ConsoleState *cs, const char *line) {
     }
 }
 
-void console_init(ConsoleState *cs) {
+void pyconsole_init(PyConsoleState *cs) {
     memset(cs, 0, sizeof(*cs));
     cs->history_pos = -1;
     s_cs = cs;
@@ -63,7 +63,7 @@ void console_init(ConsoleState *cs) {
     log_push(cs, "interpreter (no special sandboxing beyond MicroPython's own build).");
 }
 
-void console_append(const char *line) {
+void pyconsole_append(const char *line) {
     if (s_cs) log_push(s_cs, line);
 }
 
@@ -71,7 +71,7 @@ void console_append(const char *line) {
  * printed (or its traceback, if it raised) in the scrollback -- see
  * mp_port.h's phi_mp_exec. This console has no command layer of its own
  * anymore (see phi.md's note on why): it's a real Python REPL, full stop. */
-static void console_submit(ConsoleState *cs) {
+static void pyconsole_submit(PyConsoleState *cs) {
     char line[CONSOLE_INPUT_LEN];
     strncpy(line, cs->input, sizeof(line) - 1);
     line[sizeof(line) - 1] = 0;
@@ -89,7 +89,7 @@ static void console_submit(ConsoleState *cs) {
     free(output);
 }
 
-void console_update(ConsoleState *cs, InputState *inp) {
+void pyconsole_update(PyConsoleState *cs, InputState *inp) {
     /* The Python panel is an always-focused text input -- there is no
      * open/close focus toggle (the old backquote-toggled modal drop-down
      * was Qek's console paradigm, deliberately not carried forward).
@@ -136,6 +136,6 @@ void console_update(ConsoleState *cs, InputState *inp) {
         }
     }
     if (enter) {
-        console_submit(cs);
+        pyconsole_submit(cs);
     }
 }
