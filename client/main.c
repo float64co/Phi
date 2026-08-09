@@ -10,6 +10,7 @@
 #include "phi_platform.h"
 #include "halfedge_gltf.h"
 #include "meshobject.h"
+#include "gizmo.h"
 #include "font.h"
 #include "svg_icon.h"
 #include "ui.h"
@@ -154,6 +155,8 @@ static void delete_test_mesh_object(void) {
  * Scene panel can drive it between gbuffer_begin_geometry_pass() and
  * gbuffer_render_shadow_map() without ui.c needing to know about
  * Qek-specific entities (players/rockets) at all. */
+static int selected_is_test_mesh(void);  /* defined below, needed here for the gizmo draw */
+
 static void scene_content_cb(void *userdata) {
     (void)userdata;
     renderer_draw_world(g_renderer, g_mesh);
@@ -161,24 +164,25 @@ static void scene_content_cb(void *userdata) {
     renderer_draw_players(g_renderer, &g_gs, g_ns.local_id);
     renderer_draw_rockets(g_renderer, &g_gs);
     if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
+    if (selected_is_test_mesh()) gizmo_draw(g_renderer, g_test_mesh_object.position);
     editor_render(&g_ed, g_renderer);
 }
 
-/* Ray-vs-mesh picking: constructs a world-space ray from a screen click
- * inside the Scene panel's own content rect, through the same camera
- * basis renderer.c's build_vp/mat4_look_dir and editor.c's view_dir
- * already use (fwd = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch)),
+/* Constructs a world-space ray from a screen point inside the Scene
+ * panel's own content rect, through the same camera basis renderer.c's
+ * build_vp/mat4_look_dir and editor.c's view_dir already use
+ * (fwd = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch)),
  * right = (cos(yaw), 0, -sin(yaw)) — matched exactly, not re-derived, so
- * a picked ray always agrees with what's actually rendered), then tests
- * it against g_test_mesh_object's real triangle data (meshobject.c's
- * meshobject_ray_pick, Möller–Trumbore — not a bounding-box guess).
- * Clicking the object selects it (same 4000+id convention Outliner/
- * gbuffer picking already use); clicking empty Scene content deselects,
- * matching normal editor click-away-to-deselect behavior. */
-static void try_pick_object(float scene_x, float scene_y, float scene_w, float scene_h, int click_x, int click_y) {
-    if (scene_w < 1.0f || scene_h < 1.0f) return;
-    float ndc_x = 2.0f * ((float)click_x - scene_x) / scene_w - 1.0f;
-    float ndc_y = 1.0f - 2.0f * ((float)click_y - scene_y) / scene_h;  /* screen y-down -> NDC y-up */
+ * a constructed ray always agrees with what's actually rendered). Shared
+ * by object picking and the gizmo (both hit-testing and per-frame drag
+ * updates need "the ray under the current mouse position" using the
+ * identical math). Returns 0 (leaving origin/dir untouched) if the
+ * Scene rect is degenerate. */
+static int compute_scene_ray(float scene_x, float scene_y, float scene_w, float scene_h,
+                              int px, int py, Vec3f *origin, Vec3f *dir) {
+    if (scene_w < 1.0f || scene_h < 1.0f) return 0;
+    float ndc_x = 2.0f * ((float)px - scene_x) / scene_w - 1.0f;
+    float ndc_y = 1.0f - 2.0f * ((float)py - scene_y) / scene_h;  /* screen y-down -> NDC y-up */
 
     float yaw = g_renderer->cam_yaw, pitch = g_renderer->cam_pitch;
     float sy = sinf(yaw),  cy = cosf(yaw);
@@ -189,15 +193,50 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
 
     float half_h = tanf(g_renderer->fov_y * 0.5f);
     float half_w = half_h * (scene_w / scene_h);
-    Vec3f dir = {
+    Vec3f d = {
         fwd.x + right.x * ndc_x * half_w + up.x * ndc_y * half_h,
         fwd.y + right.y * ndc_x * half_w + up.y * ndc_y * half_h,
         fwd.z + right.z * ndc_x * half_w + up.z * ndc_y * half_h
     };
-    float len = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
-    if (len > 1e-6f) { dir.x /= len; dir.y /= len; dir.z /= len; }
+    float len = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z);
+    if (len > 1e-6f) { d.x /= len; d.y /= len; d.z /= len; }
 
-    Vec3f origin = { g_renderer->cam_pos[0], g_renderer->cam_pos[1], g_renderer->cam_pos[2] };
+    dir->x = d.x; dir->y = d.y; dir->z = d.z;
+    origin->x = g_renderer->cam_pos[0];
+    origin->y = g_renderer->cam_pos[1];
+    origin->z = g_renderer->cam_pos[2];
+    return 1;
+}
+
+/* Whether the currently-selected object (via the UI's shared selection
+ * state) is the one test-object slot — the gizmo only ever has this one
+ * object to attach to right now, same "one slot, not a general list"
+ * honesty already established for Add/Delete. */
+static int selected_is_test_mesh(void) {
+    return g_test_mesh_loaded &&
+           ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id;
+}
+
+/* Ray-vs-mesh picking, plus gizmo handle priority: if the selected
+ * object's translate gizmo is showing, a click on one of its handles
+ * begins a drag instead of re-picking — grabbing the gizmo must win over
+ * whatever's directly behind it. Otherwise tests against
+ * g_test_mesh_object's real triangle data (meshobject.c's
+ * meshobject_ray_pick, Möller–Trumbore, not a bounding-box guess); a hit
+ * selects (same 4000+id convention Outliner/gbuffer picking already use),
+ * a miss deselects, matching normal editor click-away-to-deselect
+ * behavior. */
+static void try_pick_object(float scene_x, float scene_y, float scene_w, float scene_h, int click_x, int click_y) {
+    Vec3f origin, dir;
+    if (!compute_scene_ray(scene_x, scene_y, scene_w, scene_h, click_x, click_y, &origin, &dir)) return;
+
+    if (selected_is_test_mesh()) {
+        GizmoAxis axis = gizmo_pick_handle(g_test_mesh_object.position, origin, dir);
+        if (axis != GIZMO_AXIS_NONE) {
+            gizmo_begin_drag(axis, g_test_mesh_object.position, origin, dir);
+            return;
+        }
+    }
 
     float t;
     if (g_test_mesh_loaded && meshobject_ray_pick(&g_test_mesh_object, origin, dir, &t)) {
@@ -316,6 +355,27 @@ static void main_loop(void *userdata) {
         }
     }
     if (ui_consumed_click) g_inp.fire = 0;
+
+    /* Gizmo drag: unlike the click flags above, this needs to run every
+     * frame the LMB stays held (gizmo_begin_drag already ran on the press
+     * that grabbed a handle, inside try_pick_object above) — a continuous
+     * "where's the mouse now" update, not a one-shot edge. Ends the drag
+     * the frame LMB is released; a released-but-never-dragging frame is a
+     * harmless no-op (gizmo_update_drag returns 0 without touching
+     * anything when nothing's being dragged). */
+    if (gizmo_is_dragging()) {
+        if (g_inp.lmb_down) {
+            float sx, sy, sw, sh;
+            if (ui_get_scene_rect(&sx, &sy, &sw, &sh)) {
+                Vec3f origin, dir;
+                if (compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &origin, &dir)) {
+                    gizmo_update_drag(&g_test_mesh_object.position, origin, dir);
+                }
+            }
+        } else {
+            gizmo_end_drag();
+        }
+    }
 
     /* Scene context-menu action, drained once per frame like the click
      * flags above. Only Add Mesh Object / Delete are wired to real

@@ -639,6 +639,28 @@ void gbuffer_begin_geometry_pass(GBuffer *gb, const float *sky_color) {
     glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     unsigned int no_object = 0xFFFFFFFFu;
     glClearBufferuiv(GL_COLOR, 5, &no_object);  /* draw-buffer index 5 = GL_COLOR_ATTACHMENT5 = object_id */
+    /* gbuffer_resolve() (this same file, further down) ends its frame by
+     * DISABLING GL_DEPTH_TEST for its own tonemap/FXAA fullscreen-quad
+     * passes, which don't need it -- but never re-enables it before
+     * returning, and GL state is persistent across frames/functions. The
+     * geometry pass draws that happen here NEED depth testing, and per
+     * the GL spec, when GL_DEPTH_TEST is disabled the depth buffer is
+     * never updated AT ALL regardless of glDepthMask -- meaning every
+     * frame's geometry silently stopped writing real depth values (while
+     * still writing color/object-id normally, since those aren't gated
+     * the same way), leaving depth permanently at its cleared far-plane
+     * value. The lighting pass's "depth >= 0.999999 -> show sky, skip
+     * lighting" background check then fired for genuinely-drawn geometry
+     * too, compositing every object as flat sky color despite correct
+     * object-id and albedo — this is what made a transform gizmo
+     * (confirmed rasterizing correctly via a direct object-id readback)
+     * and MeshObject rendering invisible, discovered while debugging gizmo
+     * visibility. Explicitly (re-)enabling here, rather than trusting
+     * whatever state a prior pass happened to leave, is the correct fix:
+     * this pass owns its own required GL state instead of depending on
+     * implicit persistence from unrelated code. */
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
 }
 
 void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light_dir) {
@@ -820,36 +842,49 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-#ifndef __EMSCRIPTEN__
-    /* One-shot sanity check, native only (same readPixels-portability
-     * reasoning as the other diagnostics in this file): capture the HDR
-     * center pixel immediately BEFORE the blend (background) and
-     * immediately AFTER (both within this same frame's single
-     * gbuffer_resolve call, so the scene content is identical between the
-     * two reads — no frame-to-frame noise), then confirm the "after"
-     * value matches the standard over-blend equation
-     * result = src*alpha + dst*(1-alpha) applied to the captured
-     * background. Proves the blend math is actually happening at this
-     * exact pixel, not just assumed from the state-setting calls above. */
+    /* One-shot sanity check — draws a small semi-transparent NDC-space
+     * probe quad near screen center, over whatever the scene already
+     * rendered, and (native only) verifies the resulting blend against
+     * the standard over-blend equation. This used to draw EVERY frame
+     * forever: only the native readPixels+printf verification was gated
+     * behind s_transparency_checked, not the glDrawArrays call itself —
+     * so the probe quad permanently tinted/obscured the center of every
+     * Scene panel render, on every platform, for this entire project
+     * (that quiet reddish-magenta square visible in every screenshot this
+     * whole session wasn't scene content, it was this). Found while
+     * debugging why a transform gizmo positioned at the same on-screen
+     * location wasn't visible despite the geometry pass genuinely
+     * rasterizing it (confirmed via a direct object-id G-buffer
+     * readback) — this quad was blending over it every single frame.
+     * Now gated the same way the verification itself always was: draws
+     * once, to prove the blend math actually works, then never again. */
     static int s_transparency_checked = 0;
-    float t_bg[4] = {0,0,0,0};
-    if (!s_transparency_checked)
+    if (!s_transparency_checked) {
+#ifndef __EMSCRIPTEN__
+        /* Capture the HDR center pixel immediately BEFORE the blend
+         * (background) and immediately AFTER (both within this same
+         * gbuffer_resolve call, so scene content is identical between the
+         * two reads — no frame-to-frame noise), confirming the "after"
+         * value matches result = src*alpha + dst*(1-alpha) applied to the
+         * captured background — proves the blend math is actually
+         * happening at this exact pixel, not just assumed from the
+         * state-setting calls below. */
+        float t_bg[4] = {0,0,0,0};
         glReadPixels(gb->w / 2, gb->h / 2, 1, 1, GL_RGBA, GL_FLOAT, t_bg);
 #endif
 
-    glUseProgram(gb->transparent_test_program);
-    glUniform4f(gb->transparent_test_u_color, 1.0f, 0.0f, 0.0f, 0.5f);
-    glBindVertexArray(gb->quad_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, gb->transparent_test_vbo);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    gl_check("gbuffer_resolve/transparency_test");
-    glBindBuffer(GL_ARRAY_BUFFER, gb->quad_vbo);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+        glUseProgram(gb->transparent_test_program);
+        glUniform4f(gb->transparent_test_u_color, 1.0f, 0.0f, 0.0f, 0.5f);
+        glBindVertexArray(gb->quad_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gb->transparent_test_vbo);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        gl_check("gbuffer_resolve/transparency_test");
+        glBindBuffer(GL_ARRAY_BUFFER, gb->quad_vbo);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
 
-#ifndef __EMSCRIPTEN__
-    if (!s_transparency_checked) {
         s_transparency_checked = 1;
+#ifndef __EMSCRIPTEN__
         float t_after[4];
         glReadPixels(gb->w / 2, gb->h / 2, 1, 1, GL_RGBA, GL_FLOAT, t_after);
         float alpha = 0.5f;
@@ -860,8 +895,8 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
                "expected=(%.4f,%.4f,%.4f) actual=(%.4f,%.4f,%.4f)\n",
                t_bg[0], t_bg[1], t_bg[2], exp_r, exp_g, exp_b,
                t_after[0], t_after[1], t_after[2]);
-    }
 #endif
+    }
 
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);

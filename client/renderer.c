@@ -870,3 +870,75 @@ void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
     glDisableVertexAttribArray(0);
     glDisableVertexAttribArray(1);
 }
+
+static unsigned int s_solid_box_vbo = 0;
+
+/* Solid (filled-triangle) box, e.g. the transform gizmo's shaft/handles
+ * (gizmo.c) — renderer_draw_wire_box's 1-pixel GL_LINES edges turned out
+ * to be too thin to survive this pipeline's TAA/FXAA: the geometry pass
+ * genuinely wrote the right object_id (confirmed via a direct G-buffer
+ * readback), but the final composited frame didn't show it, since a
+ * sub-pixel-coverage line is exactly the kind of high-frequency detail
+ * TAA's temporal blending and FXAA's edge-smoothing are designed to
+ * suppress. A filled box has real per-pixel area for those passes to
+ * accumulate, so it survives. Same shader/VBO-management pattern as
+ * renderer_draw_wire_box just above — only the topology (12 triangles
+ * instead of 12 line edges) and draw mode differ. */
+void renderer_draw_solid_box(Renderer *r, Vec3f bmin, Vec3f bmax,
+                              float cr, float cg, float cb) {
+    if (!s_solid_box_vbo) glGenBuffers(1, &s_solid_box_vbo);
+
+    float c[8][3] = {
+        {bmin.x,bmin.y,bmin.z}, {bmax.x,bmin.y,bmin.z},
+        {bmax.x,bmin.y,bmax.z}, {bmin.x,bmin.y,bmax.z},
+        {bmin.x,bmax.y,bmin.z}, {bmax.x,bmax.y,bmin.z},
+        {bmax.x,bmax.y,bmax.z}, {bmin.x,bmax.y,bmax.z},
+    };
+    /* Two triangles per face, 6 faces — winding doesn't matter for
+     * visibility here (same "normal == light dir always" full-bright
+     * trick as wire_box means every face is uniformly lit regardless of
+     * facing/winding, see the vertex loop below). */
+    static const int faces[6][4] = {
+        {0,1,2,3}, {5,4,7,6},   /* bottom, top */
+        {4,0,3,7}, {1,5,6,2},   /* left, right */
+        {4,5,1,0}, {3,2,6,7},   /* front, back */
+    };
+    float verts[6 * 6 * 6];  /* 6 faces * 6 verts/face (2 tris) * 6 floats/vert */
+    float *vp_ = verts;
+    for (int f = 0; f < 6; f++) {
+        int quad[6] = { faces[f][0], faces[f][1], faces[f][2], faces[f][0], faces[f][2], faces[f][3] };
+        for (int k = 0; k < 6; k++) {
+            const float *cp = c[quad[k]];
+            *vp_++ = cp[0]; *vp_++ = cp[1]; *vp_++ = cp[2];
+            *vp_++ = 0.577f; *vp_++ = 0.577f; *vp_++ = 0.577f;
+        }
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, s_solid_box_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+
+    r->cur_object_id = 3;
+
+    float vp[16]; build_vp(r, vp);
+    glUseProgram(r->program);
+    bind_renderer_vao(r);
+    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);
+    glUniform3f(r->u_mat_color, cr, cg, cb);
+    float ld[3] = {0.577f, 0.577f, 0.577f};
+    glUniform3fv(r->u_light_dir, 1, ld);
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+
+    int stride = 6 * (int)sizeof(float);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+    glDisableVertexAttribArray(2);
+    glVertexAttrib1f(2, 0.0f);
+
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+}

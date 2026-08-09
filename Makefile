@@ -34,6 +34,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/halfedge.c      \
 	$(SRCDIR)/halfedge_gltf.c \
 	$(SRCDIR)/meshobject.c    \
+	$(SRCDIR)/gizmo.c         \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c

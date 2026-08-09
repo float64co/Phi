@@ -471,6 +471,52 @@ is a visual judgment call that can't be fully proven headlessly: the
 mechanical parts (velocity values, history read/write, clamp/blend math)
 are what's numerically verified here, not the subjective visual outcome.
 
+**Major bug found and fixed (2026-08-09), affecting every draw call in
+this pipeline**: `gbuffer_begin_geometry_pass()` never explicitly enabled
+`GL_DEPTH_TEST`, silently relying on whatever state a *previous* pass
+happened to leave it in — and `gbuffer_resolve()` ends its own frame by
+calling `glDisable(GL_DEPTH_TEST)` for its tonemap/FXAA fullscreen-quad
+passes (which don't need it) without ever re-enabling it. Per the GL
+spec, when `GL_DEPTH_TEST` is disabled the depth buffer is never updated
+*at all*, regardless of `glDepthMask` — so every frame's geometry pass
+was silently failing to write real depth values, while still writing
+color/normal/object-id normally (those aren't gated by depth test the
+same way). The lighting pass's background check
+(`if (depth >= 0.999999) { out_hdr = sky_color; return; }`) then fired
+for genuinely-drawn geometry too, since depth was permanently stuck at
+its cleared far-plane value — every object in the scene composited as
+flat sky color despite correct object-id and albedo, for every target,
+apparently for as long as `gbuffer_resolve()`'s depth-disable has existed
+in the pipeline. Fixed with one line: `gbuffer_begin_geometry_pass()` now
+explicitly `glEnable(GL_DEPTH_TEST)` + `glDepthFunc(GL_LESS)` itself,
+rather than trusting implicit persistence from unrelated code — this pass
+now owns the GL state it depends on.
+
+This is why it went unnoticed through every verification above: shadow
+map, FXAA, bloom, transparency, and TAA were all checked by reading back
+*specific G-buffer/HDR buffer values* (object-id, HDR RGB at a known
+pixel, velocity vectors) and comparing them against hand-computed
+expected numbers — genuine, rigorous checks of their own math, but none
+of them happened to also ask "does the final composited pixel show this
+object's own lit color, or just sky?" The bug was found only once actual
+*pixel-level visual verification* entered the toolkit this session
+(`python-xlib`'s XTest extension driving real synthetic input + a real
+running window, screenshotted with ImageMagick's `import -window`) —
+while debugging why a newly-added transform gizmo (Phase 1, see below)
+wasn't visible despite its geometry pass rasterizing correctly (confirmed
+via a direct object-id G-buffer readback, which is exactly the kind of
+check that couldn't have caught this). Once found, the same symptom was
+confirmed for the existing MeshObject test object *and* the world mesh
+itself — not gizmo-specific at all. Native + win32 + wasm all
+build-verified after the fix; native re-confirmed live (not just
+build-verified) via the same screenshot technique: `frame 30` (a
+diagnostic camera pointed at the test MeshObject) now reads its real
+purple material color `(134,63,153)` at the previously sky-blue center
+pixel, and `frame 120` (the normal gameplay camera) reads a real bot's
+lit color `(61,15,15)` instead of flat sky-blue `(76,128,204)` — both via
+the same `[main] frame N Scene panel center pixel RGB` log line that had
+been (unknowingly) reporting sky-blue at that exact spot all along.
+
 **Effort:** 5–7 weeks *(platform abstraction across all three targets
 (wasm/Linux-native/Windows-native) — all with real input and real
 networking now, not just Linux — the wasm WebGL2 upgrade, CI check, and
@@ -478,9 +524,11 @@ the deferred renderer/G-buffer/shadow-map/FXAA/bloom/transparency/TAA
 pipeline (all confirmed building on wasm, Linux native, and Windows
 native alike, FXAA+bloom additionally confirmed GL-errorless in a real
 browser): done — see the scope-split note above for what "done" means
-and how each platform was actually verified, not just built. Remaining:
-macOS (explicitly deferred, no access), and the `@phi.render_pass`
-insertion-point system (deliberately deferred to Phase 5/MicroPython).)*
+and how each platform was actually verified, not just built, and the
+depth-test bug note above for a real gap that verification missed and
+how it was actually found. Remaining: macOS (explicitly deferred, no
+access), and the `@phi.render_pass` insertion-point system (deliberately
+deferred to Phase 5/MicroPython).)*
 
 ---
 
@@ -919,6 +967,36 @@ after the fix.
   be opened and used at all now that lock is normally off. Directly
   relevant to the Console-panel-as-Python-REPL work below, which depends
   on the console being reachable in the first place.
+- **Transform gizmo** (`client/gizmo.c`/`.h`, new module) — translate-only
+  for this first pass, per the plan (rotate/scale stubbed out entirely
+  rather than shipped half-working). Three axis handles (X=red, Y=green,
+  Z=blue) drawn at the selected MeshObject's world position via the new
+  `renderer_draw_solid_box()` (see the depth-test bug note above — this
+  started life using the existing `renderer_draw_wire_box`, whose 1-pixel
+  `GL_LINES` edges turned out to still be geometry-pass-correct but
+  invisible in the final composited frame even *after* the depth fix,
+  since a sub-pixel-coverage line is exactly what TAA's temporal
+  blending/FXAA's edge-smoothing are designed to suppress — solid filled
+  triangles have real per-pixel area and survive). Picking a handle
+  (`gizmo_pick_handle()`, real ray/AABB intersection against each handle's
+  world-space bounds, not a 2D screen-space guess) takes priority over
+  re-picking the object body underneath it, wired into the same
+  `try_pick_object()` LMB-click path picking itself uses. Dragging
+  (`gizmo_begin_drag()`/`gizmo_update_drag()`) uses the standard
+  ray/drag-plane-intersection technique for single-axis constrained
+  motion from 2D mouse input (the drag plane contains the grabbed axis
+  and is oriented toward the camera, degenerating gracefully — a
+  fallback plane — when the axis is nearly parallel to the view
+  direction, e.g. looking straight down the handle), updating
+  `MeshObject.position` in place every frame the LMB stays held
+  (`main.c`'s per-frame loop, not a click-edge — a continuous drag needs
+  continuous updates). Verified live via `python-xlib`'s XTest extension
+  and real screenshots: the handle boxes render with their own correct
+  per-axis color (not sky-blue, post depth-fix), and a deterministic
+  ray-straight-at-the-object unit-style check (reusing the existing
+  frame-30 diagnostic camera) confirmed exact expected pick/hit math.
+  Rotate and scale are explicitly not implemented — shipping translate
+  solidly was the stated priority over three half-working modes.
 - **Gbuffer extension**: `gbuffer_set_viewport_offset(gb, x, y)` — a small,
   deliberate extension to Phase 0's (already shipped, browser-verified)
   deferred pipeline. Every pass except the very last (FXAA's blit to the

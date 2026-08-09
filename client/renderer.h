@@ -111,6 +111,14 @@ void renderer_draw_ground_plane(Renderer *r);
 void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
                             float cr, float cg, float cb);
 
+/* Editor: draw a full-bright SOLID (filled-triangle) box in world space —
+ * e.g. the transform gizmo (gizmo.c). Prefer this over renderer_draw_wire_box
+ * for anything that needs to reliably survive TAA/FXAA — a 1-pixel
+ * wireframe line can vanish in the final composited frame even though the
+ * geometry pass genuinely rasterized it (see gizmo.c's own note on this). */
+void renderer_draw_solid_box(Renderer *r, Vec3f bmin, Vec3f bmax,
+                              float cr, float cg, float cb);
+
 /* Math helpers exposed for main.c */
 void mat4_perspective(float *m, float fovy, float aspect, float near, float far);
 void mat4_mul(float *out, const float *a, const float *b);
