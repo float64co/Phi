@@ -705,6 +705,21 @@ static void asset_browser_refresh_rect(Area *a, float *x, float *y, float *w, fl
     *y = a->y + 4.0f;
 }
 
+/* Fills the gap between the type-switcher icon and the Refresh button on
+ * the panel's top row -- there's no separate "Asset Browser" title text
+ * to share that row with (see draw_panel_asset_browser's comment on why
+ * it was dropped), so the search bar gets the whole rest of the row.
+ * Same y/height as the Refresh button so the two sit flush together. */
+static void asset_browser_search_rect(Area *a, float *x, float *y, float *w, float *h) {
+    float rx, ry, rw, rh;
+    asset_browser_refresh_rect(a, &rx, &ry, &rw, &rh);
+    *h = rh;
+    *y = ry;
+    *x = a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f;
+    *w = rx - 8.0f - *x;
+    if (*w < 24.0f) *w = 24.0f;   /* degenerate-narrow-panel guard */
+}
+
 static float asset_browser_list_top(Area *a) {
     return a->y + UI_PANEL_PAD + 26.0f;
 }
@@ -725,6 +740,16 @@ static void asset_browser_action_rects(Area *a, float *load_x, float *load_y, fl
     *del_x  = *load_x + *load_w + 8.0f;
 }
 
+/* Finds the first leaf Area of the given panel type, or NULL if none is
+ * in the current layout -- same shape as find_scene_rect_r further down
+ * (that one's specific to PANEL_SCENE and predates this), generalized
+ * since ui_on_mouse_button now needs it for a second panel type too. */
+static Area *find_area_by_type_r(Area *a, PanelType t) {
+    if (a->kind == AREA_LEAF) return a->panel_type == t ? a : NULL;
+    Area *found = find_area_by_type_r(a->child[0], t);
+    return found ? found : find_area_by_type_r(a->child[1], t);
+}
+
 /* Clamps the row list to what actually fits above the Load/Delete button
  * row -- same "stop when you run out of vertical space" bound
  * draw_panel_console's scrollback loop already uses (there: `y > a->y +
@@ -740,8 +765,11 @@ static int asset_browser_visible_row_count(Area *a, const AssetBrowserState *ab)
 
 static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
     ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
-    ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Asset Browser", g_ui.font_bold, 15.0f,
-                 UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    /* No separate "Asset Browser" title text on this panel -- the type-
+     * switcher icon in the top-left corner (draw_area_chrome, same as
+     * every other panel) already identifies it, and the search bar needs
+     * that whole row to sit to the left of Refresh as asked for, rather
+     * than being squeezed in next to a redundant label. */
 
     float rx, ry, rw, rh;
     asset_browser_refresh_rect(a, &rx, &ry, &rw, &rh);
@@ -750,6 +778,28 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
 
     if (!ctx->asset_browser) return;
     const AssetBrowserState *ab = ctx->asset_browser;
+
+    float sx, sy, sw, sh;
+    asset_browser_search_rect(a, &sx, &sy, &sw, &sh);
+    ui_rect(sx, sy, sw, sh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
+    if (ab->search_focused) {
+        /* Thin accent line along the top edge -- cheap, unambiguous focus
+         * indicator, doesn't need a second widget color to exist. */
+        ui_rect(sx, sy, sw, 2.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
+    }
+    if (ab->search[0]) {
+        ui_text_draw(sx + 6.0f, sy + 3.0f, ab->search, g_ui.font_body, 12.0f,
+                     UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    } else if (!ab->search_focused) {
+        ui_text_draw(sx + 6.0f, sy + 3.0f, "Search...", g_ui.font_body, 12.0f,
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+    }
+    /* Caret -- same ~1Hz wall-clock blink as the Python console's, see
+     * draw_panel_console. */
+    if (ab->search_focused && fmod(phi_platform_now(), 1.0) < 0.5) {
+        float caret_x = sx + 6.0f + (ab->search[0] ? font_text_width(g_ui.font_body, ab->search, 12.0f) : 0.0f);
+        ui_rect(caret_x, sy + 2.0f, 6.0f, sh - 4.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.9f);
+    }
 
     if (ab->count == 0) {
         ui_text_draw(a->x + UI_PANEL_PAD, asset_browser_list_top(a), "No assets indexed. Click Refresh.",
@@ -897,7 +947,16 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
         if (button == 0 && pressed) {
             if (point_in_rect((float)x, (float)y, menu_x, menu_y, menu_w, menu_h)) {
                 int row = (int)(((float)y - menu_y) / row_h);
-                if (row >= 0 && row < PANEL_TYPE_COUNT) a->panel_type = (PanelType)row;
+                if (row >= 0 && row < PANEL_TYPE_COUNT) {
+                    /* Switching this leaf away from PANEL_ASSET_BROWSER
+                     * makes its search bar disappear from the layout --
+                     * drop its focus too, or the console would stay
+                     * silently locked out with no visible box left to
+                     * click to blur it. */
+                    if (a->panel_type == PANEL_ASSET_BROWSER && ctx->asset_browser)
+                        ctx->asset_browser->search_focused = 0;
+                    a->panel_type = (PanelType)row;
+                }
                 a->type_menu_open = 0;
                 return 1;
             } else {
@@ -934,6 +993,13 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
         asset_browser_refresh_rect(a, &rx, &ry, &rw, &rh);
         if (point_in_rect((float)x, (float)y, rx, ry, rw, rh)) {
             ab->refresh_requested = 1;
+            return 1;
+        }
+
+        float sx, sy, sw, sh;
+        asset_browser_search_rect(a, &sx, &sy, &sw, &sh);
+        if (point_in_rect((float)x, (float)y, sx, sy, sw, sh)) {
+            ab->search_focused = 1;
             return 1;
         }
 
@@ -995,6 +1061,27 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
         }
         if (button == 1 && pressed) { g_ui.ctx_menu_open = 0; return 1; }
     }
+
+    /* Asset Browser search bar blur: any click that doesn't land inside
+     * the search bar itself drops its focus -- same click-away-dismisses
+     * convention the type-switcher dropdown and context menu above
+     * already use, just for a text field instead of a dropdown. Checked
+     * before anything else claims the click (including clicks inside the
+     * chrome strip below, or in a completely different panel), so a
+     * click that goes on to do something else still blurs the search box
+     * first -- there's no scenario where a real click should leave a
+     * stale caret blinking in a box that no longer has focus. */
+    if (button == 0 && pressed && ctx->asset_browser && ctx->asset_browser->search_focused) {
+        Area *ab_area = g_ui.root ? find_area_by_type_r(g_ui.root, PANEL_ASSET_BROWSER) : NULL;
+        int inside = 0;
+        if (ab_area) {
+            float sx, sy, sw, sh;
+            asset_browser_search_rect(ab_area, &sx, &sy, &sw, &sh);
+            inside = point_in_rect((float)x, (float)y, sx, sy, sw, sh);
+        }
+        if (!inside) ctx->asset_browser->search_focused = 0;
+    }
+
     if (y < (int)UI_TOP_CHROME_H) return 1;  /* branding bar + menu row claim the whole strip, nothing to route through it yet */
     if (g_ui.root && hit_test_area(g_ui.root, x, y, button, pressed, ctx)) return 1;
     return 0;

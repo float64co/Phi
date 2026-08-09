@@ -85,6 +85,29 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    printf("[asset_protocol_test] === 1b: a real C-encoded LIST_REQUEST with a query string actually filters (Asset Browser search bar's own request path) ===\n");
+    int full_count = g_ab.count;
+    char full_first_name[ASSET_NAME_LEN];
+    strncpy(full_first_name, g_ab.items[0].name, sizeof(full_first_name) - 1);
+    full_first_name[sizeof(full_first_name) - 1] = 0;
+    net_send_asset_list_request(&g_ns, full_first_name);
+    pump(1.0);
+    int all_match = g_ab.count > 0;
+    for (int i = 0; i < g_ab.count; i++) {
+        if (strstr(g_ab.items[i].name, full_first_name) == NULL &&
+            strstr(g_ab.items[i].tags, full_first_name) == NULL) {
+            all_match = 0;
+        }
+    }
+    check(g_ab.count > 0 && g_ab.count <= full_count, "query for a real asset's own name returns a non-empty, no-larger result set");
+    check(all_match, "every result actually matches the query string (server-side LIKE against name/tag, not an unfiltered dump)");
+    net_send_asset_list_request(&g_ns, "definitely_not_a_real_asset_name_xyz");
+    pump(1.0);
+    check(g_ab.count == 0, "a query matching nothing returns an empty list, not a stale/unfiltered one");
+    net_send_asset_list_request(&g_ns, NULL);   /* restore the full list for the rest of this test */
+    pump(1.0);
+    check(g_ab.count == full_count, "NULL query (Refresh with an empty search bar) restores the full list");
+
     printf("[asset_protocol_test] === 2: each listed asset's path really loads (real cgltf pipeline, no GL) ===\n");
     int all_loaded = 1;
     for (int i = 0; i < g_ab.count; i++) {

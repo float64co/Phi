@@ -57,3 +57,32 @@ void asset_browser_ingest_list_reply(const uint8_t *data, int len) {
 void asset_browser_mark_dirty(void) {
     if (s_ab) s_ab->refresh_requested = 1;
 }
+
+void asset_browser_update_search(AssetBrowserState *ab, InputState *inp) {
+    if (!ab->search_focused) return;   /* leave InputState untouched -- main.c falls back to pyconsole_update this frame */
+
+    int enter  = inp->enter_edge;     inp->enter_edge     = 0;
+    int backsp = inp->backspace_edge; inp->backspace_edge = 0;
+    /* No history concept for a search box -- drop rather than let these
+     * leak into whichever field is focused next frame. */
+    inp->histup_edge = inp->histdown_edge = 0;
+
+    char chars[TYPED_CHAR_QUEUE_SIZE];
+    int nchars = inp->typed_count;
+    memcpy(chars, inp->typed_chars, (size_t)nchars);
+    inp->typed_count = 0;
+
+    for (int i = 0; i < nchars; i++) {
+        char c = chars[i];
+        if (ab->search_len < ASSET_SEARCH_LEN - 1) {
+            ab->search[ab->search_len++] = c;
+            ab->search[ab->search_len]   = 0;
+        }
+    }
+    if (backsp && ab->search_len > 0) {
+        ab->search[--ab->search_len] = 0;
+    }
+    if (enter) {
+        ab->refresh_requested = 1;   /* submit -- main.c sends the current search text, same as clicking Refresh */
+    }
+}

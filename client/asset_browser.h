@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "input.h"
 
 /* Client-side cache + intent-queue for the Asset Browser panel (see
  * phi.md's "Asset tracking and the Asset Browser panel" / "Wire protocol:
@@ -22,6 +23,7 @@
 #define ASSET_NAME_LEN     64
 #define ASSET_PATH_LEN     128
 #define ASSET_TAGS_LEN     96
+#define ASSET_SEARCH_LEN   64
 
 typedef struct {
     uint32_t id;
@@ -34,6 +36,27 @@ typedef struct {
     AssetSummary items[ASSET_BROWSER_MAX];
     int          count;
     int          selected;            /* index into items, -1 = none */
+
+    /* Search bar text -- filters by name/tag (server-side, a SQLite LIKE
+     * against both, see assets_db.py's list_assets) rather than filtering
+     * the local cache, so it reflects the server's actual index, not just
+     * whatever happened to already be listed. Submitted on Enter or a
+     * Refresh click (sets refresh_requested), NOT live-as-you-type -- one
+     * network round trip per keystroke isn't worth it, and nothing else
+     * in this codebase's text entry (console.c's own input line) live-
+     * submits either. Empty string = no filter, same as passing NULL to
+     * net_send_asset_list_request. */
+    char search[ASSET_SEARCH_LEN];
+    int  search_len;
+    /* Whether the search bar currently owns keyboard input instead of the
+     * Python console -- this is the ONE piece of text-field focus this
+     * codebase has, since console.c was deliberately built as "the only
+     * text field, always focused, no toggle" before this. Set on a click
+     * inside the search bar rect, cleared by clicking anywhere else (see
+     * ui.c's ui_on_mouse_button, same click-away-dismisses convention the
+     * type-switcher dropdown/context menu already use) or by switching
+     * the panel away from PANEL_ASSET_BROWSER entirely. */
+    int  search_focused;
 
     /* One-shot request flags, drained by main.c each frame (see main.c's
      * asset browser poll block). Cleared by main.c after acting on them,
@@ -64,3 +87,12 @@ void asset_browser_ingest_list_reply(const uint8_t *data, int len);
  * rather than trying to patch the cache in place, so the cache always
  * reflects one real server reply, never a locally-guessed merge. */
 void asset_browser_mark_dirty(void);
+
+/* Consumes InputState's typed_chars/backspace_edge/enter_edge into
+ * ab->search IF (and only if) ab->search_focused -- a no-op, including
+ * NOT draining InputState, when unfocused, so main.c's caller can fall
+ * back to feeding the same frame's input to pyconsole_update instead (see
+ * main.c's main_loop). Enter sets ab->refresh_requested rather than
+ * sending anything itself -- same "raise intent, main.c executes it"
+ * shape every other request flag here already uses. */
+void asset_browser_update_search(AssetBrowserState *ab, InputState *inp);

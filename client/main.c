@@ -463,10 +463,19 @@ static void main_loop(void *userdata) {
             break;
     }
 
-    /* The Python panel is an always-focused text input now (see
-     * console.c) -- no Player-alive gate needed to run it, unlike the Qek
-     * console this replaced. */
-    pyconsole_update(&g_cs, &g_inp);
+    /* Exactly one text field gets this frame's keystrokes: the Asset
+     * Browser's search bar if it's focused (a click inside it, see ui.c's
+     * hit_test_area), otherwise the Python console -- which is back to
+     * being the unconditional default the moment search isn't focused,
+     * same as before this search bar existed. asset_browser_update_search
+     * is a no-op that leaves InputState untouched when unfocused, so
+     * falling through to pyconsole_update in that case is always correct,
+     * not just "usually". */
+    if (g_ab.search_focused) {
+        asset_browser_update_search(&g_ab, &g_inp);
+    } else {
+        pyconsole_update(&g_cs, &g_inp);
+    }
 
     /* Asset Browser one-shot request flags, drained once per frame -- same
      * "UI raises intent, main.c executes it against the engine/network"
@@ -476,7 +485,13 @@ static void main_loop(void *userdata) {
      * load/connect isn't a reason to keep retrying every frame). */
     if (g_ab.refresh_requested) {
         g_ab.refresh_requested = 0;
-        net_send_asset_list_request(&g_ns, NULL);
+        /* Whatever's currently typed in the search bar filters the
+         * request (server-side LIKE against name/tag, see assets_db.py) --
+         * empty search means no filter, same as passing NULL. Applies
+         * equally whether this fired from clicking Refresh or pressing
+         * Enter in the search bar, so Refresh always means "re-run
+         * whatever's currently searched for". */
+        net_send_asset_list_request(&g_ns, g_ab.search[0] ? g_ab.search : NULL);
     }
     if (g_ab.load_requested) {
         g_ab.load_requested = 0;

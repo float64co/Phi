@@ -914,6 +914,50 @@ actually exercises:
   integration test above is what substitutes for it, same tradeoff this
   session made for the A/C/D removal pass.
 
+**Search bar, 2026-08-09.** The server side of search already existed —
+`assets_db.list_assets(query)` was always a SQLite `LIKE` against both
+`name` and `tag`, and `PKT_ASSET_LIST_REQUEST` already carried a query
+string — this only needed a client-side text field and something to send
+it. The interesting part turned out to be focus, not search: `console.c`
+was deliberately built as "the only text field, always focused, no
+toggle", so a second text field needed this codebase's first actual
+focus concept. Solution: `AssetBrowserState.search_focused`, set by a
+click inside the search bar rect and cleared by clicking anywhere else
+(the same click-away-dismisses convention the type-switcher dropdown and
+context menu already use — `find_area_by_type_r`, a small new tree-search
+helper, generalizes the pattern `find_scene_rect_r` already used for
+`PANEL_SCENE` specifically). `main.c`'s frame loop picks exactly one
+consumer for this frame's `InputState` text-entry fields based on that
+flag: `asset_browser_update_search` when focused, `pyconsole_update`
+otherwise — the fallback is always correct, not just usual, because
+`asset_browser_update_search` is a true no-op (doesn't touch `InputState`
+at all) when unfocused. Also handled: switching a leaf's panel type away
+from `PANEL_ASSET_BROWSER` while its search bar had focus clears that
+focus too, since the box it belonged to just disappeared from the layout
+— without this, the console would've been silently locked out with no
+visible box left to click away from.
+
+Submits on Enter or a Refresh click, not live-as-you-type (one network
+round trip per keystroke isn't worth it, and nothing else in this
+codebase's text entry live-submits either); Refresh always means "re-run
+whatever's currently in the search bar," including when that's empty
+(server-side: empty/`NULL` query means no filter, unchanged).
+
+The panel's own "Asset Browser" title text was dropped to make room —
+the type-switcher icon in the corner already identifies the panel type,
+the same way every other panel's icon does, so the label was the one
+piece of the header actually free to give up for the search bar to sit
+to the left of Refresh, as asked for.
+
+Verified by extending `client/asset_protocol_test_main.c` (the real C
+`net_send_asset_list_request`, not a reimplementation) with checks that a
+query matching a real asset returns a strict, correctly-filtered subset;
+that a query matching nothing returns empty rather than a stale dump;
+and that a `NULL` query restores the full list — all pass against a live
+server. UI-side focus/blur/type-away behavior itself still needs a real
+window to click through, same outstanding limitation as the rest of this
+panel's live-GUI verification.
+
 ### Native UI System
 
 Built in C, rendered entirely via WebGL 2. No third-party UI library — this is
