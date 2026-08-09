@@ -810,18 +810,24 @@ after the fix.
   type-switcher icon (confirmed the dropdown opened via a screenshot),
   then a second click on its "Console" row (confirmed the panel actually
   swapped to the real dev console via a second screenshot).
-- **3D scene right-click context menu** — the mechanism is built (`client/
-  ui.c`'s `ui_open_scene_context_menu`/`ui_is_context_menu_open`, a menu
-  drawn and hit-tested the same way the reference project's
-  `ContextMenuItem` system worked, reimplemented not copied) with
-  placeholder items (Add > Mesh Object, Delete, Frame Selected/All,
-  Deselect All) that print which one was clicked rather than act — real
-  actions are follow-up work. The real-cursor-position blocker above is
-  now resolved (`rmb_click` already flows into `ui_on_mouse_button()`
-  every frame), but nothing calls `ui_open_scene_context_menu(x, y)` yet
-  to actually open it on a scene right-click — that wiring, plus real
-  actions behind each item, is still follow-up work, not done in this
-  pass.
+- **3D scene right-click context menu** — now genuinely opens on a real
+  right-click, not just the mechanism (`client/ui.c`'s
+  `ui_open_scene_context_menu`/`ui_is_context_menu_open`, a menu drawn and
+  hit-tested the same way the reference project's `ContextMenuItem` system
+  worked, reimplemented not copied). `main.c`'s `rmb_click` handling first
+  offers the click to `ui_on_mouse_button()` (dismisses an already-open
+  menu, same as any other right-click); if nothing claimed it, the click
+  landed inside the Scene panel's own content rect (not chrome), and the
+  octree editor isn't active (which already owns RMB for carve-drags, same
+  reasoning the LMB fire-gating uses), it calls
+  `ui_open_scene_context_menu()` there. Items (Add > Mesh Object, Delete,
+  Frame Selected/All, Deselect All) still just print which one was
+  clicked — real actions behind each are follow-up work, not done in this
+  pass. Verified live: synthesized a real right-click inside the Scene
+  panel via `python-xlib`'s XTest extension (screenshotted — menu opened
+  exactly at the click position, all 5 items visible), then a left-click
+  on "Frame Selected" (screenshotted again — menu closed, log confirmed
+  the correct item was identified).
 - **Gbuffer extension**: `gbuffer_set_viewport_offset(gb, x, y)` — a small,
   deliberate extension to Phase 0's (already shipped, browser-verified)
   deferred pipeline. Every pass except the very last (FXAA's blit to the

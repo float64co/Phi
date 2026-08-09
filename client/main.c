@@ -183,11 +183,8 @@ static void main_loop(void *userdata) {
 
     /* Real clicks (lmb_click/rmb_click) — same "rising edge, drained and
      * cleared here" convention as fire/export_stl below. Routes into the
-     * panel type-switcher icon/dropdown and Outliner row selection today;
-     * the scene right-click context menu's own hit-testing is already
-     * here too but inert until something calls ui_open_scene_context_menu
-     * (separate, not-yet-landed piece — see phi.md). A consumed click
-     * must not ALSO fire a rocket on the same LMB press. */
+     * panel type-switcher icon/dropdown and Outliner row selection. A
+     * consumed click must not ALSO fire a rocket on the same LMB press. */
     int ui_consumed_click = 0;
     if (g_inp.lmb_click) {
         g_inp.lmb_click = 0;
@@ -195,7 +192,25 @@ static void main_loop(void *userdata) {
     }
     if (g_inp.rmb_click) {
         g_inp.rmb_click = 0;
-        ui_on_mouse_button(g_inp.mouse_x, g_inp.mouse_y, 1, 1, &ui_ctx);
+        /* First offer the click to existing UI chrome (dismisses an
+         * already-open context/type-switcher menu, same as any other
+         * right-click ui_on_mouse_button already handles). If nothing
+         * claimed it and the click landed inside the Scene panel's own
+         * content rect (not its chrome) — and the octree editor isn't
+         * active, which already owns RMB for carve-drags, same reasoning
+         * the fire-gating above uses for LMB — open the scene context
+         * menu there. This is what actually feeds
+         * ui_open_scene_context_menu(x, y) the input phi.md's Native UI
+         * System section previously flagged as its missing source. */
+        int rmb_consumed = ui_on_mouse_button(g_inp.mouse_x, g_inp.mouse_y, 1, 1, &ui_ctx);
+        if (!rmb_consumed && !g_ed.active) {
+            float sx, sy, sw, sh;
+            if (ui_get_scene_rect(&sx, &sy, &sw, &sh) &&
+                (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
+                (float)g_inp.mouse_y >= sy && (float)g_inp.mouse_y < sy + sh) {
+                ui_open_scene_context_menu(g_inp.mouse_x, g_inp.mouse_y);
+            }
+        }
     }
     if (ui_consumed_click) g_inp.fire = 0;
 
