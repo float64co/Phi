@@ -35,6 +35,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/halfedge_gltf.c \
 	$(SRCDIR)/meshobject.c    \
 	$(SRCDIR)/mesh_edit.c     \
+	$(SRCDIR)/fracture.c      \
 	$(SRCDIR)/gizmo.c         \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
@@ -165,6 +166,19 @@ mesh_edit_test: $(OUT_MESH_EDIT_TEST)
 $(OUT_MESH_EDIT_TEST): $(MESH_EDIT_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(MESH_EDIT_TEST_SRCS) -o $(OUT_MESH_EDIT_TEST) -lm
 	@echo "mesh_edit_test build complete -> $(OUT_MESH_EDIT_TEST)"
+
+# Voronoi fracture (client/fracture.c) topology/volume self-test -- same
+# no-GL-dependency rationale as mesh_edit_test above.
+FRACTURE_TEST_SRCS := $(SRCDIR)/fracture_test_main.c $(SRCDIR)/halfedge.c \
+                       $(SRCDIR)/halfedge_gltf.c $(SRCDIR)/fracture.c
+OUT_FRACTURE_TEST   := $(BUILDDIR)/fracture_test
+
+fracture_test: $(OUT_FRACTURE_TEST)
+	./$(OUT_FRACTURE_TEST)
+
+$(OUT_FRACTURE_TEST): $(FRACTURE_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(FRACTURE_TEST_SRCS) -o $(OUT_FRACTURE_TEST) -lm
+	@echo "fracture_test build complete -> $(OUT_FRACTURE_TEST)"
 
 # ---------------------------------------------------------------
 # MicroPython embedding self-test (Phase 5 first slice) — NOT part of the

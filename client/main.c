@@ -11,6 +11,7 @@
 #include "halfedge_gltf.h"
 #include "meshobject.h"
 #include "mesh_edit.h"
+#include "fracture.h"
 #include "gizmo.h"
 #include "font.h"
 #include "svg_icon.h"
@@ -499,6 +500,34 @@ static void main_loop(void *userdata) {
                 g_edit_face = -1;  /* the picked face was deleted by the cut, don't keep pointing at it */
             } else {
                 printf("[main] context menu Loop Cut: no face under the last right-click\n");
+            }
+            break;
+        case CTX_ACTION_FRACTURE:
+            /* Editor-only precompute (see fracture.h) -- acts on the whole
+             * selected MeshObject, not g_edit_face. Fixed 8-fragment count
+             * and a real time-based seed (not a fixed test seed -- this is
+             * the actual editor action, mesh_edit_test.c's fixed seed=42 is
+             * what makes THAT reproducible/testable, this is the real
+             * thing) for this pass; no interactive fragment-count picker
+             * UI, matching this task's precompute-tool scope. Does NOT
+             * mutate g_test_mesh_object itself or activate anything at
+             * runtime -- purely writes the fragments to disk. */
+            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
+                const int n_frag = 8;
+                unsigned int seed = (unsigned int)phi_platform_now();
+                FractureFragment *frags = fracture_voronoi(&g_test_mesh_object, n_frag, seed);
+                if (frags) {
+                    int ok = fracture_save_glb(frags, n_frag, "assets/fracture_output.gltf");
+                    int non_empty = 0;
+                    for (int i = 0; i < n_frag; i++) if (frags[i].pos_count > 0) non_empty++;
+                    printf("[main] context menu Fracture: %d/%d non-empty fragments, %s -> assets/fracture_output.gltf\n",
+                           non_empty, n_frag, ok ? "saved" : "SAVE FAILED");
+                    fracture_free_fragments(frags, n_frag);
+                } else {
+                    printf("[main] context menu Fracture: operation failed (no hem?)\n");
+                }
+            } else {
+                printf("[main] context menu Fracture: no MeshObject selected\n");
             }
             break;
         default:

@@ -1188,6 +1188,102 @@ after the fix.
     simplified specular BRDF's visual balance) remains genuinely unseen
     and should be the first thing checked once a real display is
     available again.
+- **Voronoi pre-fracture tool** (`client/fracture.h`/`.c`, new module) —
+  real computational geometry, not a stub. Editor-only precompute, no
+  runtime activation and no Bullet involvement anywhere in this file
+  (both already excluded from this loop's scope, see phi.md's Fracturing
+  section — pre-fracturing covers the vast majority of game use cases and
+  runtime fracture-on-impact needs Bullet, which is Phase 2's job).
+  - **Algorithm**: standard mesh-vs-convex-region clipping. For N random
+    seed points within the source mesh's own local-space bounding box
+    (a self-contained xorshift32 PRNG, not libc `rand_r` — not portable to
+    the win32/mingw cross-build target), fragment `i` is the source mesh
+    clipped against the intersection of the `N-1` half-spaces "closer to
+    seed `i` than seed `j`" (the perpendicular bisector plane between
+    every pair) — Sutherland-Hodgman polygon clipping per face, with the
+    newly-exposed cross-section capped by a fresh convex polygon after
+    each plane so every fragment stays a closed, watertight solid. Working
+    representation during clipping is a plain dynamic polygon/poly-mesh
+    (`Poly`/`PMesh`, ordered vertex loops, no twin/edge topology) rather
+    than forcing `HalfEdgeMesh`'s triangles-only model to do double duty —
+    a clip can turn a triangle into an n-gon before the final fan-
+    triangulation pass. **Honest scope limit**: this assumes the source
+    mesh is itself convex (true for the cube.gltf test asset) — a plane
+    intersects a convex polyhedron in at most one convex cross-section,
+    which is what makes "collect the cut points, sort by angle into one
+    loop, cap it" correct. A non-convex source could produce a
+    cross-section with multiple disconnected loops, which this pass
+    doesn't attempt to handle — the same kind of explicit scoping decision
+    as mesh_edit.c's loop-cut ("one edge, not a full ring"), not a silent
+    gap.
+  - **A real bug found and fixed by its own test harness**: the first
+    working version produced fragments with ~0.5-0.7 "closedness error"
+    (see Verification below) and exactly-sign-flipped total volume. Root
+    cause: this codebase's actual face-winding convention, confirmed
+    against `assets/cube.gltf`'s real index data, has
+    `cross(v1-v0,v2-v0)` point INWARD, opposite the textbook "CCW-from-
+    outside" assumption `cap_from_cut_points`'s cap-orientation logic
+    initially used (an assumption stated, but never actually verified
+    against real data, in this session's own earlier mesh_edit.c
+    comments too — harmless there since extrude/inset/loop-cut only need
+    internal consistency between old and new faces, not an absolute
+    outward-vs-inward sign; fracture's cap construction is the first
+    place in this project that sign has actually mattered). Original
+    (unfractured, all-original-faces) meshes have zero closedness error
+    regardless of which way the global convention runs, since they're
+    internally consistent with themselves — it's specifically MIXING
+    newly-built caps against original faces under the wrong assumed
+    convention that breaks closedness, which is exactly what showed up.
+    Fixed by flipping the cap sort basis so its winding matches the
+    source data's actual (inward-cross-product) convention. This is a
+    genuinely load-bearing example of why the harness computes real
+    geometric identities instead of eyeballing output.
+  - **Output**: `PHI_fracture_fragments`, a namespaced glTF extension on a
+    hand-rolled minimal `.gltf` + sibling `.bin` (same style as
+    `halfedge_gltf.c`'s `halfedge_save_gltf`, since `cgltf` itself is
+    read-only) — each fragment is an ordinary glTF mesh/node (position-
+    only, unsigned-short-indexed, `mode: 4`), not a duplicated separate
+    file; `extensions.PHI_fracture_fragments.fragments` lists their mesh
+    indices so a PHI-aware consumer can find them as a group while any
+    ordinary glTF viewer just sees N normal meshes. Empty fragments (a
+    seed's cell not intersecting the mesh at all — a legitimate, not
+    erroneous, outcome for some random placements) are skipped rather
+    than written as degenerate zero-vertex meshes. No vertex welding/
+    deduplication in this pass — flat, duplicated-per-triangle output,
+    same convention this codebase's other flattening paths already use.
+  - **Editor**: reachable via a new "Fracture (Voronoi)" Scene right-click
+    context menu row (`CTX_ACTION_FRACTURE`), acting on the whole selected
+    MeshObject (not a picked face, unlike Extrude/Inset/Loop Cut) — fixed
+    8-fragment count and a real time-based seed, writing to
+    `assets/fracture_output.gltf`. No interactive fragment-count picker
+    UI in this pass, matching the "precompute tool" scope; doesn't mutate
+    the live MeshObject or activate anything at runtime.
+  - **Verification**: a new standalone test harness (`client/
+    fracture_test_main.c`, `make fracture_test`, no GL dependency, same
+    rationale as `mesh_edit_test`) checks two real divergence-theorem
+    identities for a closed triangle mesh rather than approximations —
+    enclosed volume via `(1/6) * sum(v0 . (v1 x v2))` over all triangles,
+    and "closedness" via `sum(triangle_area * unit_normal)`, which must be
+    the zero vector for ANY truly watertight closed mesh regardless of
+    shape. Both are exact identities: if these numbers come out right, the
+    fragments really are the closed solids they're supposed to be, not
+    just plausible-looking. Verified: the volume formula itself reads
+    exactly 1.0 for the known unit cube (sanity check on the check);
+    fracturing into 2/4/8 pieces (fixed seed for reproducibility) at every
+    count produces fragments that are all watertight (closedness error
+    <0.02, most exactly 0), all have non-negative volume, and sum to
+    within 2% of the original mesh's volume (typically exact to floating-
+    point precision) — real conservation, not just "didn't crash." The
+    glTF export path is also exercised for real (written to `/tmp`, then
+    read back and checked for the actual extension string and `mode: 4`
+    primitives), plus defensive checks (`n_fragments<1`, `NULL` hem) fail
+    cleanly. All checks pass. Like the PBR material work immediately
+    before this in the same loop, no live GL verification was possible
+    this pass (the X server remained fully unresponsive throughout —
+    `xdpyinfo` itself still hangs/times out) — this tool has no rendering
+    path of its own to verify that way regardless (it's a pure geometry-
+    to-disk precompute), so the gap is smaller here than for the PBR
+    shader work, but still noted honestly.
 
 **Design reference**: evaluated a separate, mature CAD tool's C++/Python UI
 codebase as reference material (brought in temporarily, read-only, removed

@@ -74,6 +74,11 @@ typedef enum {
     CTX_ACTION_EXTRUDE_FACE,
     CTX_ACTION_INSET_FACE,
     CTX_ACTION_LOOP_CUT,
+    /* Voronoi pre-fracture (Phase 1, see fracture.h) -- acts on whichever
+     * MeshObject is selected as a whole, not a specific face, unlike the
+     * three rows above. Fixed fragment count/seed/output path for this
+     * pass (no interactive count-picker UI), see main.c's handler. */
+    CTX_ACTION_FRACTURE,
 } CtxMenuAction;
 
 typedef struct Area {
