@@ -5,6 +5,7 @@
 #include "octree_render.h"
 #include "net.h"
 #include "console.h"
+#include "phi_platform.h"   /* phi_platform_now, for the console caret blink */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -666,10 +667,26 @@ static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
 
     /* Input row pinned to the bottom, log scrolling up from just above it
      * -- newest line closest to the input, matching normal terminal/chat
-     * scrollback orientation. */
-    char prompt[CONSOLE_INPUT_LEN + 4];
-    snprintf(prompt, sizeof(prompt), "> %s", ctx->console->input);
+     * scrollback orientation. ">>> " matches console_submit's own echo
+     * prefix (Python-REPL convention) so the live input row and its
+     * echoed history read identically. */
+    char prompt[CONSOLE_INPUT_LEN + 8];
+    snprintf(prompt, sizeof(prompt), ">>> %s", ctx->console->input);
     ui_text_draw(x, y, prompt, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+
+    /* Caret, only while the console actually HAS keyboard focus (open;
+     * toggled by backquote, see console_update) -- this is deliberately
+     * the panel's only focus indicator: without it there is no visual
+     * difference between "typing goes here" and "typing goes to the
+     * game", which is a real ambiguity since the panel itself is always
+     * visible whether or not it's capturing input. Standard ~1Hz blink
+     * (0.5s on / 0.5s off) driven by wall-clock time rather than frame
+     * count, since native's uncapped frame rate makes frame-count blink
+     * periods meaningless. */
+    if (ctx->console->open && fmod(phi_platform_now(), 1.0) < 0.5) {
+        float caret_x = x + font_text_width(g_ui.font_mono, prompt, 13.0f) + 2.0f;
+        ui_rect(caret_x, y + 1.0f, 7.0f, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.9f);
+    }
     y -= 20.0f;
 
     for (int i = ctx->console->log_count - 1; i >= 0 && y > a->y + UI_PANEL_PAD; i--) {
