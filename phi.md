@@ -778,9 +778,31 @@ after the fix.
   constantly), plus "QEK" branding in the `<title>`/loading screen/overlay
   heading. Fixed at the DOM/JS level (no C/WASM change needed): the overlay
   no longer auto-shows on load or re-shows on unlock (an editor doesn't
-  gate itself behind a play button), the loading screen and overlay both
-  say "Phi", and clicking the canvas directly still opt-in re-engages
-  pointer-lock for camera look, unchanged.
+  gate itself behind a play button), and the loading screen and overlay
+  both say "Phi".
+  A second de-Qek pass, once real clicking (below) made the actual bug
+  reachable: `index.html` also had a "click canvas directly to re-lock if
+  focus is lost" handler left over from Qek's always-on mouse-look — since
+  every 2D UI panel click IS a canvas click (the panels render *inside*
+  the canvas via WebGL, no separate DOM elements), this was silently
+  hijacking every single UI click into `requestPointerLock()`, hiding the
+  OS cursor the instant you clicked anything. Removed entirely, matching
+  native/win32 which already dropped click-to-engage this session. Also
+  hid `#hud` (HP/ammo/bots readout) and `#crosshair` (aim reticle) by
+  default via CSS — permanently-visible Qek gameplay chrome sitting over
+  the panel UI — and removed the old `#console` DOM overlay (a fixed bar
+  across the top, shown/hidden via `update_console_ui`'s `EM_ASM` calls on
+  `` ` ``) entirely, since it's now redundant with the real in-canvas
+  Console panel reading the exact same `ConsoleState`; `update_console_ui`
+  is now a deliberate no-op on both platforms rather than deleted outright,
+  since `cs->open`/`console_open` still does real work gating WASD/mouse
+  input while typing (see `console.c`), only its DOM visibility side
+  effect was removed. `#hud`/`#crosshair` are still updated by C every
+  frame on a hidden element (harmless) so a future "play mode" toggle can
+  un-hide them via CSS alone. Native+win32+wasm build-verified; the
+  DOM/CSS/JS side of this (which is most of it) could not be independently
+  browser-tested in this environment — flagged honestly, not claimed as
+  verified.
 - **Panels**: Scene (the existing G-buffer pipeline, now hosted in an
   arbitrary sub-rectangle instead of always filling the window — see
   `gbuffer_set_viewport_offset()` below), Outliner (lists the real world

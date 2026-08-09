@@ -53,7 +53,15 @@
     transition: background 0.15s;
   }
   #overlay button:hover { background: #ff8c00; }
+  /* Both display:none by default now -- this is an editor, not the FPS
+     game these came from, and having Qek's HP/ammo/bots readout and aim
+     reticle permanently on screen over the panel UI reads as leftover
+     gameplay chrome, not something the editor needs. Still updated by
+     main.c's update_hud() every frame (harmless on a hidden element) so a
+     future "play mode" toggle can un-hide them for free rather than
+     needing to also restore the JS logic. */
   #hud {
+    display: none;
     position: fixed;
     bottom: 18px;
     left: 50%;
@@ -67,6 +75,7 @@
     z-index: 5;
   }
   #crosshair {
+    display: none;
     position: fixed;
     top: 50%; left: 50%;
     transform: translate(-50%,-50%);
@@ -96,30 +105,6 @@
     z-index: 5;
     color: #7cfc9a;
     display: none;
-  }
-  #console {
-    position: fixed;
-    top: 0; left: 0; right: 0;
-    background: rgba(8,8,12,0.92);
-    border-bottom: 2px solid #ff6a00;
-    padding: 10px 16px 8px;
-    z-index: 30;
-    display: none;
-    font-family: 'Courier New', monospace;
-    font-size: 0.82rem;
-    pointer-events: none;
-  }
-  #console-log {
-    white-space: pre-wrap;
-    max-height: 220px;
-    overflow-y: auto;
-    opacity: 0.9;
-    margin-bottom: 6px;
-  }
-  #console-input {
-    color: #ffaa44;
-    border-top: 1px solid rgba(255,255,255,0.15);
-    padding-top: 6px;
   }
   #loading {
     position: fixed;
@@ -210,10 +195,6 @@
 <div id="crosshair"></div>
 <div id="hud">HP: 100 &nbsp;|&nbsp; Connecting...</div>
 <div id="editor-status"></div>
-<div id="console">
-  <div id="console-log"></div>
-  <div id="console-input"></div>
-</div>
 
 <script>
 // Resize canvas to window
@@ -226,17 +207,17 @@ resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 
 
-// Play button → request pointer lock
+// Play button → request pointer lock (the only remaining way to engage it —
+// there used to also be a "click anywhere on the canvas" auto-relock
+// handler here, but every 2D UI panel click IS a canvas click, so it was
+// silently hijacking UI clicks into an invisible-cursor FPS-look mode.
+// Matches native/win32, which dropped click-to-engage entirely this
+// session; a real opt-in gesture that only fires for Scene-panel content
+// clicks is follow-up work, not this button, which is currently
+// unreachable since nothing shows #overlay by default anymore either.)
 document.getElementById('play-btn').addEventListener('click', function() {
   document.getElementById('overlay').style.display = 'none';
   document.getElementById('canvas').requestPointerLock();
-});
-
-// Click canvas directly to re-lock if focus is lost
-document.getElementById('canvas').addEventListener('click', function() {
-  if (document.pointerLockElement !== document.getElementById('canvas')) {
-    document.getElementById('canvas').requestPointerLock();
-  }
 });
 
 // RMB is used by the editor to carve — suppress the browser context menu

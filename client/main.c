@@ -84,33 +84,16 @@ static void update_editor_ui(const EditorState *ed) {
 static void update_editor_ui(const EditorState *ed) { (void)ed; }
 #endif
 
-#ifdef __EMSCRIPTEN__
-static void update_console_ui(const ConsoleState *cs) {
-    if (!cs->open) {
-        EM_ASM({
-            var el = document.getElementById('console');
-            if (el) el.style.display = 'none';
-        });
-        return;
-    }
-    char logbuf[CONSOLE_LOG_LINES * (CONSOLE_LINE_LEN + 1) + 1];
-    logbuf[0] = 0;
-    for (int i = 0; i < cs->log_count; i++) {
-        strcat(logbuf, cs->log[i]);
-        strcat(logbuf, "\n");
-    }
-    EM_ASM({
-        var el      = document.getElementById('console');
-        var logEl   = document.getElementById('console-log');
-        var inputEl = document.getElementById('console-input');
-        if (el) el.style.display = 'block';
-        if (logEl)   logEl.textContent   = UTF8ToString($0);
-        if (inputEl) inputEl.textContent = '] ' + UTF8ToString($1) + '_';
-    }, logbuf, cs->input);
-}
-#else
+/* The DOM overlay this used to show (a fixed bar across the top of the
+ * page, orange border, its own scrollback div) is superseded by the real
+ * in-canvas Console panel (draw_panel_console in ui.c, reading this exact
+ * same ConsoleState) — showing both was redundant and confusing. Kept as
+ * a deliberate no-op rather than deleted, since cs->open/console_open
+ * still does real work: it's what console.c/input.c gate WASD movement
+ * and mouse clicks behind while the console is "open" for typing (see
+ * console.c's input_set_console_open calls) — only the now-redundant DOM
+ * visibility toggle was removed, not that underlying state. */
 static void update_console_ui(const ConsoleState *cs) { (void)cs; }
-#endif
 
 /* Loads assets/cube.gltf into g_test_mesh_object the same way main()'s
  * startup code originally did inline — factored out so the scene
