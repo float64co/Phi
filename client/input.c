@@ -52,14 +52,6 @@ static EM_BOOL key_down(int type, const EmscriptenKeyboardEvent *e, void *ud) {
             if (strcmp(e->code,"BracketRight")==0)  inp->grid_inc    = 1;
             if (strcmp(e->code,"Comma")==0)         inp->mat_dec     = 1;
             if (strcmp(e->code,"Period")==0)        inp->mat_inc     = 1;
-
-            /* console 'bind' — record every non-repeat keypress code so
-             * console.c can match it against user-defined binds */
-            if (inp->pressed_code_count < PRESSED_CODE_QUEUE_SIZE) {
-                strncpy(inp->pressed_codes[inp->pressed_code_count], e->code, KEY_CODE_LEN - 1);
-                inp->pressed_codes[inp->pressed_code_count][KEY_CODE_LEN - 1] = 0;
-                inp->pressed_code_count++;
-            }
         }
     }
     return EM_TRUE;
@@ -196,12 +188,7 @@ void input_set_pointer_locked(int locked) {
 
 /* Mirrors the X11 branch below one message at a time, driven by
  * phi_platform_win32.c's WndProc via input_native_handle_event() — same
- * role as the X11 event pump, message-driven instead of pumped.
- *
- * Known gap, same as X11: the console `bind` system's pressed_codes[]
- * (browser KeyboardEvent .code strings) is left empty here — `bind` is a
- * no-op on native for now rather than half-mapping VK codes to those
- * string names. */
+ * role as the X11 event pump, message-driven instead of pumped. */
 
 static InputState *s_inp  = NULL;
 static HWND         s_hwnd = NULL;
@@ -374,11 +361,7 @@ void input_native_handle_event(void *msgptr) {
 
 /* Mirrors the Emscripten key_down/key_up/mouse_move/mouse_down/mouse_up/
  * wheel_move functions above, one XEvent at a time, driven by
- * phi_platform_native.c's event pump via input_native_handle_event().
- *
- * Known gap: the console `bind` system's pressed_codes[] (browser KeyboardEvent
- * .code strings like "KeyG") is left empty here — `bind` is a no-op on native
- * for now rather than half-mapping keysyms to those string names. */
+ * phi_platform_native.c's event pump via input_native_handle_event(). */
 
 static InputState *s_inp = NULL;
 static Display     *s_dpy = NULL;

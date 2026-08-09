@@ -14,8 +14,6 @@
                                 * also honors the 'god' console command */
 
 #define TYPED_CHAR_QUEUE_SIZE 32
-#define PRESSED_CODE_QUEUE_SIZE 8
-#define KEY_CODE_LEN 16
 
 typedef struct {
     int   forward, back, left, right, jump;
@@ -61,12 +59,6 @@ typedef struct {
 
     int   grid_inc, grid_dec;  /* ] / [, rising edge */
     int   mat_inc, mat_dec;    /* . / , , rising edge */
-
-    /* Console 'bind': every non-repeat keydown code (e.g. "KeyG", "F5"),
-     * captured only while the console isn't open, for console.c to match
-     * against its bind table. Drained once per frame. */
-    char  pressed_codes[PRESSED_CODE_QUEUE_SIZE][KEY_CODE_LEN];
-    int   pressed_code_count;
 
     /* Console text entry — input.c captures these unconditionally each
      * frame; console.c decides whether to consume them. */

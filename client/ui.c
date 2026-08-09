@@ -588,7 +588,7 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
             const Player *p = &ctx->gs->players[i];
             if (!p->alive) continue;
             outliner_row_bg(a, y, row_h, row_index++);
-            snprintf(line, sizeof(line), "%s #%d%s", p->is_bot ? "Bot" : "Player", p->id,
+            snprintf(line, sizeof(line), "Player #%d%s", p->id,
                      p->id == (uint8_t)ctx->local_player_id ? " (you)" : "");
             ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
             y += row_h;

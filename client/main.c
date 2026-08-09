@@ -65,22 +65,21 @@ static uint16_t     g_input_seq = 0;
 
 /* ---- HUD overlay (via JS) ---- */
 #ifdef __EMSCRIPTEN__
-static void update_hud(int hp, int bots_alive, int local_id) {
+static void update_hud(int hp, int local_id) {
     EM_ASM({
         var hud = document.getElementById('hud');
         if (hud) {
             hud.innerHTML =
                 'HP: <b>' + $0 + '</b>' +
                 ' &nbsp;|&nbsp; AMMO: <b>∞</b>' +
-                ' &nbsp;|&nbsp; BOTS: <b>' + $1 + '</b>' +
-                ' &nbsp;|&nbsp; ID: ' + $2 +
+                ' &nbsp;|&nbsp; ID: ' + $1 +
                 ' &nbsp;|&nbsp; <span style="opacity:0.5">[F4] STL &nbsp; [E] Edit &nbsp; [`] Console</span>';
         }
-    }, hp, bots_alive, local_id);
+    }, hp, local_id);
 }
 #else
-static void update_hud(int hp, int bots_alive, int local_id) {
-    (void)hp; (void)bots_alive; (void)local_id;
+static void update_hud(int hp, int local_id) {
+    (void)hp; (void)local_id;
 }
 #endif
 
@@ -123,11 +122,10 @@ static void spawn_test_mesh_object(void) {
         return;
     }
     g_test_mesh_object.id = 1;
-    /* Elevated well above normal bot/player ground-level traffic (~y=16
-     * floor) — early native testing found bots occasionally standing
-     * directly in the diagnostic camera's line of sight at ground-level
-     * test positions, an environmental occlusion artifact from the live
-     * multiplayer arena, not a rendering bug. */
+    /* Elevated well above normal player ground-level traffic (~y=16 floor)
+     * — early native testing found the diagnostic camera's line of sight
+     * getting occluded by ground-level arena traffic at ground-level test
+     * positions, an environmental artifact, not a rendering bug. */
     g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
     g_test_mesh_object.orientation = quat_identity();
     g_test_mesh_object.is_static = 1;
@@ -544,8 +542,7 @@ static void main_loop(void *userdata) {
     }
 
     if (local && local->alive) {
-        console_update(&g_cs, &g_inp, &g_ed, &g_ns, &g_gs, g_renderer, local,
-                       &g_test_mesh_object, g_edit_face);
+        console_update(&g_cs, &g_inp);
         editor_update(&g_ed, &g_gs, local, &g_inp, &g_ns, dt);
 
         if (g_ed.world_dirty) {
@@ -639,10 +636,7 @@ static void main_loop(void *userdata) {
     ui_render(&ui_ctx);
 
     /* HUD */
-    int bots_alive = 0;
-    for (int i = 0; i < g_gs.num_players; i++)
-        if (g_gs.players[i].is_bot && g_gs.players[i].alive) bots_alive++;
-    update_hud(local ? local->hp : 0, bots_alive, g_ns.local_id);
+    update_hud(local ? local->hp : 0, g_ns.local_id);
     update_editor_ui(&g_ed);
     update_console_ui(&g_cs);
 
@@ -773,9 +767,6 @@ int main(void) {
         lp->alive = 1;
         g_gs.num_players = 1;
     }
-
-    /* Spawn bots */
-    physics_spawn_bots(&g_gs, DEFAULT_BOTS);
 
     /* Input */
     input_init(&g_inp);

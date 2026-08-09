@@ -22,17 +22,14 @@
 #define ROCKET_SPLASH_DMG 100.0f  /* max direct damage */
 #define MAX_ROCKETS      32
 
-#define MAX_BOTS         8   /* hard cap; addbot/delbot manage bots within this */
-#define DEFAULT_BOTS     4   /* how many spawn at game start */
-
-/* Runtime-tunable copies of MOVE_SPEED/GRAVITY (console 'speed'/'gravity'
- * commands) — movement code reads these instead of the #define defaults
- * above, which just seed their initial values. */
+/* Runtime-tunable copies of MOVE_SPEED/GRAVITY (previously the console
+ * 'speed'/'gravity' commands, now console.c is a pure Python shell with no
+ * bespoke dev-commands at all — these still exist as the values movement
+ * code actually reads, just nothing currently sets them at runtime) —
+ * movement code reads these instead of the #define defaults above, which
+ * just seed their initial values. */
 extern float g_move_speed;
 extern float g_gravity;
-#define BOT_THINK_RATE   0.25f   /* seconds between AI decisions */
-#define BOT_FIRE_RANGE   180.0f  /* max distance to fire */
-#define BOT_MOVE_SPEED   160.0f
 
 typedef struct {
     Vec3f pos;
@@ -46,14 +43,8 @@ typedef struct {
     int   alive;
     float respawn_timer;
     int   noclip;    /* editor mode: position is driven by editor.c's fly_move, skip gravity/collision */
-    int   god;       /* console 'god' command: damage/knockback immunity without forcing noclip fly */
+    int   god;       /* damage/knockback immunity without forcing noclip fly */
     int   crouching; /* Ctrl held: lowers eye/rocket-spawn height, halves ground speed */
-    /* Bot AI state */
-    int   is_bot;
-    float bot_think_timer;
-    float bot_fire_timer;
-    Vec3f bot_target_pos;   /* where the bot wants to move */
-    int   bot_jump;
 } Player;
 
 typedef struct {
@@ -94,14 +85,3 @@ int physics_check_ground(const Octree *world, Vec3f pos);
 
 /* Effective eye/rocket-spawn height, accounting for crouch */
 float player_eye_h(const Player *p);
-
-/* Spawn bots into the game state */
-void physics_spawn_bots(GameState *gs, int count);
-
-/* Console addbot/delbot: add/remove one bot at a time (up to MAX_BOTS
- * total). Returns 1 on success, 0 if already at the cap / no bot to remove. */
-int physics_add_bot(GameState *gs);
-int physics_remove_bot(GameState *gs);
-
-/* Update bot AI (called from physics_update) */
-void physics_update_bots(GameState *gs, float dt);

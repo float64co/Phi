@@ -1386,6 +1386,65 @@ after the fix.
     verified; the UI glue connecting it to real keyboard input and the
     on-screen scrollback panel is code-reviewed but not live-verified,
     flagged honestly rather than either claimed or silently skipped.
+- **Qek cleanup: bots removed, Console is now a pure Python shell** — a
+  deliberate pivot-completion pass, not a feature. "We're in Phi now, not
+  Qek": the AI bot system and every one of console.c's bespoke dev-
+  commands (Qek's own, plus this session's own `matcolor`/`matmetal`/
+  `matrough`/`matemit` stopgap from the PBR material work above — real
+  Python execution existed by the time those were added, so keeping them
+  as a separate command layer was already redundant) are gone rather than
+  ported forward.
+  - **Bots**: `physics_spawn_bots`/`physics_add_bot`/`physics_remove_bot`/
+    `physics_update_bots` and all bot AI state (`Player.is_bot`/
+    `bot_think_timer`/`bot_fire_timer`/`bot_target_pos`/`bot_jump`,
+    `MAX_BOTS`/`DEFAULT_BOTS`/`BOT_THINK_RATE`/`BOT_FIRE_RANGE`/
+    `BOT_MOVE_SPEED`) deleted from `physics.h`/`.c`, confirmed pure client-
+    side (never touched `net.c`'s wire protocol or `server/server.py` at
+    all — each client would have simulated bots independently in
+    multiplayer, an existing quirk this removal sidesteps rather than
+    fixes). `renderer.c`'s bot/player color branch and `ui.c`'s Outliner
+    "Bot"/"Player" label both collapsed to just "Player" now that only
+    one kind exists.
+  - **Console**: `console_dispatch` — the entire `if`/`else if` command
+    table — is gone. `console_submit` now just calls `phi_mp_exec(line)`
+    directly and shows whatever it printed. This turned out to remove
+    ALL of console.c's coupling to the rest of the engine at once: with
+    no `pos`/`tp`/`kill`/`hp`/`give`/`god` (needed `Player*`), no `grid`/
+    `mat`/`noclip` (needed `EditorState*`), no `name`/`save`/`load`/
+    `newmap`/`maps` (needed `NetState*`), no `fov`/`skybox` (needed
+    `Renderer*`), and no `matcolor`/etc (needed `MeshObject*`/
+    `edit_face`), `console_update`'s signature shrank to just
+    `(ConsoleState*, InputState*)` — `console.h` dropped its includes of
+    `editor.h`/`net.h`/`physics.h`/`renderer.h`/`meshobject.h` entirely,
+    down to just `input.h`. `bind`/`unbind` are gone too (a general
+    keybind-to-command-string utility, but with no command layer left to
+    bind a key TO, keeping it would mean binding keys to raw Python
+    snippets — a real but unrequested feature, not shipped speculatively)
+    — `ConsoleState.bind_keys`/`bind_cmds`/`bind_count`/
+    `CONSOLE_MAX_BINDS` deleted with it. Face material editing has no
+    replacement yet as a result: the Properties panel's read-only
+    material readout (base_color/metallic/roughness/emission) still
+    works, but there's currently no way to CHANGE a face's material at
+    all until Phase 5's real Python↔C API surface exists — an honest
+    capability regression versus the immediately-preceding commit, not
+    an oversight.
+  - **Dead code found and removed along the way**: `bind`'s removal made
+    `InputState.pressed_codes`/`pressed_code_count`/
+    `PRESSED_CODE_QUEUE_SIZE`/`KEY_CODE_LEN` entirely unused — that
+    machinery existed solely to feed `bind`'s keycode matching, was only
+    ever populated on the wasm build (`input.c`'s two native/win32
+    branches already carried "known gap: bind is a no-op here" comments,
+    now removed along with the field they were caveating) and had no
+    other consumer anywhere in the codebase (confirmed by grep before
+    deleting, not assumed) — a real, if small, dead-code cleanup rather
+    than just moving the bot/command removal's mess elsewhere.
+    `physics.h`'s `MOVE_SPEED`/`GRAVITY` runtime-tunable globals
+    (`g_move_speed`/`g_gravity`) stay — no longer settable from the
+    console (the `speed`/`gravity` commands are gone), but still real
+    values movement code reads, left alone rather than removed
+    speculatively.
+  - All three targets (`native`/`win32`/`wasm`) rebuilt clean after this
+    pass, zero new warnings from any touched file.
 
 **Design reference**: evaluated a separate, mature CAD tool's C++/Python UI
 codebase as reference material (brought in temporarily, read-only, removed

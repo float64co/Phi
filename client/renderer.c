@@ -562,9 +562,9 @@ Renderer *renderer_create(int width, int height) {
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
     /* No back-face culling: noclip editor flight lets the camera end up
-     * behind/inside geometry and bot boxes (impossible in normal collided
-     * play), so both winding directions of every triangle must rasterize
-     * or those faces just vanish from certain angles. */
+     * behind/inside geometry and player boxes (impossible in normal
+     * collided play), so both winding directions of every triangle must
+     * rasterize or those faces just vanish from certain angles. */
     glClearColor(s_sky_color[0], s_sky_color[1], s_sky_color[2], 1.0f);
 
     r->program     = link_program(VERT_SRC, FRAG_SRC);
@@ -916,11 +916,8 @@ void renderer_draw_players(Renderer *r, const GameState *gs, int local_id) {
     for (int i = 0; i < gs->num_players; i++) {
         const Player *p = &gs->players[i];
         if (!p->alive || p->id == (uint8_t)local_id) continue;
-        float cr = p->is_bot ? 1.0f : 0.8f;
-        float cg = p->is_bot ? 0.5f : 0.2f;
-        float cb = p->is_bot ? 0.1f : 0.2f;
         r->cur_object_id = 1000u + p->id;
-        draw_box(r, s_player_vbo, p->pos.x, p->pos.y, p->pos.z, cr, cg, cb, vp);
+        draw_box(r, s_player_vbo, p->pos.x, p->pos.y, p->pos.z, 0.8f, 0.2f, 0.2f, vp);
     }
 }
 
