@@ -151,6 +151,54 @@ static void main_loop(void *userdata) {
         printf("[main] Swapped in server map (%d verts)\n", g_mesh->count);
     }
 
+    /* --- UI layout + click routing --- must happen before the gameplay
+     * input processing below: a UI click that's consumed (the panel
+     * type-switcher icon toggling its dropdown, a dropdown row swapping a
+     * panel, an Outliner row selection) must NOT also register as a
+     * gameplay "fire" edge on that same physical LMB press. ui_layout()
+     * needs to run before hit-testing (it's what computes every Area's
+     * on-screen rect), and UIRenderContext is built once here and reused
+     * for the ui_render() call further down too — one source of truth for
+     * what got clicked vs. what actually gets drawn this frame, rather
+     * than two separately-constructed contexts that could drift apart. */
+    int cw, ch;
+    phi_platform_get_window_size(&cw, &ch);
+    ui_layout(cw, ch);
+
+    static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
+    float sky[3];
+    renderer_get_sky_color(sky);
+    UIRenderContext ui_ctx = {0};
+    ui_ctx.renderer = g_renderer;
+    ui_ctx.gbuf = g_gbuf;
+    ui_ctx.world_mesh = g_mesh;
+    ui_ctx.gs = &g_gs;
+    ui_ctx.local_player_id = g_ns.local_id;
+    ui_ctx.test_obj = &g_test_mesh_object;
+    ui_ctx.test_obj_loaded = g_test_mesh_loaded;
+    ui_ctx.console = &g_cs;
+    memcpy(ui_ctx.light_dir, light_dir, sizeof(light_dir));
+    memcpy(ui_ctx.sky_color, sky, sizeof(sky));
+    ui_ctx.draw_scene_content = scene_content_cb;
+
+    /* Real clicks (lmb_click/rmb_click) — same "rising edge, drained and
+     * cleared here" convention as fire/export_stl below. Routes into the
+     * panel type-switcher icon/dropdown and Outliner row selection today;
+     * the scene right-click context menu's own hit-testing is already
+     * here too but inert until something calls ui_open_scene_context_menu
+     * (separate, not-yet-landed piece — see phi.md). A consumed click
+     * must not ALSO fire a rocket on the same LMB press. */
+    int ui_consumed_click = 0;
+    if (g_inp.lmb_click) {
+        g_inp.lmb_click = 0;
+        ui_consumed_click = ui_on_mouse_button(g_inp.mouse_x, g_inp.mouse_y, 0, 1, &ui_ctx);
+    }
+    if (g_inp.rmb_click) {
+        g_inp.rmb_click = 0;
+        ui_on_mouse_button(g_inp.mouse_x, g_inp.mouse_y, 1, 1, &ui_ctx);
+    }
+    if (ui_consumed_click) g_inp.fire = 0;
+
     /* --- Input processing --- */
     Player *local = NULL;
     for (int i = 0; i < g_gs.num_players; i++) {
@@ -217,9 +265,6 @@ static void main_loop(void *userdata) {
     }
 
     /* --- Render --- */
-    int cw, ch;
-    phi_platform_get_window_size(&cw, &ch);
-
     if (local && local->alive) {
         renderer_set_camera(g_renderer, local);
     }
@@ -251,23 +296,9 @@ static void main_loop(void *userdata) {
      * whole window — see gbuffer_set_viewport_offset()'s comment in
      * gbuffer.h for why this needed a small Phase-0 extension. ui_render()
      * draws the branding bar and every panel (Scene included, via the
-     * draw_scene_content callback below) in one call. */
-    static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
-    float sky[3];
-    renderer_get_sky_color(sky);
-    ui_layout(cw, ch);
-    UIRenderContext ui_ctx = {0};
-    ui_ctx.renderer = g_renderer;
-    ui_ctx.gbuf = g_gbuf;
-    ui_ctx.world_mesh = g_mesh;
-    ui_ctx.gs = &g_gs;
-    ui_ctx.local_player_id = g_ns.local_id;
-    ui_ctx.test_obj = &g_test_mesh_object;
-    ui_ctx.test_obj_loaded = g_test_mesh_loaded;
-    ui_ctx.console = &g_cs;
-    memcpy(ui_ctx.light_dir, light_dir, sizeof(light_dir));
-    memcpy(ui_ctx.sky_color, sky, sizeof(sky));
-    ui_ctx.draw_scene_content = scene_content_cb;
+     * draw_scene_content callback below) in one call. ui_layout() already
+     * ran and ui_ctx was already built above, before the click-routing
+     * that needed both — reused here rather than redone. */
     ui_render(&ui_ctx);
 
     /* HUD */

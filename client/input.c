@@ -88,7 +88,16 @@ static EM_BOOL key_up(int type, const EmscriptenKeyboardEvent *e, void *ud) {
 static EM_BOOL mouse_move(int type, const EmscriptenMouseEvent *e, void *ud) {
     (void)type; (void)ud;
     InputState *inp = s_inp;
-    if (!inp || !inp->pointer_locked) return EM_FALSE;
+    if (!inp) return EM_FALSE;
+    /* targetX/targetY (position relative to the canvas, which fills the
+     * whole viewport) are real regardless of lock state -- unlike
+     * movementX/Y below, which the Pointer Lock API only gives meaningful
+     * relative deltas for while actually locked. Tracked unconditionally
+     * so UI panel hit-testing works with the cursor free, which is now the
+     * default (see input_install_callbacks' comment). */
+    inp->mouse_x = e->targetX;
+    inp->mouse_y = e->targetY;
+    if (!inp->pointer_locked) return EM_FALSE;
     inp->yaw   -= (float)e->movementX * inp->sensitivity;
     inp->pitch -= (float)e->movementY * inp->sensitivity;
     float limit = 89.0f * (float)M_PI / 180.0f;
@@ -100,8 +109,15 @@ static EM_BOOL mouse_move(int type, const EmscriptenMouseEvent *e, void *ud) {
 static EM_BOOL mouse_down(int type, const EmscriptenMouseEvent *e, void *ud) {
     (void)type; (void)ud;
     InputState *inp = s_inp;
-    if (!inp) return EM_FALSE;
-    if (!inp->pointer_locked || inp->console_open) return EM_TRUE;
+    if (!inp || inp->console_open) return EM_FALSE;
+    /* UI click routing: real clicks, tracked regardless of pointer_locked
+     * (same reasoning as mouse_move above) -- main.c drains lmb_click/
+     * rmb_click once per frame into ui_on_mouse_button(). */
+    inp->mouse_x = e->targetX;
+    inp->mouse_y = e->targetY;
+    if (e->button == 0)      inp->lmb_click = 1;
+    else if (e->button == 2) inp->rmb_click = 1;
+    if (!inp->pointer_locked) return EM_TRUE;
     if (e->button == 0) {
         if (!inp->fire_held) { inp->fire = 1; inp->fire_held = 1; }
         inp->lmb_down = 1;
@@ -282,11 +298,17 @@ static void handle_char(WPARAM wparam) {
 
 static void handle_motion(LPARAM lparam) {
     InputState *inp = s_inp;
-    if (!inp || !inp->pointer_locked) return;  /* no lock engaged -- let the cursor move freely, don't warp it back */
-    if (s_ignore_next_motion) { s_ignore_next_motion = 0; return; }
-
+    if (!inp) return;
     int x = (short)LOWORD(lparam);  /* client-area coords, like X11's ev->xmotion.x/y */
     int y = (short)HIWORD(lparam);
+    /* Absolute position, tracked unconditionally -- UI panel hit-testing
+     * needs a real cursor position whether or not the FPS camera is
+     * locked (unlocked is now the default, see input_install_callbacks). */
+    inp->mouse_x = x;
+    inp->mouse_y = y;
+    if (!inp->pointer_locked) return;  /* no lock engaged -- let the cursor move freely, don't warp it back */
+    if (s_ignore_next_motion) { s_ignore_next_motion = 0; return; }
+
     int w, h; phi_platform_get_window_size(&w, &h);
     int dx = x - w / 2, dy = y - h / 2;
     if (dx == 0 && dy == 0) return;
@@ -300,14 +322,20 @@ static void handle_motion(LPARAM lparam) {
     warp_to_center();
 }
 
-static void handle_button(int is_right, int down) {
+static void handle_button(int is_right, int down, LPARAM lparam) {
     InputState *inp = s_inp;
     if (!inp || inp->console_open) return;
+    /* UI click routing: real clicks, real position, regardless of
+     * pointer_locked -- main.c drains lmb_click/rmb_click once per frame
+     * into ui_on_mouse_button(). */
+    inp->mouse_x = (short)LOWORD(lparam);
+    inp->mouse_y = (short)HIWORD(lparam);
     if (!is_right) {
-        if (down) { if (!inp->fire_held) { inp->fire = 1; inp->fire_held = 1; } inp->lmb_down = 1; }
+        if (down) { if (!inp->fire_held) { inp->fire = 1; inp->fire_held = 1; } inp->lmb_down = 1; inp->lmb_click = 1; }
         else      { inp->fire_held = 0; inp->lmb_down = 0; }
     } else {
         inp->rmb_down = down;
+        if (down) inp->rmb_click = 1;
     }
 }
 
@@ -326,10 +354,10 @@ void input_native_handle_event(void *msgptr) {
         case WM_KEYUP:       handle_key(m->wParam, m->lParam, 0); break;
         case WM_CHAR:        handle_char(m->wParam);              break;
         case WM_MOUSEMOVE:   handle_motion(m->lParam);            break;
-        case WM_LBUTTONDOWN: handle_button(0, 1);                 break;
-        case WM_LBUTTONUP:   handle_button(0, 0);                 break;
-        case WM_RBUTTONDOWN: handle_button(1, 1);                 break;
-        case WM_RBUTTONUP:   handle_button(1, 0);                 break;
+        case WM_LBUTTONDOWN: handle_button(0, 1, m->lParam);      break;
+        case WM_LBUTTONUP:   handle_button(0, 0, m->lParam);      break;
+        case WM_RBUTTONDOWN: handle_button(1, 1, m->lParam);      break;
+        case WM_RBUTTONUP:   handle_button(1, 0, m->lParam);      break;
         case WM_MOUSEWHEEL:  handle_wheel(m->wParam);              break;
         case WM_KILLFOCUS:   if (s_inp) reset_held_keys_win32(s_inp); break;
         default: break;
@@ -456,7 +484,13 @@ static void handle_key(XKeyEvent *e, int down) {
 
 static void handle_motion(XMotionEvent *e) {
     InputState *inp = s_inp;
-    if (!inp || !inp->pointer_locked) return;  /* no lock engaged -- let the cursor move freely, don't warp it back */
+    if (!inp) return;
+    /* Absolute position, tracked unconditionally -- UI panel hit-testing
+     * needs a real cursor position whether or not the FPS camera is
+     * locked (unlocked is now the default, see input_install_callbacks). */
+    inp->mouse_x = e->x;
+    inp->mouse_y = e->y;
+    if (!inp->pointer_locked) return;  /* no lock engaged -- let the cursor move freely, don't warp it back */
     if (s_ignore_next_motion) { s_ignore_next_motion = 0; return; }
 
     int w, h; phi_platform_get_window_size(&w, &h);
@@ -475,11 +509,17 @@ static void handle_motion(XMotionEvent *e) {
 static void handle_button(XButtonEvent *e, int down) {
     InputState *inp = s_inp;
     if (!inp || inp->console_open) return;
+    /* UI click routing: real clicks, real position, regardless of
+     * pointer_locked -- main.c drains lmb_click/rmb_click once per frame
+     * into ui_on_mouse_button(). */
+    inp->mouse_x = e->x;
+    inp->mouse_y = e->y;
     if (e->button == Button1) {
-        if (down) { if (!inp->fire_held) { inp->fire = 1; inp->fire_held = 1; } inp->lmb_down = 1; }
+        if (down) { if (!inp->fire_held) { inp->fire = 1; inp->fire_held = 1; } inp->lmb_down = 1; inp->lmb_click = 1; }
         else      { inp->fire_held = 0; inp->lmb_down = 0; }
     } else if (e->button == Button3) {
         inp->rmb_down = down;
+        if (down) inp->rmb_click = 1;
     } else if (down && e->button == Button4) {
         inp->grid_inc = 1;   /* scroll up — same convention as wheel_move */
     } else if (down && e->button == Button5) {

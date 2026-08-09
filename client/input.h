@@ -45,6 +45,20 @@ typedef struct {
 
     int   lmb_down, rmb_down;  /* raw mouse button state while pointer-locked */
 
+    /* Absolute window-local cursor position (y-down), tracked unconditionally
+     * on every mouse-move regardless of pointer_locked -- unlike lmb_down/
+     * fire above (gameplay-specific, still gated behind pointer_locked/
+     * console_open), UI panel hit-testing (ui_on_mouse_button) needs a real
+     * cursor position and works whether or not the FPS camera is locked. */
+    int   mouse_x, mouse_y;
+    /* Rising edge: left/right mouse button pressed this frame, at
+     * (mouse_x, mouse_y) when read -- same "main.c drains and clears it"
+     * convention as fire/export_stl. Distinct from lmb_down/rmb_down (held
+     * state, gameplay) and fire (gameplay-specific edge, still gated behind
+     * pointer_locked) -- these two exist purely to route real clicks into
+     * ui_on_mouse_button(), gated only by console_open. */
+    int   lmb_click, rmb_click;
+
     int   grid_inc, grid_dec;  /* ] / [, rising edge */
     int   mat_inc, mat_dec;    /* . / , , rising edge */
 

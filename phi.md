@@ -717,8 +717,11 @@ after the fix.
   area-split model as previously specified, not yet the interactive
   drag-to-resize/drag-to-split version: `Area` is a binary tree
   (`AREA_LEAF`/`AREA_SPLIT_H`/`AREA_SPLIT_V`), each leaf has its own
-  Blender-authentic type-switcher icon in its own top-right corner (not a
-  single global strip). Default layout is real golden ratio (`UI_PHI`/
+  Blender-authentic type-switcher icon in its own top-left corner (not a
+  single global strip; moved from the top-right in a later pass, scaled
+  down, clicking it now genuinely swaps that panel's type via a real
+  dropdown — see the input-plumbing note below). Default layout is real
+  golden ratio (`UI_PHI`/
   `UI_INV_PHI` — the actual constant, matching the reasoning the reference
   project used for its own UI sizing): Scene occupies the left column at
   the larger golden fraction (~61.8% width), the right column splits the
@@ -787,19 +790,38 @@ after the fix.
   work). Node Editor and Curve Editor are selectable-but-honestly-stubbed
   entries in the type-switcher (Phase 6 and Phase 4 respectively, neither
   started) rather than faked panels.
+- **Real mouse-click routing** — `ui_on_mouse_button()` existed since the
+  first shell landed but was never actually called from `main.c`; clicking
+  anything (the type-switcher icon, its dropdown, Outliner rows) had zero
+  effect. Fixed by giving `InputState` (`input.h`) a real absolute cursor
+  position (`mouse_x`/`mouse_y`, tracked unconditionally on every
+  mouse-move on all three platforms — previously native/win32 only
+  computed pointer-lock *deltas*, and wasm's own mouse handlers were fully
+  gated behind `pointer_locked`, which now defaults off) plus rising-edge
+  `lmb_click`/`rmb_click` flags (same "main.c drains and clears it"
+  convention as `fire`/`export_stl`). `main.c`'s frame loop now calls
+  `ui_layout()` and builds `UIRenderContext` *before* gameplay input
+  processing (moved up from where `ui_render()` needed it, and reused for
+  both), routes any click through `ui_on_mouse_button()`, and discards the
+  `fire` edge if the click was UI-consumed — same reasoning editor mode
+  already used to discard `fire` while editing. Verified live, not just by
+  reading the code: launched native headless, used `python-xlib`'s XTest
+  extension to synthesize a real click on the Outliner panel's
+  type-switcher icon (confirmed the dropdown opened via a screenshot),
+  then a second click on its "Console" row (confirmed the panel actually
+  swapped to the real dev console via a second screenshot).
 - **3D scene right-click context menu** — the mechanism is built (`client/
   ui.c`'s `ui_open_scene_context_menu`/`ui_is_context_menu_open`, a menu
   drawn and hit-tested the same way the reference project's
   `ContextMenuItem` system worked, reimplemented not copied) with
   placeholder items (Add > Mesh Object, Delete, Frame Selected/All,
   Deselect All) that print which one was clicked rather than act — real
-  actions are follow-up work. **Not yet wired to actual right-click
-  input**: `input.h`'s `InputState` only tracks pointer-lock mouse
-  *deltas* for FPS camera look, not an absolute cursor position, so there's
-  currently no source to feed `ui_open_scene_context_menu(x, y)` from.
-  Adding real (non-pointer-locked) cursor tracking is genuine follow-up
-  work, not done in this pass — stated plainly rather than left as a
-  silent gap.
+  actions are follow-up work. The real-cursor-position blocker above is
+  now resolved (`rmb_click` already flows into `ui_on_mouse_button()`
+  every frame), but nothing calls `ui_open_scene_context_menu(x, y)` yet
+  to actually open it on a scene right-click — that wiring, plus real
+  actions behind each item, is still follow-up work, not done in this
+  pass.
 - **Gbuffer extension**: `gbuffer_set_viewport_offset(gb, x, y)` — a small,
   deliberate extension to Phase 0's (already shipped, browser-verified)
   deferred pipeline. Every pass except the very last (FXAA's blit to the
