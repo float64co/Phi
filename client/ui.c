@@ -130,6 +130,7 @@ typedef struct {
     /* 3D scene right-click context menu -- see ui_open_scene_context_menu() */
     int   ctx_menu_open;
     float ctx_menu_x, ctx_menu_y;
+    CtxMenuAction ctx_menu_pending_action;  /* see ui_poll_context_menu_action() */
 } UIState;
 
 static UIState g_ui;
@@ -463,6 +464,20 @@ static void type_icon_rect(Area *a, float *bx, float *by) {
     *by = a->y + 4.0f;
 }
 
+/* Widest row text in the type-switcher dropdown ("Node Editor (not
+ * implemented yet)"/"Curve Editor (not implemented yet)" are the long
+ * ones) drives the menu's width -- shared by drawing and hit-testing
+ * (mirroring type_icon_rect above) so a click can't land past where the
+ * menu is actually drawn or vice versa. */
+static float type_menu_width(void) {
+    float max_w = 0.0f;
+    for (int i = 0; i < PANEL_TYPE_COUNT; i++) {
+        float w = font_text_width(g_ui.font_body, PANEL_NAMES[i], 13.0f);
+        if (w > max_w) max_w = w;
+    }
+    return max_w + 30.0f + 14.0f;  /* +30 icon-then-text offset, +14 right margin */
+}
+
 static void draw_area_chrome(Area *a) {
     ui_rect(a->x, a->y, a->w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
     ui_rect(a->x, a->y, 1.0f, a->h, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
@@ -473,7 +488,7 @@ static void draw_area_chrome(Area *a) {
     if (icon) ui_icon_draw(bx, by, UI_TYPE_ICON_SIZE, *icon, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 0.85f);
 
     if (a->type_menu_open) {
-        float menu_w = 170.0f, row_h = 24.0f;
+        float menu_w = type_menu_width(), row_h = 24.0f;
         float menu_h = row_h * PANEL_TYPE_COUNT;
         /* Spawns directly underneath the icon now that the icon lives in
          * the top-left corner -- left edges aligned, growing down and to
@@ -738,7 +753,7 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
         return 1;
     }
     if (a->type_menu_open) {
-        float menu_w = 170.0f, row_h = 24.0f;
+        float menu_w = type_menu_width(), row_h = 24.0f;
         float menu_h = row_h * PANEL_TYPE_COUNT;
         float menu_x = bx;  /* mirrors draw_area_chrome's now top-left-aligned menu spawn */
         float menu_y = by + UI_TYPE_ICON_SIZE + 2.0f;
@@ -781,12 +796,22 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
         static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All" };
+        /* Order matches items[] above -- row index maps straight across.
+         * Only ADD_MESH/DELETE are acted on by main.c right now; the rest
+         * still just get reported via the printf below. */
+        static const CtxMenuAction actions[] = {
+            CTX_ACTION_ADD_MESH, CTX_ACTION_DELETE, CTX_ACTION_FRAME_SELECTED,
+            CTX_ACTION_FRAME_ALL, CTX_ACTION_DESELECT_ALL
+        };
         int n = (int)(sizeof(items) / sizeof(items[0]));
         float menu_h = row_h * n;
         if (button == 0 && pressed) {
             if (point_in_rect((float)x, (float)y, g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, menu_h)) {
                 int row = (int)(((float)y - g_ui.ctx_menu_y) / row_h);
-                if (row >= 0 && row < n) printf("[ui] context menu: '%s' (mechanism proven, action not yet wired)\n", items[row]);
+                if (row >= 0 && row < n) {
+                    printf("[ui] context menu: '%s'\n", items[row]);
+                    g_ui.ctx_menu_pending_action = actions[row];
+                }
             }
             g_ui.ctx_menu_open = 0;
             return 1;
@@ -807,6 +832,12 @@ void ui_open_scene_context_menu(int x, int y) {
 }
 
 int ui_is_context_menu_open(void) { return g_ui.ctx_menu_open; }
+
+CtxMenuAction ui_poll_context_menu_action(void) {
+    CtxMenuAction a = g_ui.ctx_menu_pending_action;
+    g_ui.ctx_menu_pending_action = CTX_ACTION_NONE;
+    return a;
+}
 
 void ui_set_selected_object(unsigned int object_id) { g_ui.selected_object_id = object_id; }
 unsigned int ui_get_selected_object(void) { return g_ui.selected_object_id; }

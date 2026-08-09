@@ -112,6 +112,60 @@ static void update_console_ui(const ConsoleState *cs) {
 static void update_console_ui(const ConsoleState *cs) { (void)cs; }
 #endif
 
+/* Loads assets/cube.gltf into g_test_mesh_object the same way main()'s
+ * startup code originally did inline — factored out so the scene
+ * right-click context menu's "Add > Mesh Object" (see
+ * CTX_ACTION_ADD_MESH below) can reuse it instead of duplicating the
+ * glTF -> half-edge -> RenderMesh pipeline call sequence. There's still
+ * only ever one test-object slot (see g_test_mesh_object's own comment
+ * below) — this spawns/reloads that one slot, it doesn't add a new
+ * independent object to a list, since no such list exists yet. */
+static void spawn_test_mesh_object(void) {
+    HalfEdgeMesh *hem = halfedge_load_gltf("assets/cube.gltf");
+    if (!hem) {
+        printf("[main] failed to load assets/cube.gltf — MeshObject spawn skipped\n");
+        return;
+    }
+    g_test_mesh_object.id = 1;
+    /* Elevated well above normal bot/player ground-level traffic (~y=16
+     * floor) — early native testing found bots occasionally standing
+     * directly in the diagnostic camera's line of sight at ground-level
+     * test positions, an environmental occlusion artifact from the live
+     * multiplayer arena, not a rendering bug. */
+    g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
+    g_test_mesh_object.orientation = quat_identity();
+    g_test_mesh_object.is_static = 1;
+    g_test_mesh_object.render_mesh = mesh_create();
+    /* assets/cube.gltf is a unit cube (half-extent 0.5) — scaled up 16x by
+     * baking the scale directly into the flattened vertex positions (no
+     * scale field on MeshObject yet, see meshobject.h). */
+    for (int i = 0; i < hem->vert_count; i++)
+        for (int a = 0; a < 3; a++)
+            hem->verts[i].pos[a] *= 16.0f;
+    meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, hem, 4.0f);
+    halfedge_destroy(hem);
+    g_test_mesh_loaded = 1;
+    printf("[main] loaded assets/cube.gltf as MeshObject: %d triangles\n",
+           g_test_mesh_object.render_mesh->count / 3);
+}
+
+/* Frees the one test-object slot's GPU-side mesh and marks it unloaded —
+ * scene_content_cb below already checks g_test_mesh_loaded before drawing
+ * it, so clearing that flag is what actually makes it disappear. Clears
+ * the UI's own selection too if it was pointing at this object, so
+ * Properties doesn't keep showing a readout for something that no longer
+ * exists. */
+static void delete_test_mesh_object(void) {
+    if (!g_test_mesh_loaded) return;
+    if (ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
+        ui_set_selected_object(0xFFFFFFFFu);
+    }
+    mesh_destroy(g_test_mesh_object.render_mesh);
+    g_test_mesh_object.render_mesh = NULL;
+    g_test_mesh_loaded = 0;
+    printf("[main] deleted MeshObject\n");
+}
+
 /* Every renderer_draw_* call for the frame's game content — extracted
  * into a callback (see UIRenderContext.draw_scene_content in ui.h) so the
  * Scene panel can drive it between gbuffer_begin_geometry_pass() and
@@ -213,6 +267,30 @@ static void main_loop(void *userdata) {
         }
     }
     if (ui_consumed_click) g_inp.fire = 0;
+
+    /* Scene context-menu action, drained once per frame like the click
+     * flags above. Only Add Mesh Object / Delete are wired to real
+     * behavior — Frame Selected/Frame All/Deselect All are still
+     * placeholder rows (see ui_poll_context_menu_action's own comment). */
+    switch (ui_poll_context_menu_action()) {
+        case CTX_ACTION_ADD_MESH:
+            if (g_test_mesh_loaded) {
+                printf("[main] context menu Add > Mesh Object: already exists "
+                       "(only one test-object slot for now)\n");
+            } else {
+                spawn_test_mesh_object();
+            }
+            break;
+        case CTX_ACTION_DELETE:
+            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
+                delete_test_mesh_object();
+            } else {
+                printf("[main] context menu Delete: no MeshObject selected\n");
+            }
+            break;
+        default:
+            break;
+    }
 
     /* --- Input processing --- */
     Player *local = NULL;
@@ -430,40 +508,10 @@ int main(void) {
     mesh_rebuild(g_mesh, g_world);
     mesh_upload(g_mesh);
 
-    /* Phase 1 foundation test object — see g_test_mesh_object's comment. */
-    {
-        HalfEdgeMesh *hem = halfedge_load_gltf("assets/cube.gltf");
-        if (hem) {
-            g_test_mesh_object.id = 1;
-            /* Elevated well above normal bot/player ground-level traffic
-             * (~y=16 floor) — early native testing found bots occasionally
-             * standing directly in the diagnostic camera's line of sight
-             * at ground-level test positions, an environmental occlusion
-             * artifact from the live multiplayer arena, not a rendering
-             * bug (confirmed via debug output: identical camera/MVP math
-             * every run, only the object-id readback outcome varied, and
-             * the occluding pixel's object_id matched a player/bot). */
-            g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
-            g_test_mesh_object.orientation = quat_identity();
-            g_test_mesh_object.is_static = 1;
-            g_test_mesh_object.render_mesh = mesh_create();
-            /* assets/cube.gltf is a unit cube (half-extent 0.5) — scaled
-             * up 16x here by baking the scale directly into the flattened
-             * vertex positions (no scale field on MeshObject yet, see
-             * meshobject.h) so it's a visible size next to the arena's
-             * world-unit scale, rather than a barely-visible 1-unit cube. */
-            for (int i = 0; i < hem->vert_count; i++)
-                for (int a = 0; a < 3; a++)
-                    hem->verts[i].pos[a] *= 16.0f;
-            meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, hem, 4.0f);
-            halfedge_destroy(hem);
-            g_test_mesh_loaded = 1;
-            printf("[main] loaded assets/cube.gltf as MeshObject: %d triangles\n",
-                   g_test_mesh_object.render_mesh->count / 3);
-        } else {
-            printf("[main] failed to load assets/cube.gltf — MeshObject test skipped\n");
-        }
-    }
+    /* Phase 1 foundation test object — see g_test_mesh_object's comment
+     * and spawn_test_mesh_object() above (also reused by the scene
+     * context menu's "Add > Mesh Object", see CTX_ACTION_ADD_MESH). */
+    spawn_test_mesh_object();
 
     /* Add local player immediately at ID=1 so camera works before server ACKs */
     g_ns.local_id = 1;

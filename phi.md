@@ -720,8 +720,16 @@ after the fix.
   Blender-authentic type-switcher icon in its own top-left corner (not a
   single global strip; moved from the top-right in a later pass, scaled
   down, clicking it now genuinely swaps that panel's type via a real
-  dropdown — see the input-plumbing note below). Default layout is real
-  golden ratio (`UI_PHI`/
+  dropdown — see the input-plumbing note below). The dropdown's width
+  (`type_menu_width()`, shared between drawing and hit-testing the same
+  way `type_icon_rect()` already was, so the two can't disagree) is now
+  measured against the actual widest row text instead of a fixed guess —
+  "Node Editor (not implemented yet)"/"Curve Editor (not implemented yet)"
+  were being cut off at the old fixed 170px. A rounded-rect button-outline
+  affordance was tried around the icon and then explicitly reverted at the
+  user's request ("terrible idea") — noted here so a future pass doesn't
+  re-add it without knowing that was already tried and rejected. Default
+  layout is real golden ratio (`UI_PHI`/
   `UI_INV_PHI` — the actual constant, matching the reasoning the reference
   project used for its own UI sizing): Scene occupies the left column at
   the larger golden fraction (~61.8% width), the right column splits the
@@ -820,14 +828,28 @@ after the fix.
   landed inside the Scene panel's own content rect (not chrome), and the
   octree editor isn't active (which already owns RMB for carve-drags, same
   reasoning the LMB fire-gating uses), it calls
-  `ui_open_scene_context_menu()` there. Items (Add > Mesh Object, Delete,
-  Frame Selected/All, Deselect All) still just print which one was
-  clicked — real actions behind each are follow-up work, not done in this
-  pass. Verified live: synthesized a real right-click inside the Scene
-  panel via `python-xlib`'s XTest extension (screenshotted — menu opened
-  exactly at the click position, all 5 items visible), then a left-click
-  on "Frame Selected" (screenshotted again — menu closed, log confirmed
-  the correct item was identified).
+  `ui_open_scene_context_menu()` there. **Add > Mesh Object** and
+  **Delete** are now wired to real behavior via
+  `ui_poll_context_menu_action()` (a `CtxMenuAction` enum, drained once
+  per frame in `main.c` the same way `InputState`'s `lmb_click` etc. are —
+  `ui.c` sets the pending action on row-select, `main.c` acts on it and
+  clears it). Add reuses `spawn_test_mesh_object()` (factored out of what
+  was startup-only inline code in `main()`) if the one test-object slot
+  isn't already occupied — there's still only a single `g_test_mesh_object`
+  slot, not a general spawn-many-objects system, so Add on an already-
+  occupied slot just logs that rather than silently doing something
+  confusing. Delete frees the slot's `RenderMesh` and clears it via
+  `mesh_destroy()`, and clears the UI's own selection if it pointed at
+  that object, but only acts when that object is actually selected
+  (mirrors normal editor "Delete acts on the selection" semantics) — a
+  Delete with nothing selected just logs and no-ops. Frame Selected/Frame
+  All/Deselect All still just print which one was clicked — real actions
+  behind those three are follow-up work. Verified live end-to-end:
+  selected the MeshObject via the Outliner, right-clicked the Scene panel,
+  clicked Delete (log confirmed deletion, Outliner row disappeared in a
+  screenshot), right-clicked again and clicked Add (log confirmed reload,
+  Outliner row reappeared in a screenshot) — all via `python-xlib`'s
+  XTest extension, not just read from the code.
 - **Gbuffer extension**: `gbuffer_set_viewport_offset(gb, x, y)` — a small,
   deliberate extension to Phase 0's (already shipped, browser-verified)
   deferred pipeline. Every pass except the very last (FXAA's blit to the

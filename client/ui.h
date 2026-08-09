@@ -56,6 +56,17 @@ typedef enum {
 
 typedef enum { AREA_LEAF, AREA_SPLIT_H, AREA_SPLIT_V } AreaKind;
 
+/* Scene right-click context menu rows -- see ui_poll_context_menu_action().
+ * Order matches the menu's own items[] array in ui.c. */
+typedef enum {
+    CTX_ACTION_NONE = 0,
+    CTX_ACTION_ADD_MESH,
+    CTX_ACTION_DELETE,
+    CTX_ACTION_FRAME_SELECTED,
+    CTX_ACTION_FRAME_ALL,
+    CTX_ACTION_DESELECT_ALL,
+} CtxMenuAction;
+
 typedef struct Area {
     AreaKind kind;
     float split;              /* SPLIT_H/V only: 0..1 fraction going to child[0] */
@@ -130,6 +141,14 @@ void ui_on_mouse_move(int x, int y);
  * not its chrome. See ui.c's context-menu section. */
 void ui_open_scene_context_menu(int x, int y);
 int  ui_is_context_menu_open(void);
+
+/* Drains and clears whichever scene-context-menu row was last clicked (if
+ * any) -- same one-shot "drain it once per frame" convention as
+ * InputState's lmb_click etc. (see input.h). Only CTX_ACTION_ADD_MESH/
+ * CTX_ACTION_DELETE are wired to real behavior in main.c right now; the
+ * Frame Selected/Frame All/Deselect All rows still just report which one
+ * was clicked. */
+CtxMenuAction ui_poll_context_menu_action(void);
 
 /* object_id follows the existing scheme (renderer.h/gbuffer.c): world=0,
  * ground=1, players=1000+id, rockets=2000+slot, wire-box=3,
