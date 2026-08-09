@@ -625,6 +625,95 @@ in Blender; Phi-specific data is simply data Blender doesn't render.
 Built in C, rendered entirely via WebGL 2. No third-party UI library — this is
 the resolved decision over Dear ImGui (see Hard Architectural Decisions).
 
+**Status (2026-08-09): first real editor shell landed** — build-verified on
+native, win32 (real Intel Arc hardware), and wasm. Strategic context: Phi is
+no longer aimed at being Qek's (the rocket-arena game's) engine specifically —
+Qek is its own separate project — Phi is now aimed at general UE5/Blender-
+territory editor work. This is the first UI that isn't Qek's HUD/dev console.
+
+- **SDF text rendering** (`client/font.c`/`.h`) — real SDF, not a plain-
+  bitmap compromise: `stb_truetype.h` (vendored, public domain/MIT, same
+  precedent as `cgltf.h`) has `stbtt_GetCodepointSDF` built in. Bakes IBM
+  Plex Sans (Regular/Bold/BoldItalic) and IBM Plex Mono into GL_R8 atlases
+  at startup via a simple shelf packer (not bin-packing-optimal, fine for
+  ~95 ASCII glyphs per font); a 3-line fragment shader (`UI_SDF_FRAG_SRC`
+  in `client/ui.c`) thresholds and antialiases via `fwidth`-scaled
+  `smoothstep`, the standard SDF text technique. IBM Plex fonts vendored
+  from a separate reference project (Bold, Mono — SIL OFL, freely
+  embeddable) plus IBM's own GitHub (Regular, BoldItalic — that project
+  only had Bold). Baked directly into the wasm binary via the existing
+  `--embed-file assets@assets` mechanism, no runtime font loading.
+- **SVG icon rendering** (`client/svg_icon.c`/`.h`) — vendored `nanosvg.h`/
+  `nanosvgrast.h` (zlib license) from the same reference project; the
+  loading *logic* (parse → rasterize → recolor to a white/alpha coverage
+  mask → upload as a texture) is the same technique that project used, but
+  reimplemented against Phi's own `gl_native.h` proc-fetching rather than
+  the `glad`-dependent original, since "no GL loader library" is a Hard
+  Architectural Decision. `repl.svg`/`undo.svg`/`redo.svg` reused verbatim
+  from that project (repl.svg is its Chat icon); `scene.svg`/`outliner.svg`/
+  `properties.svg`/`console.svg`/`node_editor.svg`/`curve_editor.svg` are
+  new, hand-authored to match the same simple-line-art style.
+- **Panel/area layout** (`client/ui.c`/`.h`) — Blender's actual recursive
+  area-split model as previously specified, not yet the interactive
+  drag-to-resize/drag-to-split version: `Area` is a binary tree
+  (`AREA_LEAF`/`AREA_SPLIT_H`/`AREA_SPLIT_V`), each leaf has its own
+  Blender-authentic type-switcher icon in its own top-right corner (not a
+  single global strip). Default layout is real golden ratio (`UI_PHI`/
+  `UI_INV_PHI` — the actual constant, matching the reasoning the reference
+  project used for its own UI sizing): Scene occupies the left column at
+  the larger golden fraction (~61.8% width), the right column splits the
+  same way into Outliner (top) / Properties (bottom). Split edges aren't
+  draggable yet — the tree structure supports it (each split already
+  stores its own fraction), the mouse-drag interaction is follow-up work.
+- **Branding bar** — a fixed top strip whose design language is adapted
+  from a real site's actual page source (fetched and read, not guessed
+  at): a bold-italic brand-mark "pill" (colored background, white text)
+  rather than a logo image, light background with a thin border, small-
+  caps-style secondary text. The specific brand text ("Phi") and accent
+  color (warm gold/amber, tying into the golden-ratio identity —
+  deliberately distinct from that site's sky-blue) are Phi's own, not
+  copied. Undo/redo icon buttons live here (Zenith's icons, not yet wired
+  to a real undo stack — no undoable actions exist yet to drive one).
+- **Panels**: Scene (the existing G-buffer pipeline, now hosted in an
+  arbitrary sub-rectangle instead of always filling the window — see
+  `gbuffer_set_viewport_offset()` below), Outliner (lists the real world
+  mesh vert count, the Phase 1 test MeshObject, and connected players —
+  not a general scene-graph browser yet, there isn't a general scene graph
+  yet), Properties (real position/orientation readout for whatever's
+  selected, read-only — the DNA/RNA property-widget system above this
+  section is still just a design sketch), Console (Phi already had one —
+  `client/console.c`, previously DOM-only on wasm and invisible on native/
+  win32 — now also renders through this system, giving native/win32 a
+  visible console for the first time), Chat (UI shell only — text input +
+  scrollback, explicitly not connected to a real LLM: that needs a
+  server-side API proxy per the Hard Architectural Decision that the
+  Anthropic API key never ships to a client, which is separate, substantial
+  work). Node Editor and Curve Editor are selectable-but-honestly-stubbed
+  entries in the type-switcher (Phase 6 and Phase 4 respectively, neither
+  started) rather than faked panels.
+- **3D scene right-click context menu** — the mechanism is built (`client/
+  ui.c`'s `ui_open_scene_context_menu`/`ui_is_context_menu_open`, a menu
+  drawn and hit-tested the same way the reference project's
+  `ContextMenuItem` system worked, reimplemented not copied) with
+  placeholder items (Add > Mesh Object, Delete, Frame Selected/All,
+  Deselect All) that print which one was clicked rather than act — real
+  actions are follow-up work. **Not yet wired to actual right-click
+  input**: `input.h`'s `InputState` only tracks pointer-lock mouse
+  *deltas* for FPS camera look, not an absolute cursor position, so there's
+  currently no source to feed `ui_open_scene_context_menu(x, y)` from.
+  Adding real (non-pointer-locked) cursor tracking is genuine follow-up
+  work, not done in this pass — stated plainly rather than left as a
+  silent gap.
+- **Gbuffer extension**: `gbuffer_set_viewport_offset(gb, x, y)` — a small,
+  deliberate extension to Phase 0's (already shipped, browser-verified)
+  deferred pipeline. Every pass except the very last (FXAA's blit to the
+  default framebuffer) already rendered into its own private texture at
+  (0,0), so only that one `glViewport` call needed an offset to let the
+  Scene panel host the 3D view in an arbitrary sub-rectangle instead of
+  always filling the window. Combined with the already-existing
+  `gbuffer_resize()`, this is what makes a non-fullscreen 3D viewport
+  panel possible at all.
+
 **Design reference**: evaluated a separate, mature CAD tool's C++/Python UI
 codebase as reference material (brought in temporarily, read-only, removed
 once this phase is far enough along — nothing here should assume its files

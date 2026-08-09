@@ -33,7 +33,10 @@ COMMON_SRCS := \
 	$(SRCDIR)/console.c       \
 	$(SRCDIR)/halfedge.c      \
 	$(SRCDIR)/halfedge_gltf.c \
-	$(SRCDIR)/meshobject.c
+	$(SRCDIR)/meshobject.c    \
+	$(SRCDIR)/font.c          \
+	$(SRCDIR)/svg_icon.c      \
+	$(SRCDIR)/ui.c
 
 .PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress
 

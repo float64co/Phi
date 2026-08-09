@@ -10,6 +10,9 @@
 #include "phi_platform.h"
 #include "halfedge_gltf.h"
 #include "meshobject.h"
+#include "font.h"
+#include "svg_icon.h"
+#include "ui.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -109,6 +112,21 @@ static void update_console_ui(const ConsoleState *cs) {
 static void update_console_ui(const ConsoleState *cs) { (void)cs; }
 #endif
 
+/* Every renderer_draw_* call for the frame's game content — extracted
+ * into a callback (see UIRenderContext.draw_scene_content in ui.h) so the
+ * Scene panel can drive it between gbuffer_begin_geometry_pass() and
+ * gbuffer_render_shadow_map() without ui.c needing to know about
+ * Qek-specific entities (players/rockets) at all. */
+static void scene_content_cb(void *userdata) {
+    (void)userdata;
+    renderer_draw_world(g_renderer, g_mesh);
+    renderer_draw_ground_plane(g_renderer);
+    renderer_draw_players(g_renderer, &g_gs, g_ns.local_id);
+    renderer_draw_rockets(g_renderer, &g_gs);
+    if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
+    editor_render(&g_ed, g_renderer);
+}
+
 /* ---- Main loop ---- */
 static void main_loop(void *userdata) {
     (void)userdata;
@@ -201,14 +219,6 @@ static void main_loop(void *userdata) {
     /* --- Render --- */
     int cw, ch;
     phi_platform_get_window_size(&cw, &ch);
-    if (cw != g_renderer->vp_w || ch != g_renderer->vp_h) {
-        renderer_resize(g_renderer, cw, ch);
-        gbuffer_resize(g_gbuf, cw, ch);
-    }
-
-    float sky[3];
-    renderer_get_sky_color(sky);
-    gbuffer_begin_geometry_pass(g_gbuf, sky);
 
     if (local && local->alive) {
         renderer_set_camera(g_renderer, local);
@@ -235,30 +245,30 @@ static void main_loop(void *userdata) {
         g_renderer->cam_pitch = 0.0f;
     }
 
-    renderer_draw_world(g_renderer, g_mesh);
-    renderer_draw_ground_plane(g_renderer);
-    renderer_draw_players(g_renderer, &g_gs, g_ns.local_id);
-    renderer_draw_rockets(g_renderer, &g_gs);
-    if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
-    editor_render(&g_ed, g_renderer);
-
-    /* Snapshot this frame's vp for next frame's velocity buffer (TAA) —
-     * must run after every draw_* call above, which each read r->prev_vp
-     * (still holding LAST frame's vp at this point) via their own u_prev_mvp
-     * uniform. */
-    renderer_end_frame(g_renderer);
-
-    /* [geometry] done — [shadow] (world mesh, depth-only, from the
-     * light's POV), then resolve [lighting] (G-buffer -> HDR, shadow-
-     * mapped) and [tonemap] (HDR -> default framebuffer), per phi.md's
-     * deferred pipeline. Both build targets go through this now — wasm
-     * used to fall back to a plain glClear + forward shader here, before
-     * WebGL2 made MRT/float-texture rendering possible in the browser. */
+    /* [geometry]/[shadow]/[lighting]/.../[fxaa] all now happen inside the
+     * Scene panel specifically (ui.c's draw_panel_scene), scoped to that
+     * panel's own screen sub-rectangle rather than always filling the
+     * whole window — see gbuffer_set_viewport_offset()'s comment in
+     * gbuffer.h for why this needed a small Phase-0 extension. ui_render()
+     * draws the branding bar and every panel (Scene included, via the
+     * draw_scene_content callback below) in one call. */
     static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
-    gbuffer_render_shadow_map(g_gbuf, g_mesh, light_dir);
-    float inv_vp[16];
-    renderer_get_inverse_view_proj(g_renderer, inv_vp);
-    gbuffer_resolve(g_gbuf, light_dir, sky, inv_vp);
+    float sky[3];
+    renderer_get_sky_color(sky);
+    ui_layout(cw, ch);
+    UIRenderContext ui_ctx = {0};
+    ui_ctx.renderer = g_renderer;
+    ui_ctx.gbuf = g_gbuf;
+    ui_ctx.world_mesh = g_mesh;
+    ui_ctx.gs = &g_gs;
+    ui_ctx.local_player_id = g_ns.local_id;
+    ui_ctx.test_obj = &g_test_mesh_object;
+    ui_ctx.test_obj_loaded = g_test_mesh_loaded;
+    ui_ctx.console = &g_cs;
+    memcpy(ui_ctx.light_dir, light_dir, sizeof(light_dir));
+    memcpy(ui_ctx.sky_color, sky, sizeof(sky));
+    ui_ctx.draw_scene_content = scene_content_cb;
+    ui_render(&ui_ctx);
 
     /* HUD */
     int bots_alive = 0;
@@ -272,10 +282,24 @@ static void main_loop(void *userdata) {
      * available on either target, so sample the center pixel via
      * glReadPixels periodically instead. printf reaches the browser
      * console on wasm too (Emscripten redirects stdout there), so this
-     * is useful cross-platform now, not just a native-only workaround. */
+     * is useful cross-platform now, not just a native-only workaround.
+     *
+     * The Scene panel no longer always fills the whole window (it's one
+     * area in the golden-ratio default layout), so "center" now means the
+     * Scene panel's own center, not the window's — ui_get_scene_rect()
+     * gives its current on-screen rect (top-left origin, y-down); g_gbuf's
+     * own w/h already equal the panel's size (draw_panel_scene resizes it
+     * to match every frame), so object-id picks use G-buffer-local
+     * coordinates directly, while the default-framebuffer readPixels below
+     * needs real window pixel coordinates (accounting for the panel's
+     * screen position and GL's bottom-left origin). */
     static int s_frame = 0;
     ++s_frame;
-    if (s_frame == 30 || s_frame % 120 == 0) {
+    float scene_x = 0, scene_y = 0, scene_w = 0, scene_h = 0;
+    int have_scene = ui_get_scene_rect(&scene_x, &scene_y, &scene_w, &scene_h);
+    if (have_scene && (s_frame == 30 || s_frame % 120 == 0)) {
+        int screen_cx = (int)(scene_x + scene_w * 0.5f);
+        int screen_cy_gl = ch - (int)(scene_y + scene_h * 0.5f);  /* y-down panel coord -> GL bottom-left */
         /* GL_RGBA, not GL_RGB — WebGL2's readPixels only guarantees
          * RGBA/UNSIGNED_BYTE as a legal format/type combination for an
          * arbitrary framebuffer; GL_RGB raised INVALID_OPERATION there
@@ -286,12 +310,13 @@ static void main_loop(void *userdata) {
          * this is what looked like "rendering frozen" during the last
          * verification pass. */
         unsigned char px[4];
-        glReadPixels(cw / 2, ch / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-        printf("[main] frame %d center pixel RGB = (%d,%d,%d)\n", s_frame, px[0], px[1], px[2]);
+        glReadPixels(screen_cx, screen_cy_gl, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("[main] frame %d Scene panel center pixel RGB = (%d,%d,%d)\n", s_frame, px[0], px[1], px[2]);
         /* readPixels object-id selection (Phase 0 deliverable): pick the
-         * center pixel's object id from the G-buffer's object_id target. */
-        unsigned int picked = gbuffer_pick_object_id(g_gbuf, cw / 2, ch / 2);
-        printf("[main] frame %d center pixel object_id = %u (0xFFFFFFFF = nothing drawn there)\n",
+         * center pixel's object id from the G-buffer's object_id target
+         * (G-buffer-local coords -- see comment above). */
+        unsigned int picked = gbuffer_pick_object_id(g_gbuf, g_gbuf->w / 2, g_gbuf->h / 2);
+        printf("[main] frame %d Scene panel center pixel object_id = %u (0xFFFFFFFF = nothing drawn there)\n",
                s_frame, picked);
     }
     if (local && s_frame % 120 == 0) {
@@ -302,13 +327,14 @@ static void main_loop(void *userdata) {
     /* One-shot: confirm the Phase 1 test MeshObject (object_id 4001, see
      * g_test_mesh_object) is genuinely rasterized SOMEWHERE on screen, not
      * just loaded into memory — a coarse full-framebuffer object-id scan
-     * rather than relying on the center pixel happening to land on it. */
+     * rather than relying on the center pixel happening to land on it.
+     * G-buffer-local coordinates throughout (see the comment above). */
     static int s_mesh_obj_checked = 0;
-    if (g_test_mesh_loaded && !s_mesh_obj_checked && s_frame == 30) {
+    if (have_scene && g_test_mesh_loaded && !s_mesh_obj_checked && s_frame == 30) {
         s_mesh_obj_checked = 1;
         int found = 0, min_x = -1, max_x = -1, min_y = -1, max_y = -1;
-        for (int y = 0; y < ch; y += 4) {
-            for (int x = 0; x < cw; x += 4) {
+        for (int y = 0; y < g_gbuf->h; y += 4) {
+            for (int x = 0; x < g_gbuf->w; x += 4) {
                 unsigned int id = gbuffer_pick_object_id(g_gbuf, x, y);
                 if (id == 4000u + (unsigned int)g_test_mesh_object.id) {
                     found++;
@@ -351,6 +377,7 @@ int main(void) {
     phi_platform_get_window_size(&w, &h);
     g_renderer = renderer_create(w, h);
     g_gbuf = gbuffer_create(w, h);
+    if (!ui_init()) printf("[main] WARNING: ui_init() failed -- editor UI will not render correctly\n");
 
     /* Build mesh NOW that GL context exists */
     g_mesh = mesh_create();

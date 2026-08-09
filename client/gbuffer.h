@@ -43,6 +43,11 @@
 
 typedef struct {
     int w, h;
+    /* Where the final resolved frame lands in the actual window — see
+     * gbuffer_set_viewport_offset(). Default (0,0): fills the window from
+     * its origin, the only behavior this had before the UI system's Scene
+     * panel needed to host the 3D view in an arbitrary sub-rectangle. */
+    int vp_x, vp_y;
 
     unsigned int fbo;
     unsigned int tex_albedo;       /* RGBA8: base color (RGB) + AO (A, unused yet, always 1.0) */
@@ -138,6 +143,14 @@ typedef struct {
 GBuffer *gbuffer_create(int w, int h);
 void     gbuffer_destroy(GBuffer *gb);
 void     gbuffer_resize(GBuffer *gb, int w, int h);
+
+/* Sets where gbuffer_resolve's final FXAA blit lands in the actual window
+ * (default 0,0 — bottom-left origin, GL's normal convention, matching a
+ * full-window fill). Combined with gbuffer_resize(gb, panel_w, panel_h),
+ * this hosts the 3D scene inside an arbitrary sub-rectangle of the window
+ * instead of always filling it — what the UI system's Scene panel needs.
+ * Takes effect on the next gbuffer_resolve() call, not retroactively. */
+void gbuffer_set_viewport_offset(GBuffer *gb, int x, int y);
 
 /* Binds the G-buffer FBO and clears it (depth to far, object_id to the
  * 0xFFFFFFFF "no object" sentinel — color attachments are left as-is:

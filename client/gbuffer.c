@@ -627,6 +627,11 @@ void gbuffer_resize(GBuffer *gb, int w, int h) {
     free(fresh);
 }
 
+void gbuffer_set_viewport_offset(GBuffer *gb, int x, int y) {
+    gb->vp_x = x;
+    gb->vp_y = y;
+}
+
 void gbuffer_begin_geometry_pass(GBuffer *gb, const float *sky_color) {
     (void)sky_color;  /* background is handled in the lighting pass via depth, not by clearing color attachments here */
     glBindFramebuffer(GL_FRAMEBUFFER, gb->fbo);
@@ -999,7 +1004,14 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
 
     /* ---- FXAA: TAA-resolved texture -> default framebuffer ---- */
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, gb->w, gb->h);
+    /* vp_x/vp_y (default 0,0): where in the actual window this lands —
+     * every earlier pass in this function renders into its OWN private
+     * texture at (0,0) within that texture, so only this final blit into
+     * the shared default framebuffer needs an offset, for hosting the 3D
+     * scene inside an arbitrary sub-rectangle (the UI system's Scene
+     * panel) instead of always filling the whole window. See
+     * gbuffer_set_viewport_offset(). */
+    glViewport(gb->vp_x, gb->vp_y, gb->w, gb->h);
     glUseProgram(gb->fxaa_program);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, taa_write_tex);
     glUniform1i(gb->fxaa_u_tex, 0);
