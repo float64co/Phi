@@ -298,11 +298,23 @@ void console_update(ConsoleState *cs, InputState *inp, EditorState *ed,
      * to us when it's what triggered the unlock, so our own escape_edge
      * handling below can't be relied on to close the console in that case.
      * Watching pointer_locked directly catches it regardless of whether we
-     * ever see the keydown. */
-    if (cs->open && !inp->pointer_locked) {
+     * ever see the keydown.
+     *
+     * Only fires on the *transition* from locked to unlocked (tracked via
+     * s_was_pointer_locked below), not "currently unlocked" as a standing
+     * condition — pointer lock now defaults off and has no click-to-engage
+     * gesture on any platform (see this session's "stop stealing the
+     * mouse" fix), so treating "not locked" as reason enough to force-close
+     * meant the console closed itself one frame after every open and could
+     * never actually be used. The original scenario this guards against
+     * (Escape drops lock, console should close too) is still handled: that
+     * IS a locked->unlocked transition. */
+    static int s_was_pointer_locked = 0;
+    if (cs->open && s_was_pointer_locked && !inp->pointer_locked) {
         cs->open = 0;
         input_set_console_open(inp, 0);
     }
+    s_was_pointer_locked = inp->pointer_locked;
 
     /* Dispatch any bound keys pressed this frame. input.c only captures
      * pressed_codes while the console isn't open, so this is naturally

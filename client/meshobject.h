@@ -40,3 +40,13 @@ void quat_to_mat4(const Quat *q, float *out16);
  * for the whole object (no per-face material assignment yet, that's an
  * editor feature out of scope for this foundation slice). */
 void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeMesh *hem, float mat_id);
+
+/* Real ray/triangle picking against obj's actual world-space geometry
+ * (Möller–Trumbore, not a bounding-box approximation) — returns 1 and
+ * sets *out_t (ray parameter of the nearest hit) if ray_origin+t*ray_dir
+ * hits any triangle, 0 otherwise. ray_dir need not be pre-normalized (t
+ * is just a scale factor along whatever direction was passed), but the
+ * caller comparing t across multiple objects/calls should keep it
+ * consistent (a normalized dir makes t a literal world-space distance,
+ * which is what main.c's picking code uses it for). */
+int meshobject_ray_pick(const MeshObject *obj, Vec3f ray_origin, Vec3f ray_dir, float *out_t);

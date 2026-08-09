@@ -557,10 +557,14 @@ implementation:
   and the whole session runs GL-errorless — same real-browser verification
   standard as every render-pipeline feature in Phase 0.
 
-**Not started**: the native UI system (DNA/RNA property system, SDF font
-widget rendering, panel layout — see below), transform gizmos, ray-vs-mesh
-picking, extrude/inset/loop-cut editing operations, PBR material assignment,
-Voronoi fracture tooling, and Bullet physics integration for mesh objects.
+**Not started** (as of this section's original writing; see the Native UI
+System section below and the dated status note after it for what's landed
+since): the native UI system (DNA/RNA property system, SDF font widget
+rendering, panel layout), transform gizmos, ray-vs-mesh picking, extrude/
+inset/loop-cut editing operations, PBR material assignment, Voronoi
+fracture tooling, and Bullet physics integration for mesh objects (the
+last of these is genuinely Phase 2's own scope — see that section — and
+isn't being pursued under Phase 1 despite being listed here originally).
 
 ### Architecture
 
@@ -872,6 +876,49 @@ after the fix.
   screenshot), right-clicked again and clicked Add (log confirmed reload,
   Outliner row reappeared in a screenshot) — all via `python-xlib`'s
   XTest extension, not just read from the code.
+- **Ray-vs-mesh picking** (`meshobject.c`'s `meshobject_ray_pick`,
+  Phase 1's own first item, started once the UI click-plumbing above made
+  it reachable) — real Möller–Trumbore ray/triangle intersection against
+  a MeshObject's actual world-space triangle data (`RenderMesh`'s
+  flattened, vertex-duplicated-per-triangle layout, transformed by the
+  object's position + `quat_to_mat4` rotation — not a bounding-box
+  approximation), returning the *nearest* hit across every triangle so
+  overlapping geometry resolves to the visually-correct face. `main.c`'s
+  `try_pick_object` constructs the click ray from the same camera basis
+  `renderer.c`'s `mat4_look_dir`/`editor.c`'s `view_dir` already use
+  (matched exactly, not re-derived, so a pick always agrees with what's
+  actually rendered), using the Scene panel's own on-screen rect and
+  aspect ratio for the NDC conversion. A Scene-panel click (outside octree-
+  edit mode) is now always a select-or-deselect action — hit selects via
+  the existing `ui_set_selected_object()` 4000+id convention, miss
+  deselects — and this counts as UI-consumed for fire-gating too, so
+  picking an object can't also fire a rocket on the same click (same
+  reasoning the UI-chrome-click gating already established). Verified
+  live via `python-xlib`: a deterministic unit-style check (aiming a ray
+  straight at the object from a known camera position derived from the
+  existing frame-30 diagnostic-camera override) confirmed an exact
+  expected hit distance (camera 30 units back, object's 8-unit half-
+  extent, hit at t=22.00 — not just "some non-zero result"), then a real
+  synthesized mouse click through the full UI pipeline was screenshotted
+  hitting (Outliner/Properties updated to show the selection) and missing
+  (both cleared) in separate rounds.
+- **Found and fixed while verifying picking**: the console (`console.c`)
+  had been unusable in practice since the "stop stealing the mouse"
+  round — `console_update()` force-closed it every single frame it was
+  open unless `pointer_locked` was true, and pointer lock now defaults
+  off with no click-to-engage gesture on any platform, so the console
+  closed itself one frame after every open. That check existed for one
+  specific scenario (Chrome doesn't always deliver an Escape keydown when
+  what triggered it was exiting pointer lock, so the console needs to
+  watch `pointer_locked` directly to close in sync) but was written as a
+  standing condition ("not currently locked") rather than a transition
+  ("just lost lock while open"). Fixed by tracking the previous frame's
+  `pointer_locked` state and only force-closing on an actual
+  locked→unlocked transition — the original Escape scenario is still
+  covered (that is such a transition), but the console can now actually
+  be opened and used at all now that lock is normally off. Directly
+  relevant to the Console-panel-as-Python-REPL work below, which depends
+  on the console being reachable in the first place.
 - **Gbuffer extension**: `gbuffer_set_viewport_offset(gb, x, y)` — a small,
   deliberate extension to Phase 0's (already shipped, browser-verified)
   deferred pipeline. Every pass except the very last (FXAA's blit to the

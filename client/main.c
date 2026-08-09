@@ -164,6 +164,49 @@ static void scene_content_cb(void *userdata) {
     editor_render(&g_ed, g_renderer);
 }
 
+/* Ray-vs-mesh picking: constructs a world-space ray from a screen click
+ * inside the Scene panel's own content rect, through the same camera
+ * basis renderer.c's build_vp/mat4_look_dir and editor.c's view_dir
+ * already use (fwd = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch)),
+ * right = (cos(yaw), 0, -sin(yaw)) — matched exactly, not re-derived, so
+ * a picked ray always agrees with what's actually rendered), then tests
+ * it against g_test_mesh_object's real triangle data (meshobject.c's
+ * meshobject_ray_pick, Möller–Trumbore — not a bounding-box guess).
+ * Clicking the object selects it (same 4000+id convention Outliner/
+ * gbuffer picking already use); clicking empty Scene content deselects,
+ * matching normal editor click-away-to-deselect behavior. */
+static void try_pick_object(float scene_x, float scene_y, float scene_w, float scene_h, int click_x, int click_y) {
+    if (scene_w < 1.0f || scene_h < 1.0f) return;
+    float ndc_x = 2.0f * ((float)click_x - scene_x) / scene_w - 1.0f;
+    float ndc_y = 1.0f - 2.0f * ((float)click_y - scene_y) / scene_h;  /* screen y-down -> NDC y-up */
+
+    float yaw = g_renderer->cam_yaw, pitch = g_renderer->cam_pitch;
+    float sy = sinf(yaw),  cy = cosf(yaw);
+    float sp = sinf(pitch), cp = cosf(pitch);
+    Vec3f fwd   = { -sy*cp, sp, -cy*cp };
+    Vec3f right = {  cy,    0.0f, -sy   };
+    Vec3f up    = {  sy*sp, cp,   cy*sp };
+
+    float half_h = tanf(g_renderer->fov_y * 0.5f);
+    float half_w = half_h * (scene_w / scene_h);
+    Vec3f dir = {
+        fwd.x + right.x * ndc_x * half_w + up.x * ndc_y * half_h,
+        fwd.y + right.y * ndc_x * half_w + up.y * ndc_y * half_h,
+        fwd.z + right.z * ndc_x * half_w + up.z * ndc_y * half_h
+    };
+    float len = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
+    if (len > 1e-6f) { dir.x /= len; dir.y /= len; dir.z /= len; }
+
+    Vec3f origin = { g_renderer->cam_pos[0], g_renderer->cam_pos[1], g_renderer->cam_pos[2] };
+
+    float t;
+    if (g_test_mesh_loaded && meshobject_ray_pick(&g_test_mesh_object, origin, dir, &t)) {
+        ui_set_selected_object(4000u + (unsigned int)g_test_mesh_object.id);
+    } else {
+        ui_set_selected_object(0xFFFFFFFFu);
+    }
+}
+
 /* ---- Main loop ---- */
 static void main_loop(void *userdata) {
     (void)userdata;
@@ -226,6 +269,29 @@ static void main_loop(void *userdata) {
     if (g_inp.lmb_click) {
         g_inp.lmb_click = 0;
         ui_consumed_click = ui_on_mouse_button(g_inp.mouse_x, g_inp.mouse_y, 0, 1, &ui_ctx);
+        /* Same "offer to UI chrome first, then Scene content, then only if
+         * the editor isn't active" pattern as the rmb_click branch below —
+         * a real ray-vs-mesh pick (see try_pick_object) rather than only
+         * being selectable via the Outliner row. A Scene-panel click here
+         * is now ALWAYS interpreted as a select-or-deselect editorial
+         * action (hit selects, miss deselects — see try_pick_object), so
+         * it counts as UI-consumed for the fire-gating below too: without
+         * that, every object-pick click would ALSO fire a rocket on the
+         * same LMB press, the same double-action problem the UI-chrome
+         * gating already solves for panel clicks. This does mean plain
+         * clicking no longer fires within the Scene panel outside octree-
+         * edit mode -- a deliberate call, not an oversight: Phi is editor-
+         * first now (see phi.md), and conflating "select this object" with
+         * "fire a rocket" on the same click reads as a bug, not a feature. */
+        if (!ui_consumed_click && !g_ed.active) {
+            float sx, sy, sw, sh;
+            if (ui_get_scene_rect(&sx, &sy, &sw, &sh) &&
+                (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
+                (float)g_inp.mouse_y >= sy && (float)g_inp.mouse_y < sy + sh) {
+                try_pick_object(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y);
+                ui_consumed_click = 1;
+            }
+        }
     }
     if (g_inp.rmb_click) {
         g_inp.rmb_click = 0;
