@@ -35,7 +35,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/halfedge_gltf.c \
 	$(SRCDIR)/meshobject.c
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress
 
 all: wasm native
 
@@ -174,6 +174,15 @@ $(OUT_MP_TEST_WIN32): $(MP_TEST_SRCS) | $(BUILDDIR)
 	chmod +x $(OUT_MP_TEST_WIN32)
 	@echo "mp_test_win32 build complete -> $(OUT_MP_TEST_WIN32)"
 
+MP_STRESS_SRCS := $(SRCDIR)/mp_stress_test_main.c $(SRCDIR)/mp_port.c $(MP_EMBED_SRCS)
+OUT_MP_STRESS  := $(BUILDDIR)/mp_stress
+
+mp_stress: $(OUT_MP_STRESS)
+
+$(OUT_MP_STRESS): $(MP_STRESS_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_STRESS_SRCS) -o $(OUT_MP_STRESS) -lm
+	@echo "mp_stress build complete -> $(OUT_MP_STRESS)"
+
 # No -s ENVIRONMENT=web here (unlike the real wasm target) — this is a
 # self-test artifact, run under `node` for fast local verification, not
 # something shipped to a browser. The real game's wasm build stays
@@ -189,7 +198,7 @@ $(OUT_MP_TEST_WASM): $(MP_TEST_SRCS) | $(BUILDDIR)
 
 # ---------------------------------------------------------------
 clean:
-	rm -f $(OUT_JS) $(OUT_WASM) $(WWWDIR)/game.wasm.map $(OUT_NATIVE) $(OUT_WIN32) $(OUT_MP_TEST) $(OUT_MP_TEST_WIN32) $(OUT_MP_TEST_WASM) $(BUILDDIR)/mp_test_wasm.wasm
+	rm -f $(OUT_JS) $(OUT_WASM) $(WWWDIR)/game.wasm.map $(OUT_NATIVE) $(OUT_WIN32) $(OUT_MP_TEST) $(OUT_MP_TEST_WIN32) $(OUT_MP_TEST_WASM) $(BUILDDIR)/mp_test_wasm.wasm $(OUT_MP_STRESS)
 
 watch:
 	@echo "Watching for changes..."

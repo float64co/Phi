@@ -1000,6 +1000,44 @@ exception from an unset stack limit — root-caused via `gdb`, worked around,
 documented at the fix site for when this needs to land in Phi's real
 MicroPython init path too).
 
+**Performance against the concrete scale targets given for this work**
+(~5000 nodes in a graph, ~280 concurrent lightweight scripted entities —
+200 NPCs + 80 vehicles, sized off comparable AAA crowd/graph densities):
+a synthetic stress-test harness (`client/mp_stress_test_main.c`, `make
+mp_stress`, not the real node-graph or NPC system — neither exists yet)
+measured actual per-call overhead rather than assuming it. Node-dispatch
+model: 5000 sequential C→Python function calls, matching the evaluator's
+"once per node, not per vertex" cost model. Entity-tick model: 280
+concurrent Python generator objects (a stand-in for `uasyncio` tasks —
+real `uasyncio` needs file/frozen-module import this no-filesystem
+embedding doesn't have yet — driven through the same C-level
+`mp_obj_gen_resume` mechanism `async`/`await` coroutines use, so it
+measures the same underlying per-resume cost), round-robin-driven for a
+few ticks each.
+
+| | Native (x86_64) | wasm (via Node, no browser JIT either way) |
+|---|---|---|
+| 5000 node dispatches | 0.14 ms total (0.03 µs/call) | 10.1 ms total (2.0 µs/call) |
+| 1120 entity-tick resumes (280 × 4) | 0.04 ms total (0.03 µs/resume) | 2.1 ms total (1.8 µs/resume) |
+
+wasm is ~50-70x slower per call than native here — expected and consistent
+with earlier research into this project's Python-implementation choice
+(no WASM target gets a JIT; MicroPython's interpreter loop pays full
+per-bytecode cost there). Both are still comfortably inside a 16.6ms frame
+budget at these exact target scales, but the margin differs a lot by
+platform: native has ~128x headroom even for a naive full-graph-every-
+frame re-evaluation; wasm has only ~2x headroom for that same naive case.
+This is exactly why Phase 6's dirty-flagging design (re-evaluate only the
+subgraph that actually changed, not all 5000 nodes every frame) isn't
+just a nice-to-have — on the real deployment target (the browser, not
+this native dev loop), it's likely load-bearing at anywhere near the full
+5000-node target. Entity ticking has comfortable headroom on both
+platforms even in the synthetic worst case (every entity resumes every
+frame, no LOD/staggering) — 0.1% of budget on native, 3.1% on wasm — but
+that's 280 *trivial* 3-yield tasks; a real NPC/vehicle coroutine doing
+actual decision logic per resume will cost more than this floor number,
+so this isn't a substitute for testing real behavior scripts once they exist.
+
 **Not started**: the actual C API surface (`phi.mesh_object`, `phi.raycast`,
 scene bindings, etc. — the "C API surface (initial)" section below is still
 a design sketch, not implemented against the embedding), and MicroPython
