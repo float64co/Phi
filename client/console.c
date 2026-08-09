@@ -1,6 +1,8 @@
 #include "console.h"
+#include "mp_port.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static ConsoleState *s_cs = NULL;
 
@@ -15,6 +17,28 @@ static void log_push(ConsoleState *cs, const char *line) {
         strncpy(cs->log[CONSOLE_LOG_LINES - 1], line, CONSOLE_LINE_LEN - 1);
         cs->log[CONSOLE_LOG_LINES - 1][CONSOLE_LINE_LEN - 1] = 0;
     }
+}
+
+/* Splits Python output (real print() output, potentially several lines,
+ * or a multi-line exception traceback -- both come back from phi_mp_exec
+ * as one string, see mp_port.h) on '\n' and log_push()es each line
+ * separately, so the scrollback shows real line breaks instead of one
+ * giant run-on entry. Any single line longer than CONSOLE_LINE_LEN gets
+ * truncated by log_push itself, same as every other console message. */
+static void log_push_multiline(ConsoleState *cs, const char *text) {
+    if (!text || !text[0]) return;
+    const char *start = text;
+    const char *nl;
+    while ((nl = strchr(start, '\n')) != NULL) {
+        char line[CONSOLE_LINE_LEN];
+        size_t len = (size_t)(nl - start);
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, start, len);
+        line[len] = 0;
+        log_push(cs, line);
+        start = nl + 1;
+    }
+    if (*start) log_push(cs, start);   /* trailing partial line, no final newline */
 }
 
 static void history_push(ConsoleState *cs, const char *line) {
@@ -42,13 +66,15 @@ static void print_help(ConsoleState *cs) {
     log_push(cs, "bind <key> <cmd> | unbind <key>");
     log_push(cs, "matcolor r g b | matmetal v | matrough v | matemit r g b");
     log_push(cs, "  (act on the last face right/left-clicked on the MeshObject)");
+    log_push(cs, "anything else runs as real Python (a real embedded interpreter --");
+    log_push(cs, "  no special sandboxing beyond what MicroPython's own build provides)");
 }
 
 void console_init(ConsoleState *cs) {
     memset(cs, 0, sizeof(*cs));
     cs->history_pos = -1;
     s_cs = cs;
-    log_push(cs, "Qek console.");
+    log_push(cs, "Qek console + Python.");
     print_help(cs);
 }
 
@@ -306,8 +332,21 @@ static void console_dispatch(ConsoleState *cs, EditorState *ed, NetState *ns,
             }
         }
     } else {
-        snprintf(out, sizeof(out), "unknown command: %s (try 'help')", cmd);
-        log_push(cs, out);
+        /* Not a recognized Qek dev-command -- try it as real Python
+         * instead (Phase 1's "Console panel becomes a real Python REPL",
+         * see mp_port.h/phi.md; explicitly NOT Phase 5's phi.emit/
+         * ctx.prop/@phi.panel/@phi.node decorator API surface, just
+         * genuine code execution through the same embedded interpreter
+         * client/mp_test_main.c already proved works end to end). Runs
+         * the ORIGINAL line, not just `cmd` (a Python statement can be
+         * more than one token) -- this is real code execution, so
+         * whatever safety/sandboxing MicroPython's own build already
+         * provides (no filesystem/import/eval-from-file, see
+         * mpconfigport.h) is what's in effect; nothing extra is added
+         * here, and nothing extra should be assumed either. */
+        char *output = phi_mp_exec(line);
+        log_push_multiline(cs, output);
+        free(output);
     }
 }
 

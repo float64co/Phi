@@ -26,6 +26,7 @@
  * (e.g. "linux", "esp32"); MicroPython's default config has no fallback for
  * it, it just expects every port to set one.
  */
+#include <stddef.h>   /* size_t, for phi_mp_capture_output's declaration below */
 #include <port/mpconfigport_common.h>
 #define MICROPY_CONFIG_ROM_LEVEL   (MICROPY_CONFIG_ROM_LEVEL_FULL_FEATURES)
 #define MICROPY_ENABLE_COMPILER    (1)
@@ -72,3 +73,15 @@
  * meshobject.c, ...) — no reason for Python-side numbers to be a different
  * width from the C values they end up feeding. */
 #define MICROPY_FLOAT_IMPL         (MICROPY_FLOAT_IMPL_FLOAT)
+
+/* Routes every print()/exception-traceback byte through mp_port.c's
+ * phi_mp_capture_output() instead of the default MP_PLAT_PRINT_STRN
+ * (mpconfig.h's fallback -> mphalport.c's mp_hal_stdout_tx_strn_cooked ->
+ * plain printf), so the Console panel can actually display what a typed
+ * command printed -- the real process stdout is invisible from inside
+ * the game window. mp_plat_print (py/mpprint.c) is the ONLY output path
+ * MicroPython uses here regardless (MICROPY_PY_IO/MICROPY_PY_SYS_STDFILES
+ * are both off above, which compiles out the alternate sys.stdout-based
+ * path), so this one override covers everything. */
+void phi_mp_capture_output(const char *str, size_t len);
+#define MP_PLAT_PRINT_STRN(str, len) phi_mp_capture_output(str, len)

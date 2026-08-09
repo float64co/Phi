@@ -1284,6 +1284,108 @@ after the fix.
     path of its own to verify that way regardless (it's a pure geometry-
     to-disk precompute), so the gap is smaller here than for the PBR
     shader work, but still noted honestly.
+- **MicroPython wired into the real build; Console panel becomes a real
+  Python REPL** — the last item of this loop's Phase 1 completion pass.
+  Genuine code execution reachable from the shipped editor now, not a
+  standalone self-test binary anymore. Explicitly NOT Phase 5's
+  `phi.emit`/`ctx.prop`/`@phi.panel`/`@phi.node` decorator API surface —
+  the user's own instruction for this loop was "just need the Console
+  working," and that's the whole scope of this item.
+  - **Build integration**: `client/mp_port.c`'s hand-written glue and the
+    generated `client/micropython_embed/` tree (previously linked only
+    into the standalone `mp_test`/`mp_stress` self-test binaries) are now
+    part of `COMMON_SRCS` and link into all three real targets
+    (`phi_native`, `phi_win32.exe`, `game.wasm`) with zero symbol
+    conflicts against the existing ~20-file engine codebase or each
+    other — genuinely surprising for a from-scratch language runtime this
+    size dropped into an existing C project, verified by the build simply
+    succeeding rather than assumed. `MP_EMBED_DIR`/`MP_EMBED_SRCS` moved
+    up in the Makefile (before `COMMON_SRCS`, which now references them)
+    since `COMMON_SRCS` uses immediate `:=` expansion.
+  - **New Console-facing API** (`client/mp_port.h`, new header — the
+    existing self-tests reached into MicroPython's own headers directly,
+    `console.c` shouldn't have to): `phi_mp_init(stack_top)` (same
+    `mp_embed_init` + `mp_stack_set_limit` workaround `mp_test_main.c`
+    already proved necessary, see its own comment) and `phi_mp_exec(code)`
+    — runs one block of Python through the already exception-safe
+    `mp_embed_exec_str` (an uncaught exception prints a traceback via
+    `mp_plat_print` rather than crashing, see
+    `micropython_embed/port/embed_util.c`) and returns everything printed
+    during the call as one malloc'd string.
+  - **Output capture**: `mpconfigport.h` overrides `MP_PLAT_PRINT_STRN`
+    (guarded `#ifndef` in `mpconfig.h`, an intentional port-override
+    point, not a hack) to route every `print()`/traceback byte through a
+    new `phi_mp_capture_output()` in `mp_port.c` instead of the default
+    `mp_hal_stdout_tx_strn_cooked` (`mphalport.c`, plain `printf` — invisible
+    from inside the game window). Confirmed `MICROPY_PY_IO`/
+    `MICROPY_PY_SYS_STDFILES` are both off (already set, for the no-real-
+    filesystem reasons `mpconfigport.h`'s own header comment gives), which
+    compiles out `mpprint.h`'s alternate `sys.stdout`-based output path —
+    `mp_plat_print` is genuinely the only path, so this one override
+    covers everything. **Side effect, worth being honest about**: this
+    override is global to the whole embedded interpreter, so it also now
+    applies to the pre-existing `mp_test`/`mp_stress` self-test binaries
+    — a `print()` call inside one of `mp_test_main.c`'s test scripts (step
+    2's diagnostic `"py side saw: 42"`) no longer reaches the terminal,
+    silently captured into a buffer that binary never reads. Confirmed
+    this doesn't affect correctness: both binaries still `PASS` (rebuilt
+    and re-run to check, not assumed) since their actual assertions read
+    Python state back via `mp_obj_get_int` etc., not by parsing printed
+    text — only that one cosmetic diagnostic line's terminal visibility
+    changed.
+  - **`main.c` wiring**: `phi_mp_init(&mp_stack_top)` is called once at
+    startup, with `mp_stack_top` a local declared at `main()`'s own
+    top-level scope (not inside a helper). This matters: MicroPython's GC
+    does a conservative scan of the C stack between the current stack
+    pointer and this recorded boundary on every collection, so it has to
+    stay valid for every stack depth the interpreter could ever be called
+    from later in the program's life. Trivially true for native/win32
+    (`phi_platform_set_main_loop` blocks in a real loop inside `main()`'s
+    own still-active frame for the rest of the process's life) and, for
+    wasm, matches the standard Emscripten pattern for exactly this kind of
+    conservative GC (`emscripten_set_main_loop`'s `simulate_infinite_loop`
+    mode keeps a consistent per-callback stack depth close to the original
+    call site — not invented here, documented in `mp_port.h`'s own
+    comment).
+  - **`console.c` wiring**: `console_dispatch`'s final `else` (previously
+    `"unknown command: %s"`) now calls `phi_mp_exec(line)` — the ORIGINAL
+    typed line, not just the first token, since a Python statement can be
+    more than one word — and splits the captured output on `\n` into the
+    scrollback via a new `log_push_multiline` helper, so real multi-line
+    `print()` output or a traceback reads as actual separate lines rather
+    than one run-on entry. Every existing Qek dev-command (`pos`/`tp`/
+    `grid`/... through `matemit`) is still tried FIRST and still wins if
+    matched — Python is strictly the fallback for anything unrecognized,
+    per the user's own explicit instruction to preserve these. `help`'s
+    text and the console's opening banner both updated to mention this.
+    `console_update`/`console_submit`/`console_dispatch` all gained
+    `MeshObject*`/`edit_face` parameters two commits ago for the
+    `matcolor`/etc. commands — no further signature changes needed here,
+    `phi_mp_exec` doesn't need that context.
+  - **Verification**: a new standalone harness (`client/
+    mp_console_test_main.c`, `make mp_console_test`, no GL dependency,
+    distinct from `mp_test` which validates Phase 5's decorator patterns —
+    out of scope here) checks the actual mechanism `console.c`'s fallback
+    now depends on, real interpreter behavior not mocked: `print()` output
+    is genuinely captured (not lost to the real stdout); real computation
+    happens (`21 * 2` evaluates, doesn't just echo); multi-line output
+    round-trips with real line breaks intact; an uncaught exception is
+    captured as a readable traceback and the process stays alive
+    (confirmed by the next check actually running, not just a return
+    code); the capture buffer correctly resets between calls with no
+    cross-contamination; and — importantly — globals persist across
+    separate `phi_mp_exec` calls (a variable set in one call is visible
+    and usable in the next), confirming this behaves like a real REPL
+    session and not a fresh throwaway interpreter per line. All checks
+    pass, plus `mp_test`/`mp_stress` re-run clean (see the output-capture
+    side-effect note above). As with the PBR/fracture work earlier in
+    this same loop, the actual Console panel's live keystroke-to-
+    scrollback round trip could not be screenshot-verified this pass (the
+    X server remained fully unresponsive throughout) — the interpreter
+    plumbing underneath it has no GL/window dependency and is fully
+    verified; the UI glue connecting it to real keyboard input and the
+    on-screen scrollback panel is code-reviewed but not live-verified,
+    flagged honestly rather than either claimed or silently skipped.
 
 **Design reference**: evaluated a separate, mature CAD tool's C++/Python UI
 codebase as reference material (brought in temporarily, read-only, removed

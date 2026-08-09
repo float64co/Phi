@@ -12,6 +12,7 @@
 #include "meshobject.h"
 #include "mesh_edit.h"
 #include "fracture.h"
+#include "mp_port.h"
 #include "gizmo.h"
 #include "font.h"
 #include "svg_icon.h"
@@ -722,6 +723,11 @@ static void main_loop(void *userdata) {
 
 /* ---- Entry point ---- */
 int main(void) {
+    /* Declared here, at main()'s own top level, and never touched again --
+     * its ADDRESS (not its value) is what matters, as the GC's conservative
+     * stack-scan upper bound. See mp_port.h's phi_mp_init() comment for why
+     * it has to be captured from exactly this scope. */
+    int mp_stack_top;
 #ifdef _WIN32
     /* Windows console stdout is fully buffered when not attached to a
      * real console (e.g. redirected to a file for headless verification)
@@ -778,6 +784,7 @@ int main(void) {
     /* Editor / console */
     editor_init(&g_ed);
     console_init(&g_cs);
+    phi_mp_init(&mp_stack_top);
 
     /* Network */
     memset(&g_ns, 0, sizeof(g_ns));

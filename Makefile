@@ -19,6 +19,17 @@ BUILDDIR:= build
 
 HDRS := $(wildcard $(SRCDIR)/*.h)
 
+# MicroPython embedding (Phase 5 first slice, now also Phase 1's Console-
+# as-real-Python-REPL piece) -- client/micropython_embed/ is generated
+# output from MicroPython's own ports/embed tooling (see
+# client/mpconfigport.h's header comment); client/mp_port.c/mp_port.h are
+# hand-written. Defined here (before COMMON_SRCS, which now includes it)
+# rather than down in the self-test section below, since COMMON_SRCS uses
+# immediate (:=) expansion and needs these already defined at that point.
+MP_EMBED_DIR  := $(SRCDIR)/micropython_embed
+MP_EMBED_SRCS := $(wildcard $(MP_EMBED_DIR)/*/*.c) $(wildcard $(MP_EMBED_DIR)/*/*/*.c)
+MP_INCLUDES   := -I$(MP_EMBED_DIR) -I$(MP_EMBED_DIR)/port
+
 COMMON_SRCS := \
 	$(SRCDIR)/main.c          \
 	$(SRCDIR)/octree.c        \
@@ -39,9 +50,11 @@ COMMON_SRCS := \
 	$(SRCDIR)/gizmo.c         \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
-	$(SRCDIR)/ui.c
+	$(SRCDIR)/ui.c            \
+	$(SRCDIR)/mp_port.c       \
+	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test
 
 all: wasm native
 
@@ -55,7 +68,9 @@ WASM_CFLAGS := \
 	-O2 \
 	-Wall \
 	-Wextra \
+	-Wno-unused-parameter \
 	-I$(SRCDIR) \
+	$(MP_INCLUDES) \
 	-DEMSCRIPTEN
 
 EMFLAGS := \
@@ -108,7 +123,9 @@ NATIVE_CFLAGS := \
 	-O2 \
 	-Wall \
 	-Wextra \
-	-I$(SRCDIR)
+	-Wno-unused-parameter \
+	-I$(SRCDIR) \
+	$(MP_INCLUDES)
 
 NATIVE_LDFLAGS := -lX11 -lGL -lm -lcrypto
 
@@ -136,7 +153,9 @@ WIN32_CFLAGS := \
 	-O2 \
 	-Wall \
 	-Wextra \
-	-I$(SRCDIR)
+	-Wno-unused-parameter \
+	-I$(SRCDIR) \
+	$(MP_INCLUDES)
 
 WIN32_LDFLAGS := -lopengl32 -lgdi32 -luser32 -lkernel32 -lws2_32 -lbcrypt
 
@@ -181,18 +200,20 @@ $(OUT_FRACTURE_TEST): $(FRACTURE_TEST_SRCS) | $(BUILDDIR)
 	@echo "fracture_test build complete -> $(OUT_FRACTURE_TEST)"
 
 # ---------------------------------------------------------------
-# MicroPython embedding self-test (Phase 5 first slice) — NOT part of the
-# game build. client/micropython_embed/ is generated output from
-# MicroPython's own ports/embed tooling (see client/mpconfigport.h's header
-# comment); client/mp_port.c and client/mp_test_main.c are hand-written.
-# Exists to prove the embedding + decorator patterns phi.md's Phase 1/6
-# design depends on actually work in real MicroPython, independent of the
-# game loop, before any of that gets built into the shipped binary.
+# MicroPython embedding self-test (Phase 5 first slice originally; the
+# embedding itself is now ALSO linked into the real native/win32/wasm
+# builds above, see COMMON_SRCS/MP_INCLUDES near the top of this file --
+# these standalone binaries remain useful as an isolated, game-loop-free
+# way to validate the interpreter itself, independent of Phi's own
+# console/UI wiring around it). client/micropython_embed/ is generated
+# output from MicroPython's own ports/embed tooling (see
+# client/mpconfigport.h's header comment); client/mp_port.c/mp_port.h and
+# client/mp_test_main.c are hand-written. MP_EMBED_DIR/MP_EMBED_SRCS are
+# defined near COMMON_SRCS now, not here, since the real build needs them
+# too.
 # ---------------------------------------------------------------
-MP_EMBED_DIR  := $(SRCDIR)/micropython_embed
-MP_EMBED_SRCS := $(wildcard $(MP_EMBED_DIR)/*/*.c) $(wildcard $(MP_EMBED_DIR)/*/*/*.c)
 MP_TEST_SRCS  := $(SRCDIR)/mp_test_main.c $(SRCDIR)/mp_port.c $(MP_EMBED_SRCS)
-MP_TEST_CFLAGS := -O1 -Wall -Wno-unused-parameter -I$(SRCDIR) -I$(MP_EMBED_DIR) -I$(MP_EMBED_DIR)/port
+MP_TEST_CFLAGS := -O1 -Wall -Wno-unused-parameter -I$(SRCDIR) $(MP_INCLUDES)
 
 OUT_MP_TEST := $(BUILDDIR)/mp_test
 
@@ -201,6 +222,21 @@ mp_test: $(OUT_MP_TEST)
 $(OUT_MP_TEST): $(MP_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_TEST_SRCS) -o $(OUT_MP_TEST) -lm
 	@echo "mp_test build complete -> $(OUT_MP_TEST)"
+
+# Console-facing glue self-test (phi_mp_init/phi_mp_exec/output capture,
+# see mp_port.h) -- distinct from mp_test above (Phase 5 decorator
+# patterns, out of scope here): this is what Phase 1's Console-as-real-
+# Python-REPL piece actually depends on. No GL dependency, same rationale
+# as mesh_edit_test/fracture_test.
+MP_CONSOLE_TEST_SRCS := $(SRCDIR)/mp_console_test_main.c $(SRCDIR)/mp_port.c $(MP_EMBED_SRCS)
+OUT_MP_CONSOLE_TEST   := $(BUILDDIR)/mp_console_test
+
+mp_console_test: $(OUT_MP_CONSOLE_TEST)
+	./$(OUT_MP_CONSOLE_TEST)
+
+$(OUT_MP_CONSOLE_TEST): $(MP_CONSOLE_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_CONSOLE_TEST_SRCS) -o $(OUT_MP_CONSOLE_TEST) -lm
+	@echo "mp_console_test build complete -> $(OUT_MP_CONSOLE_TEST)"
 
 OUT_MP_TEST_WIN32 := $(BUILDDIR)/mp_test_win32.exe
 
