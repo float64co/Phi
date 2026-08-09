@@ -12,6 +12,7 @@
 #include "gizmo.h"
 #include "font.h"
 #include "svg_icon.h"
+#include "asset_browser.h"
 #include "ui.h"
 
 #include <stdlib.h>
@@ -51,33 +52,43 @@ static Vec3f        g_edit_hit_local = {0, 0, 0};  /* local-space hit point pair
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
 static PyConsoleState g_cs     = {0};
+static AssetBrowserState g_ab  = {0};
 static double       g_last_t   = 0.0;
 
-/* Loads assets/cube.gltf into g_test_mesh_object the same way main()'s
- * startup code originally did inline — factored out so the scene
- * right-click context menu's "Add > Mesh Object" (see
- * CTX_ACTION_ADD_MESH below) can reuse it instead of duplicating the
- * glTF -> half-edge -> RenderMesh pipeline call sequence. There's still
- * only ever one test-object slot (see g_test_mesh_object's own comment
- * below) — this spawns/reloads that one slot, it doesn't add a new
- * independent object to a list, since no such list exists yet. */
-static void spawn_test_mesh_object(void) {
-    HalfEdgeMesh *hem = halfedge_load_gltf("assets/cube.gltf");
+/* Loads any glTF/GLB file into the one test-object slot -- generalized
+ * from what used to be spawn_test_mesh_object()'s inline body, once the
+ * Asset Browser's "Load" button (see ui.h's AssetBrowserState) needed to
+ * load an arbitrary server-indexed asset into the same slot, not just the
+ * hardcoded assets/cube.gltf. `scale` bakes a uniform scale directly into
+ * the flattened vertex positions (no scale field on MeshObject yet, see
+ * meshobject.h) -- 16.0 for cube.gltf (a unit, half-extent-0.5 cube that
+ * needs scaling up to read at the scene's existing proportions), 1.0 for
+ * assets authored at that scale already (see tools/gen_test_assets.py).
+ * Frees whatever was previously loaded first -- unlike the old spawn-once
+ * call site, Load can now be clicked while something is already in the
+ * slot, and letting that leak the old render_mesh/hem would be a real
+ * bug, not a hypothetical one. Returns 1 on success, 0 if the file
+ * couldn't be loaded (slot left untouched). */
+static int load_mesh_object_from_path(const char *path, float scale) {
+    HalfEdgeMesh *hem = halfedge_load_gltf(path);
     if (!hem) {
-        printf("[main] failed to load assets/cube.gltf — MeshObject spawn skipped\n");
-        return;
+        printf("[main] failed to load %s — MeshObject load skipped\n", path);
+        return 0;
+    }
+    if (g_test_mesh_loaded) {
+        mesh_destroy(g_test_mesh_object.render_mesh);
+        halfedge_destroy(g_test_mesh_object.hem);
     }
     g_test_mesh_object.id = 1;
     g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
     g_test_mesh_object.orientation = quat_identity();
     g_test_mesh_object.is_static = 1;
     g_test_mesh_object.render_mesh = mesh_create();
-    /* assets/cube.gltf is a unit cube (half-extent 0.5) — scaled up 16x by
-     * baking the scale directly into the flattened vertex positions (no
-     * scale field on MeshObject yet, see meshobject.h). */
-    for (int i = 0; i < hem->vert_count; i++)
-        for (int a = 0; a < 3; a++)
-            hem->verts[i].pos[a] *= 16.0f;
+    if (scale != 1.0f) {
+        for (int i = 0; i < hem->vert_count; i++)
+            for (int a = 0; a < 3; a++)
+                hem->verts[i].pos[a] *= scale;
+    }
     meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, hem);
     /* Kept alive (not halfedge_destroy'd) as the object's live editable
      * representation -- extrude/inset/loop-cut (mesh_edit.c) mutate this
@@ -85,8 +96,20 @@ static void spawn_test_mesh_object(void) {
      * initial build the way it used to only ever be used for. */
     g_test_mesh_object.hem = hem;
     g_test_mesh_loaded = 1;
-    printf("[main] loaded assets/cube.gltf as MeshObject: %d triangles\n",
-           g_test_mesh_object.render_mesh->count / 3);
+    printf("[main] loaded %s as MeshObject: %d triangles\n",
+           path, g_test_mesh_object.render_mesh->count / 3);
+    return 1;
+}
+
+/* Loads assets/cube.gltf into g_test_mesh_object -- factored out so the
+ * scene right-click context menu's "Add > Mesh Object" (see
+ * CTX_ACTION_ADD_MESH below) can reuse it instead of duplicating the
+ * glTF -> half-edge -> RenderMesh pipeline call sequence. There's still
+ * only ever one test-object slot (see g_test_mesh_object's own comment
+ * above) — this spawns/reloads that one slot, it doesn't add a new
+ * independent object to a list, since no such list exists yet. */
+static void spawn_test_mesh_object(void) {
+    load_mesh_object_from_path("assets/cube.gltf", 16.0f);
 }
 
 /* Frees the one test-object slot's GPU-side mesh and marks it unloaded —
@@ -257,6 +280,7 @@ static void main_loop(void *userdata) {
     ui_ctx.test_obj_loaded = g_test_mesh_loaded;
     ui_ctx.edit_face = g_edit_face;
     ui_ctx.console = &g_cs;
+    ui_ctx.asset_browser = &g_ab;
     memcpy(ui_ctx.light_dir, light_dir, sizeof(light_dir));
     memcpy(ui_ctx.sky_color, sky, sizeof(sky));
     ui_ctx.draw_scene_content = scene_content_cb;
@@ -444,6 +468,30 @@ static void main_loop(void *userdata) {
      * console this replaced. */
     pyconsole_update(&g_cs, &g_inp);
 
+    /* Asset Browser one-shot request flags, drained once per frame -- same
+     * "UI raises intent, main.c executes it against the engine/network"
+     * shape as the context-menu action poll above. Set by ui.c's click
+     * routing (hit_test_area's PANEL_ASSET_BROWSER block), cleared here
+     * whether or not the underlying action actually succeeds (a failed
+     * load/connect isn't a reason to keep retrying every frame). */
+    if (g_ab.refresh_requested) {
+        g_ab.refresh_requested = 0;
+        net_send_asset_list_request(&g_ns, NULL);
+    }
+    if (g_ab.load_requested) {
+        g_ab.load_requested = 0;
+        const char *path = NULL;
+        for (int i = 0; i < g_ab.count; i++) {
+            if (g_ab.items[i].id == g_ab.load_requested_id) { path = g_ab.items[i].path; break; }
+        }
+        if (path) load_mesh_object_from_path(path, 1.0f);
+        else printf("[main] asset browser: load requested for id=%u, not in the current list\n", g_ab.load_requested_id);
+    }
+    if (g_ab.delete_requested) {
+        g_ab.delete_requested = 0;
+        net_send_asset_delete(&g_ns, g_ab.delete_requested_id);
+    }
+
     /* --- Render --- */
     /* [geometry]/[shadow]/[lighting]/.../[fxaa] all happen inside the
      * Scene panel specifically (ui.c's draw_panel_scene), scoped to that
@@ -576,6 +624,17 @@ int main(void) {
     /* Console / Python panel */
     pyconsole_init(&g_cs);
     phi_mp_init(&mp_stack_top);
+
+    /* Asset Browser -- see phi.md's "Asset tracking and the Asset Browser
+     * panel". net.c requests the initial asset list itself, right after
+     * the HELLO handshake completes (see net_send_hello's call sites) --
+     * that's the one moment guaranteed to be "actually connected" across
+     * all three platforms (native/win32 connect synchronously before
+     * main_loop starts; wasm's connection is async, so doing it here
+     * instead would silently drop the request if the socket wasn't open
+     * yet on the first frame). */
+    asset_browser_init(&g_ab);
+    asset_browser_set_target(&g_ab);
 
     /* Network -- see phi.md's Phase 1 status, "Client/server model": this
      * is Qek's connection/transport machinery, repurposed rather than

@@ -15,6 +15,19 @@
 #define PKT_HELLO        0x01   /* C->S: [name:16 bytes, NUL-padded]. S->C: [id:u8] */
 #define PKT_CONSOLE_MSG  0x0D   /* S->C: [len:u16 utf8:bytes], appended to the client's Python panel log */
 
+/* Asset CRUD (see phi.md's "Wire protocol: CRUD over a hybrid HTTP + WS
+ * split"): List/Update/Delete are small structured messages that benefit
+ * from this channel's low-latency push, including the CHANGED broadcast
+ * so every connected editor's Asset Browser panel stays in sync. Create
+ * and the raw-bytes half of Read are HTTP instead (server.py's POST
+ * /assets and GET /assets/<path>) -- arbitrary-size binary blobs, not a
+ * fit for this small-packet channel. */
+#define PKT_ASSET_LIST_REQUEST  0x10   /* C->S: [qlen:u8 query:bytes] (qlen=0 = no filter) */
+#define PKT_ASSET_LIST_REPLY    0x11   /* S->C: [count:u16] then count * {id:u32 name_len:u8 name path_len:u8 path tags_len:u8 tags(csv)} */
+#define PKT_ASSET_UPDATE        0x12   /* C->S: [id:u32 name_len:u8 name tags_len:u8 tags(csv)] */
+#define PKT_ASSET_DELETE        0x13   /* C->S: [id:u32] */
+#define PKT_ASSET_CHANGED       0x14   /* S->C: no payload -- "the asset list changed, re-request if you care" */
+
 typedef struct {
     int  connected;
     int  local_id;
@@ -29,6 +42,11 @@ void net_on_message(NetState *ns, const uint8_t *data, int len);
 
 /* Send hello with a client name */
 void net_send_hello(NetState *ns, const char *name);
+
+/* query="" (or NULL) requests the full, unfiltered list. */
+void net_send_asset_list_request(NetState *ns, const char *query);
+void net_send_asset_update(NetState *ns, uint32_t id, const char *name, const char *tags_csv);
+void net_send_asset_delete(NetState *ns, uint32_t id);
 
 #ifndef __EMSCRIPTEN__
 /* Native only: pumps the WebSocket socket (non-blocking) once per frame.

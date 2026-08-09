@@ -1,0 +1,17 @@
+{
+  "asset": { "version": "2.0", "generator": "phi tools/gen_test_assets.py" },
+  "buffers": [ { "uri": "spheroid.bin", "byteLength": 2040 } ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 1032, "target": 34962 },
+    { "buffer": 0, "byteOffset": 1032, "byteLength": 1008, "target": 34963 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 86, "type": "VEC3",
+       "min": [-10.0,-6.0,-10.0], "max": [10.0,6.0,10.0] },
+    { "bufferView": 1, "byteOffset": 0, "componentType": 5123, "count": 504, "type": "SCALAR" }
+  ],
+  "meshes": [ { "primitives": [ { "attributes": { "POSITION": 0 }, "indices": 1, "mode": 4 } ] } ],
+  "nodes": [ { "mesh": 0 } ],
+  "scenes": [ { "nodes": [0] } ],
+  "scene": 0
+}

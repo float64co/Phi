@@ -739,6 +739,181 @@ to group related assets, nothing browsable in the editor. The plan:
   also not decided yet; recorded as an open question rather than resolved
   by assumption.
 
+#### Wire protocol: CRUD over a hybrid HTTP + WS split (design landed 2026-08-09)
+
+Executing the plan above needs an actual protocol between an editor client
+and the authoring server. The two verbs that move an arbitrary-size binary
+blob (Create, Read) go over the existing hand-rolled HTTP layer
+(`server.py`'s `serve_file`/`send_http` already do exactly this for static
+files); the three verbs that are small structured messages where a
+connected editor benefits from a low-latency push (List, Update, Delete)
+go over the existing WS binary game-transport (`net.h`/`net.c`) instead of
+inventing a second HTTP+JSON API — this also lets the server broadcast
+"something changed" to every connected client, the multi-user hook the
+"Client/server model" section's item (B) repurposing was already aimed at.
+No JSON parser gets added to the C client anywhere in this design: list
+replies reuse the exact length-prefixed binary encoding `PKT_CONSOLE_MSG`
+already established, not a new parsing dependency.
+
+**CRUD operates on `.glb` blobs only**, never loose `.gltf`+`.bin` pairs —
+Distribution Model already says assets persist as `.glb` on the server, and
+a single self-contained binary is what makes "upload = one HTTP POST body"
+clean; `cgltf_parse_file` already auto-detects and parses GLB transparently
+(`cgltf_file_type_glb`), so the client-side loader (`halfedge_load_gltf`)
+needs zero changes to accept them. Loose `.gltf`+`.bin` pairs (like the
+existing hand-authored `assets/cube.gltf`) remain loadable by direct path
+the way they always were — they just aren't what CRUD *creates*.
+
+**HTTP** (extends `server.py`'s existing GET-only hand-rolled parser to
+also read a `Content-Length` body and dispatch POST/DELETE):
+- `POST /assets?name=<name>&tags=<csv>` — body is the raw `.glb` bytes.
+  Rejects if the body doesn't start with the GLB magic (`glTF` + version 2
+  header) — CRUD-created assets are GLB, full stop, not sniffed/guessed.
+  Writes to `assets/library/<slug>_<id>.glb`, inserts the SQLite row,
+  broadcasts `PKT_ASSET_CHANGED` to every connected WS client, responds
+  `200` with the new decimal asset id as a plain-text body (no JSON, so no
+  client-side parsing is needed for the one thing native/wasm might want
+  back from a create call).
+- `DELETE /assets/<id>` — deletes the DB row and the backing file,
+  broadcasts `PKT_ASSET_CHANGED`, responds `204`.
+- `GET /assets/<path>` — unchanged, already existed for static files; also
+  how a client fetches an asset's actual bytes once it knows the path from
+  a list reply.
+
+**WS** (new packets in `net.h`, continuing past the existing
+`PKT_HELLO`/`PKT_CONSOLE_MSG`):
+- `PKT_ASSET_LIST_REQUEST = 0x10` C→S: `[qlen:u8 query:bytes]` (`qlen=0` =
+  no filter, list everything).
+- `PKT_ASSET_LIST_REPLY = 0x11` S→C: `[count:u16]` then `count` ×
+  `[id:u32 name_len:u8 name:bytes path_len:u8 path:bytes tags_len:u8
+  tags:bytes(csv)]`.
+- `PKT_ASSET_UPDATE = 0x12` C→S: `[id:u32 name_len:u8 name:bytes
+  tags_len:u8 tags:bytes(csv)]` — renames/retags an existing row (does not
+  touch the backing file). Server applies it and broadcasts
+  `PKT_ASSET_CHANGED`, including back to the sender, so every client's
+  view updates from the same authoritative source rather than the sender
+  optimistically patching its own local cache.
+- `PKT_ASSET_DELETE = 0x13` C→S: `[id:u32]` — same delete as the HTTP verb,
+  exposed over WS too since it's small and structured; both paths call the
+  same `assets_db.delete_asset`.
+- `PKT_ASSET_CHANGED = 0x14` S→C: no payload — "the list changed, re-request
+  if you care." Broadcast after every successful create/update/delete
+  regardless of which transport (HTTP or WS) triggered it.
+
+**SQLite schema** (`server/assets_db.py`, finalizing the sketch above):
+```sql
+CREATE TABLE asset (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,        -- relative to www/, e.g. "assets/library/pyramid_3.glb"
+    name TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE tag (
+    asset_id INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL
+);
+```
+Index file lives at `server/assets.db` (outside `www/`, so it's never
+accidentally served as a static file). Rebuildable by re-scanning
+`assets/library/` if ever lost, matching the "index, not source of truth"
+constraint above — not implemented this pass (no rescan tool yet), but the
+schema doesn't preclude it.
+
+**Client-side data model** (`client/asset_browser.c`/`.h`, new module):
+owns the cached `AssetSummary` list, the binary list-reply parser, and
+simple one-shot request flags (`refresh_requested`, `load_requested_id`,
+`delete_requested_id`) that `main.c` polls once per frame and turns into
+real `net_send_asset_*` calls — the same shape `ui_poll_context_menu_action`
+already established for "UI raises intent, main.c executes it against the
+engine/network," rather than having `ui.c` reach into `net.c` directly
+(today it doesn't include `net.h` at all).
+
+**What's explicitly not built this pass**: no in-editor "export current
+MeshObject as a new asset" flow yet (there's nothing to Create from inside
+the editor, so Create is exercised directly against the HTTP endpoint, not
+through the Asset Browser panel's UI); no inline rename/retag UI in the
+panel (the `PKT_ASSET_UPDATE` protocol path exists and is server-tested,
+just not wired to a button yet); no real HTTP GET client for a native/wasm
+process that isn't colocated with the server's filesystem (native still
+loads a selected asset via direct `fopen` against the shared `assets/`
+directory, exactly like the existing test cube already does — correct for
+this dev setup, not correct in general, flagged rather than assumed away).
+
+**Implemented and verified, 2026-08-09.** Server: `server/assets_db.py`
+(the SQLite index, exactly the schema above), `server/server.py` extended
+with real `Content-Length`-body reading, `POST`/`DELETE` dispatch, and the
+five new WS packet handlers. Client: `client/net.h`/`.c` gained the
+packet builders/parser calls; `client/asset_browser.c`/`.h` (new module)
+owns the cached list + request flags; `client/ui.c` gained a real
+`PANEL_ASSET_BROWSER` (row list, Refresh/Load/Delete, all hit-tested
+against the exact geometry helpers the draw call uses, same
+`type_icon_rect()`-style shared-geometry pattern the rest of `ui.c`
+already established); `main.c`'s old `spawn_test_mesh_object` became
+`load_mesh_object_from_path(path, scale)`, freeing whatever was
+previously in the one test-object slot before loading the new one (the
+old spawn-once code never had to handle that case; Load now can be
+clicked while something's already loaded, so it does).
+
+Three hand-built test assets (`tools/gen_test_assets.py`, a pyramid, an
+oblate spheroid, and a non-cube cuboid) exercise both glTF forms the
+protocol touches: loose `.gltf`+`.bin` (pyramid/spheroid, matching the
+existing hand-authored `assets/cube.gltf`) and self-contained `.glb`
+(all three, since CRUD create only accepts `.glb`). Each shape's
+triangle winding is corrected programmatically (checked outward against
+the centroid, not hand-derived) and cross-verified two ways: a per-face
+outward-normal check and a divergence-theorem volume calculation
+matching `fracture_test_main.c`'s own volume formula exactly.
+
+**A real bug this testing pass caught**: the first version of the CRUD
+create endpoint wrote uploaded files under `www/assets/library/` and
+stored that as the asset's `path`. That's wrong — every client
+(`assets/cube.gltf`'s own established convention, the Makefile's
+`--embed-file assets@assets` for wasm) reads assets from the **project-
+root** `assets/` directory, a sibling of `www/`, not a directory inside
+it (`www/assets/` was, before this, an empty, functionally dead path —
+nothing client-side ever read from it). A path stored as
+`assets/library/x.glb` therefore resolved to two *different* files
+depending on whether you were `server.py` (which would've resolved it
+under `www/`) or a client doing a direct `fopen` (project root). Caught
+by the C client integration test below — not by the earlier Python-only
+WS protocol test, which never actually opened the file the server told
+it about, only checked that the *bytes describing the path* round-
+tripped correctly. Fixed by moving `ASSET_LIBRARY_DIR` to the real
+`assets/library/` and teaching `serve_file` to resolve `/assets/*`
+requests against that same root instead of `www/`.
+
+Verification, in increasing order of how much of the real stack each one
+actually exercises:
+- `server/test_asset_protocol.py` — an independent hand-rolled Python WS
+  client (deliberately not sharing code with `ws_client_native.c`) driving
+  LIST/UPDATE/DELETE/CHANGED against a live server. Confirms the server's
+  framing and packet semantics are spec-correct, including that
+  `PKT_ASSET_CHANGED` reaches every connected client, not just whichever
+  one triggered the mutation. Caught its own bug the first time it ran:
+  the test client's handshake reader could silently drop the start of the
+  server's first WS frame if it arrived bundled with the HTTP 101
+  response on loopback — same "leftover bytes past a parsed boundary"
+  hazard `server.py`'s own HTTP layer has to handle for POST bodies,
+  just independently rediscovered in the test client's own code.
+- `client/asset_protocol_test_main.c` (`make asset_protocol_test`,
+  run manually against a live server, see the Makefile target's own
+  comment) — the real C encoder/decoder in `net.c`/`asset_browser.c`,
+  not a reimplementation, driven against a live server: connects, gets
+  the initial list automatically (no explicit request — `net.c` fires it
+  right after `PKT_HELLO`, the one moment guaranteed-connected across all
+  three platforms), loads every listed asset's path through the real
+  `halfedge_load_gltf`/cgltf pipeline, then round-trips a real
+  C-encoded `PKT_ASSET_UPDATE` and `PKT_ASSET_DELETE` through the live
+  server. This is what actually caught the path bug above.
+- `make native`/`make wasm`/`make win32` all still link clean, zero new
+  warnings. `mesh_edit_test`/`fracture_test`/`mp_console_test` still pass
+  (unaffected code paths, confirmed not assumed). Live GUI verification
+  (clicking Refresh/Load/Delete in an actual window) was not possible
+  this pass for the same pre-existing sandbox `XOpenDisplay()` hang noted
+  earlier in this file, not a regression from this work — the C
+  integration test above is what substitutes for it, same tradeoff this
+  session made for the A/C/D removal pass.
+
 ### Native UI System
 
 Built in C, rendered entirely via WebGL 2. No third-party UI library — this is

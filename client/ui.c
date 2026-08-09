@@ -137,7 +137,7 @@ typedef struct {
 static UIState g_ui;
 
 static const char *PANEL_NAMES[PANEL_TYPE_COUNT] = {
-    "Scene", "Outliner", "Properties", "Python Console", "Chat", "Node Editor (not implemented yet)", "Curve Editor (not implemented yet)"
+    "Scene", "Outliner", "Properties", "Python Console", "Chat", "Node Editor (not implemented yet)", "Curve Editor (not implemented yet)", "Asset Browser"
 };
 
 /* ---- Draw primitives ---- */
@@ -687,6 +687,97 @@ static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
     }
 }
 
+/* Asset Browser panel (see phi.md's "Asset tracking and the Asset
+ * Browser panel" / "Wire protocol..."). Layout constants + the geometry
+ * helpers right below are shared between drawing and hit-testing
+ * (hit_test_area, further down) so the two can never drift apart -- same
+ * pattern type_icon_rect() already established for the per-panel type-
+ * switcher icon. */
+#define ASSET_BROWSER_ROW_H 20.0f
+#define ASSET_BROWSER_BTN_H 22.0f
+
+static void asset_browser_refresh_rect(Area *a, float *x, float *y, float *w, float *h) {
+    *w = 64.0f; *h = 18.0f;
+    *x = a->x + a->w - UI_PANEL_PAD - *w;
+    *y = a->y + 4.0f;
+}
+
+static float asset_browser_list_top(Area *a) {
+    return a->y + UI_PANEL_PAD + 26.0f;
+}
+
+static void asset_browser_row_rect(Area *a, int index, float *x, float *y, float *w, float *h) {
+    *x = a->x + UI_PANEL_PAD;
+    *y = asset_browser_list_top(a) + (float)index * ASSET_BROWSER_ROW_H;
+    *w = a->w - UI_PANEL_PAD * 2.0f;
+    *h = ASSET_BROWSER_ROW_H;
+}
+
+static void asset_browser_action_rects(Area *a, float *load_x, float *load_y, float *load_w,
+                                        float *del_x, float *del_y, float *del_w, float *h) {
+    *h = ASSET_BROWSER_BTN_H;
+    *load_y = *del_y = a->y + a->h - UI_PANEL_PAD - *h;
+    *load_w = 90.0f; *del_w = 70.0f;
+    *load_x = a->x + UI_PANEL_PAD;
+    *del_x  = *load_x + *load_w + 8.0f;
+}
+
+/* Clamps the row list to what actually fits above the Load/Delete button
+ * row -- same "stop when you run out of vertical space" bound
+ * draw_panel_console's scrollback loop already uses (there: `y > a->y +
+ * UI_PANEL_PAD`), just precomputed once here since hit-testing needs the
+ * same count, not just the draw loop. */
+static int asset_browser_visible_row_count(Area *a, const AssetBrowserState *ab) {
+    float lx, ly, lw, dx, dy, dw, bh;
+    asset_browser_action_rects(a, &lx, &ly, &lw, &dx, &dy, &dw, &bh);
+    float avail = ly - 6.0f - asset_browser_list_top(a);
+    int max_rows = avail > 0.0f ? (int)(avail / ASSET_BROWSER_ROW_H) : 0;
+    return ab->count < max_rows ? ab->count : max_rows;
+}
+
+static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
+    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
+    ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Asset Browser", g_ui.font_bold, 15.0f,
+                 UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+
+    float rx, ry, rw, rh;
+    asset_browser_refresh_rect(a, &rx, &ry, &rw, &rh);
+    ui_rect(rx, ry, rw, rh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
+    ui_text_draw(rx + 6.0f, ry + 3.0f, "Refresh", g_ui.font_body, 11.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+
+    if (!ctx->asset_browser) return;
+    const AssetBrowserState *ab = ctx->asset_browser;
+
+    if (ab->count == 0) {
+        ui_text_draw(a->x + UI_PANEL_PAD, asset_browser_list_top(a), "No assets indexed. Click Refresh.",
+                     g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+    }
+    int visible = asset_browser_visible_row_count(a, ab);
+    for (int i = 0; i < visible; i++) {
+        float x, y, w, h;
+        asset_browser_row_rect(a, i, &x, &y, &w, &h);
+        if (i == ab->selected) {
+            ui_rect(x, y - 2.0f, w, h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.35f);
+        }
+        char line[160];
+        const AssetSummary *as = &ab->items[i];
+        if (as->tags[0])
+            snprintf(line, sizeof(line), "#%u  %s  [%s]", as->id, as->name, as->tags);
+        else
+            snprintf(line, sizeof(line), "#%u  %s", as->id, as->name);
+        ui_text_draw(x + 4.0f, y, line, g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    }
+
+    float lx, ly, lw, dx, dy, dw, bh;
+    asset_browser_action_rects(a, &lx, &ly, &lw, &dx, &dy, &dw, &bh);
+    int have_sel = ab->selected >= 0 && ab->selected < ab->count;
+    float dim = have_sel ? 1.0f : 0.4f;
+    ui_rect(lx, ly, lw, bh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, dim);
+    ui_text_draw(lx + 8.0f, ly + 4.0f, "Load", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, dim);
+    ui_rect(dx, dy, dw, bh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, dim);
+    ui_text_draw(dx + 8.0f, dy + 4.0f, "Delete", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, dim);
+}
+
 static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
     (void)ctx;
     ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
@@ -721,6 +812,7 @@ static void draw_leaf(Area *a, const UIRenderContext *ctx) {
         case PANEL_PROPERTIES: draw_panel_properties(a, ctx); break;  /* ditto */
         case PANEL_CONSOLE:    draw_panel_console(a, ctx); break;
         case PANEL_CHAT:       draw_panel_chat(a, ctx); break;        /* ditto */
+        case PANEL_ASSET_BROWSER: draw_panel_asset_browser(a, ctx); break;
         case PANEL_NODE_EDITOR:  ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Node Editor"); break;
         case PANEL_CURVE_EDITOR: ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Curve Editor"); break;
         default: break;
@@ -828,6 +920,43 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
         float row0_y = a->y + UI_PANEL_PAD + 20.0f + 6.0f;
         if ((float)y >= row0_y + 20.0f && (float)y < row0_y + 40.0f) {
             g_ui.selected_object_id = 4000u + (unsigned int)ctx->test_obj->id;
+        }
+        return 1;
+    }
+    if (a->panel_type == PANEL_ASSET_BROWSER && button == 0 && pressed && ctx->asset_browser &&
+        point_in_rect((float)x, (float)y, a->x, a->y, a->w, a->h)) {
+        AssetBrowserState *ab = ctx->asset_browser;
+
+        float rx, ry, rw, rh;
+        asset_browser_refresh_rect(a, &rx, &ry, &rw, &rh);
+        if (point_in_rect((float)x, (float)y, rx, ry, rw, rh)) {
+            ab->refresh_requested = 1;
+            return 1;
+        }
+
+        float list_top = asset_browser_list_top(a);
+        if ((float)y >= list_top - 2.0f) {
+            int visible = asset_browser_visible_row_count(a, ab);
+            int row = (int)(((float)y - (list_top - 2.0f)) / ASSET_BROWSER_ROW_H);
+            if (row >= 0 && row < visible) {
+                ab->selected = row;
+                return 1;
+            }
+        }
+
+        float lx, ly, lw, dx, dy, dw, bh;
+        asset_browser_action_rects(a, &lx, &ly, &lw, &dx, &dy, &dw, &bh);
+        if (ab->selected >= 0 && ab->selected < ab->count) {
+            if (point_in_rect((float)x, (float)y, lx, ly, lw, bh)) {
+                ab->load_requested = 1;
+                ab->load_requested_id = ab->items[ab->selected].id;
+                return 1;
+            }
+            if (point_in_rect((float)x, (float)y, dx, dy, dw, bh)) {
+                ab->delete_requested = 1;
+                ab->delete_requested_id = ab->items[ab->selected].id;
+                return 1;
+            }
         }
         return 1;
     }

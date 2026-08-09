@@ -37,6 +37,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/net.c           \
 	$(SRCDIR)/input.c         \
 	$(SRCDIR)/console.c       \
+	$(SRCDIR)/asset_browser.c \
 	$(SRCDIR)/halfedge.c      \
 	$(SRCDIR)/halfedge_gltf.c \
 	$(SRCDIR)/meshobject.c    \
@@ -49,7 +50,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/mp_port.c       \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test
 
 all: wasm native
 
@@ -232,6 +233,25 @@ mp_console_test: $(OUT_MP_CONSOLE_TEST)
 $(OUT_MP_CONSOLE_TEST): $(MP_CONSOLE_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_CONSOLE_TEST_SRCS) -o $(OUT_MP_CONSOLE_TEST) -lm
 	@echo "mp_console_test build complete -> $(OUT_MP_CONSOLE_TEST)"
+
+# Asset CRUD wire protocol client-side test (client/net.c/asset_browser.c)
+# against a REAL, already-running server.py -- unlike mesh_edit_test/
+# fracture_test/mp_console_test, this one talks over a real socket to a
+# live server rather than being fully self-contained, so it's built here
+# but NOT auto-run the way those are (there's nothing meaningful to run
+# against without `python3 server/server.py` already up, plus the 3 test
+# assets from tools/gen_test_assets.py already POSTed in). No GL/X11
+# dependency either way -- native only (needs ws_client_native.c).
+ASSET_PROTOCOL_TEST_SRCS := $(SRCDIR)/asset_protocol_test_main.c $(SRCDIR)/net.c \
+                             $(SRCDIR)/asset_browser.c $(SRCDIR)/ws_client_native.c \
+                             $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c
+OUT_ASSET_PROTOCOL_TEST   := $(BUILDDIR)/asset_protocol_test
+
+asset_protocol_test: $(OUT_ASSET_PROTOCOL_TEST)
+
+$(OUT_ASSET_PROTOCOL_TEST): $(ASSET_PROTOCOL_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -Wall -Wno-unused-parameter -I$(SRCDIR) $(ASSET_PROTOCOL_TEST_SRCS) -o $(OUT_ASSET_PROTOCOL_TEST) -lm -lcrypto
+	@echo "asset_protocol_test build complete -> $(OUT_ASSET_PROTOCOL_TEST) (run manually against a live server.py)"
 
 OUT_MP_TEST_WIN32 := $(BUILDDIR)/mp_test_win32.exe
 

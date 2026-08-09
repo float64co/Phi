@@ -1,5 +1,6 @@
 #include "net.h"
 #include "console.h"
+#include "asset_browser.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -15,6 +16,7 @@ static EM_BOOL ws_on_open(int type, const EmscriptenWebSocketOpenEvent *e, void 
     s_ns->connected = 1;
     printf("[net] WebSocket connected\n");
     net_send_hello(s_ns, "player");
+    net_send_asset_list_request(s_ns, NULL);  /* prime the Asset Browser's cache as soon as we're actually connected */
     return EM_TRUE;
 }
 
@@ -76,6 +78,7 @@ void net_connect(NetState *ns, const char *url) {
         ns->connected = 1;
         printf("[net] WebSocket connected (native)\n");
         net_send_hello(ns, "player");
+        net_send_asset_list_request(ns, NULL);  /* prime the Asset Browser's cache as soon as we're actually connected */
     } else {
         printf("[net] WebSocket connect failed: %s\n", url);
     }
@@ -115,6 +118,7 @@ void net_connect(NetState *ns, const char *url) {
         ns->connected = 1;
         printf("[net] WebSocket connected (native)\n");
         net_send_hello(ns, "player");
+        net_send_asset_list_request(ns, NULL);  /* prime the Asset Browser's cache as soon as we're actually connected */
     } else {
         printf("[net] WebSocket connect failed: %s\n", url);
     }
@@ -153,6 +157,46 @@ void net_send_hello(NetState *ns, const char *name) {
     ws_send_binary(pkt, sizeof(pkt));
 }
 
+/* Writes a [len:u8 bytes] field, truncating to 255 bytes -- matches the
+ * wire format server.py's pack_asset_list_reply/_parse_asset_update use.
+ * Returns the new write cursor. */
+static uint8_t *w_lenprefixed(uint8_t *p, const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    if (n > 255) n = 255;
+    p = w_u8(p, (uint8_t)n);
+    if (n) { memcpy(p, s, n); p += n; }
+    return p;
+}
+
+void net_send_asset_list_request(NetState *ns, const char *query) {
+    (void)ns;
+    uint8_t pkt[2 + 255];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_ASSET_LIST_REQUEST);
+    p = w_lenprefixed(p, query);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_asset_update(NetState *ns, uint32_t id, const char *name, const char *tags_csv) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 2 + 255 + 255];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_ASSET_UPDATE);
+    memcpy(p, &id, 4); p += 4;
+    p = w_lenprefixed(p, name);
+    p = w_lenprefixed(p, tags_csv);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_asset_delete(NetState *ns, uint32_t id) {
+    (void)ns;
+    uint8_t pkt[5];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_ASSET_DELETE);
+    memcpy(p, &id, 4); p += 4;
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
 void net_on_message(NetState *ns, const uint8_t *data, int len) {
     if (len < 1) return;
     const uint8_t *p = data;
@@ -177,6 +221,16 @@ void net_on_message(NetState *ns, const uint8_t *data, int len) {
         memcpy(buf, p, (size_t)n);
         buf[n] = 0;
         pyconsole_append(buf);
+        break;
+    }
+
+    case PKT_ASSET_LIST_REPLY: {
+        asset_browser_ingest_list_reply(p, len - 1);
+        break;
+    }
+
+    case PKT_ASSET_CHANGED: {
+        asset_browser_mark_dirty();
         break;
     }
 

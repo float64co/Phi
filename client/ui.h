@@ -4,6 +4,7 @@
 #include "octree_render.h"
 #include "meshobject.h"
 #include "console.h"
+#include "asset_browser.h"
 #include "renderer.h"
 #include "gbuffer.h"
 
@@ -50,6 +51,7 @@ typedef enum {
     PANEL_CHAT,
     PANEL_NODE_EDITOR,   /* stub -- Phase 6 not started */
     PANEL_CURVE_EDITOR,  /* stub -- Phase 4 not started */
+    PANEL_ASSET_BROWSER, /* see asset_browser.h / phi.md's "Asset tracking and the Asset Browser panel" */
     PANEL_TYPE_COUNT
 } PanelType;
 
@@ -119,6 +121,7 @@ typedef struct {
     int         test_obj_loaded;
     int         edit_face;       /* main.c's g_edit_face -- last ray-picked hem face, -1 if none. Properties reads this for the per-face material readout. */
     PyConsoleState *console;
+    AssetBrowserState *asset_browser;
     float       light_dir[3];
     float       sky_color[3];
     /* Called by the Scene panel between gbuffer_begin_geometry_pass() and
