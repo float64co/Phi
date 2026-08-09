@@ -436,8 +436,8 @@ static void draw_menu_row(void) {
     ui_rect(0, y + UI_MENU_H - 1.0f, (float)g_ui.screen_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
 
     static const char *items[] = { "File", "Edit", "View", "Help" };
-    float x = 14.0f;
-    float text_y = y + (UI_MENU_H - UI_FONT_SIZE) * 0.35f;
+    float x = 6.0f;
+    float text_y = y + (UI_MENU_H - UI_FONT_SIZE) * 0.35f + 2.0f;
     for (int i = 0; i < (int)(sizeof(items) / sizeof(items[0])); i++) {
         float w = font_text_width(g_ui.font_body, items[i], UI_FONT_SIZE) + 20.0f;
         ui_text_draw(x + 10.0f, text_y, items[i], g_ui.font_body, UI_FONT_SIZE,
