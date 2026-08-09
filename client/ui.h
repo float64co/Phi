@@ -52,6 +52,7 @@ typedef enum {
     PANEL_NODE_EDITOR,   /* stub -- Phase 6 not started */
     PANEL_CURVE_EDITOR,  /* stub -- Phase 4 not started */
     PANEL_ASSET_BROWSER, /* see asset_browser.h / phi.md's "Asset tracking and the Asset Browser panel" */
+    PANEL_PYTHON,        /* @phi.panel-registered content, see mp_port.h / phi.md's "Python-extensible panels" */
     PANEL_TYPE_COUNT
 } PanelType;
 

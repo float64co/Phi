@@ -25,11 +25,16 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include "py/lexer.h"
 #include "py/runtime.h"
 #include "py/stackctrl.h"
+#include "py/obj.h"
+#include "py/objlist.h"
 #include "port/micropython_embed.h"
 #include "mp_port.h"
+#include "phi_prop_registry.h"
+#include "halfedge.h"
 
 mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
     mp_raise_OSError(ENOENT);
@@ -63,6 +68,222 @@ void phi_mp_capture_output(const char *str, size_t len) {
     s_capture_buf[s_capture_len] = 0;
 }
 
+/* ---- DNA/RNA property system + @phi.panel, exposed to Python (see
+ * mp_port.h's own comment on this section) ---- */
+
+#define PHI_MP_MAX_PANELS 8
+
+static MeshObject *s_target_obj = NULL;
+static const int  *s_target_obj_loaded = NULL;
+static const int  *s_target_edit_face = NULL;
+
+void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face) {
+    s_target_obj = test_obj;
+    s_target_obj_loaded = test_obj_loaded;
+    s_target_edit_face = edit_face;
+}
+
+/* Resolves target="object"/"face" to the live PhiPropGroup+owner pointer
+ * to read/write through -- returns 0 (out params untouched) if that
+ * target isn't currently available (nothing loaded / no face selected),
+ * which native_prop_get/set turn into a real raised Python exception
+ * rather than a silent wrong read. */
+static int resolve_target(const char *target, const PhiPropGroup **out_group, void **out_owner) {
+    if (strcmp(target, "object") == 0) {
+        if (!s_target_obj || !s_target_obj_loaded || !*s_target_obj_loaded) return 0;
+        *out_group = &g_phi_prop_mesh_object;
+        *out_owner = s_target_obj;
+        return 1;
+    }
+    if (strcmp(target, "face") == 0) {
+        if (!s_target_obj || !s_target_obj_loaded || !*s_target_obj_loaded || !s_target_obj->hem ||
+            !s_target_edit_face || *s_target_edit_face < 0 ||
+            *s_target_edit_face >= s_target_obj->hem->face_count ||
+            s_target_obj->hem->faces[*s_target_edit_face].deleted) {
+            return 0;
+        }
+        *out_group = &g_phi_prop_heface;
+        *out_owner = &s_target_obj->hem->faces[*s_target_edit_face];
+        return 1;
+    }
+    return 0;
+}
+
+static mp_obj_t native_prop_get(mp_obj_t target_obj, mp_obj_t identifier_obj) {
+    const char *target = mp_obj_str_get_str(target_obj);
+    const char *identifier = mp_obj_str_get_str(identifier_obj);
+    const PhiPropGroup *group; void *owner;
+    if (!resolve_target(target, &group, &owner)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_get: target not currently available ('object' needs a loaded MeshObject, 'face' needs a selected face)"));
+    }
+    const PhiProp *prop = phi_prop_find(group, identifier);
+    if (!prop) mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_get: unknown property identifier"));
+    if (prop->type == PHI_PROP_VEC3) {
+        float v[3];
+        phi_prop_get_vec3(owner, prop, v);
+        mp_obj_t items[3] = { mp_obj_new_float(v[0]), mp_obj_new_float(v[1]), mp_obj_new_float(v[2]) };
+        return mp_obj_new_tuple(3, items);
+    }
+    float v;
+    phi_prop_get_float(owner, prop, &v);
+    return mp_obj_new_float((mp_float_t)v);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_prop_get_obj, native_prop_get);
+
+static mp_obj_t native_prop_set(mp_obj_t target_obj, mp_obj_t identifier_obj, mp_obj_t value_obj) {
+    const char *target = mp_obj_str_get_str(target_obj);
+    const char *identifier = mp_obj_str_get_str(identifier_obj);
+    const PhiPropGroup *group; void *owner;
+    if (!resolve_target(target, &group, &owner)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_set: target not currently available ('object' needs a loaded MeshObject, 'face' needs a selected face)"));
+    }
+    const PhiProp *prop = phi_prop_find(group, identifier);
+    if (!prop) mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_set: unknown property identifier"));
+    if (prop->type == PHI_PROP_VEC3) {
+        size_t n; mp_obj_t *items;
+        mp_obj_get_array(value_obj, &n, &items);
+        if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_set: expected a 3-element sequence for a VEC3 property"));
+        float v[3] = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+        phi_prop_set_vec3(owner, prop, v);
+    } else {
+        phi_prop_set_float(owner, prop, (float)mp_obj_get_float(value_obj));
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(native_prop_set_obj, native_prop_set);
+
+/* ---- @phi.panel registry (C side) --
+ * Captured eagerly the moment a panel's decorator runs (see
+ * native_panel_registered below, called from PHI_BOOTSTRAP's @panel
+ * decorator) rather than introspected from Python's _panel_registry dict
+ * on demand -- simpler than walking a MicroPython dict's internal map
+ * from C, and it's the natural point to instantiate+cache the instance
+ * anyway (see phi_mp_draw_panel's own comment on why instances are
+ * cached, not rebuilt every call). */
+typedef struct {
+    char     name[64];
+    mp_obj_t instance;   /* MP_OBJ_NULL if instantiation raised */
+} PhiMpPanel;
+
+static PhiMpPanel s_panels[PHI_MP_MAX_PANELS];
+static int        s_panel_count = 0;
+static mp_obj_t   s_phi_namespace = MP_OBJ_NULL;   /* cached `phi`, looked up once, passed as every panel's ctx */
+
+static mp_obj_t native_panel_registered(mp_obj_t name_obj) {
+    const char *name = mp_obj_str_get_str(name_obj);
+    int slot = -1;
+    for (int i = 0; i < s_panel_count; i++) {
+        if (strcmp(s_panels[i].name, name) == 0) { slot = i; break; }
+    }
+    if (slot < 0) {
+        if (s_panel_count >= PHI_MP_MAX_PANELS) {
+            printf("[mp_port] @phi.panel('%s'): registry full (max %d), ignored\n", name, PHI_MP_MAX_PANELS);
+            return mp_const_none;
+        }
+        slot = s_panel_count++;
+    }
+    strncpy(s_panels[slot].name, name, sizeof(s_panels[slot].name) - 1);
+    s_panels[slot].name[sizeof(s_panels[slot].name) - 1] = 0;
+    s_panels[slot].instance = MP_OBJ_NULL;
+
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        mp_obj_t registry = mp_obj_dict_get(MP_OBJ_FROM_PTR(mp_globals_get()), MP_OBJ_NEW_QSTR(qstr_from_str("_panel_registry")));
+        mp_obj_t cls = mp_obj_dict_get(registry, mp_obj_new_str(name, strlen(name)));
+        mp_obj_t instance = mp_call_function_n_kw(cls, 0, 0, NULL);
+        s_panels[slot].instance = instance;
+        nlr_pop();
+    } else {
+        printf("[mp_port] @phi.panel('%s'): instantiation raised, panel left unusable:\n", name);
+        mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_panel_registered_obj, native_panel_registered);
+
+/* Bootstrap script, run once at the end of phi_mp_init after the native
+ * functions above are already in globals (it references them by name).
+ * The @phi.panel class-decorator shape is copied verbatim from
+ * mp_test_main.c step 4 -- already prototyped and confirmed working
+ * against real MicroPython there, not reinvented here. */
+static const char *PHI_BOOTSTRAP =
+    "_panel_registry = {}\n"
+    "class Panel:\n"
+    "    pass\n"
+    "def _panel_decorator(name):\n"
+    "    def wrap(cls):\n"
+    "        _panel_registry[name] = cls\n"
+    "        _native_panel_registered(name)\n"
+    "        return cls\n"
+    "    return wrap\n"
+    "class _PhiNamespace:\n"
+    "    pass\n"
+    "phi = _PhiNamespace()\n"
+    "phi.Panel = Panel\n"
+    "phi.panel = _panel_decorator\n"
+    "phi.prop_get = _native_prop_get\n"
+    "phi.prop_set = _native_prop_set\n";
+
+int phi_mp_panel_count(void) { return s_panel_count; }
+
+const char *phi_mp_panel_name(int index) {
+    if (index < 0 || index >= s_panel_count) return "";
+    return s_panels[index].name;
+}
+
+int phi_mp_draw_panel(int index, char out_lines[][256], int max_lines) {
+    if (index < 0 || index >= s_panel_count || s_panels[index].instance == MP_OBJ_NULL) return -1;
+    s_capture_len = 0;
+    if (s_capture_buf) s_capture_buf[0] = 0;
+
+    int n_written;
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        mp_obj_t draw_bound = mp_load_attr(s_panels[index].instance, qstr_from_str("draw"));
+        mp_obj_t args[1] = { s_phi_namespace };
+        mp_obj_t result = mp_call_function_n_kw(draw_bound, 1, 0, args);
+        if (mp_obj_is_type(result, &mp_type_list)) {
+            size_t n; mp_obj_t *items;
+            mp_obj_list_get(result, &n, &items);
+            n_written = 0;
+            for (size_t i = 0; i < n && (int)i < max_lines; i++) {
+                const char *s = mp_obj_str_get_str(items[i]);
+                strncpy(out_lines[n_written], s, 255);
+                out_lines[n_written][255] = 0;
+                n_written++;
+            }
+        } else {
+            n_written = 0;   /* didn't return a list -- "nothing to draw", not an error */
+        }
+        nlr_pop();
+    } else {
+        mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
+        n_written = -1;
+    }
+    return n_written;
+}
+
+const char *phi_mp_last_captured_output(void) {
+    return s_capture_buf ? s_capture_buf : "";
+}
+
+static void phi_mp_install_bindings(void) {
+    mp_obj_dict_t *globals = MP_OBJ_TO_PTR(mp_globals_get());
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_prop_get")), MP_OBJ_FROM_PTR(&native_prop_get_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_prop_set")), MP_OBJ_FROM_PTR(&native_prop_set_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_panel_registered")), MP_OBJ_FROM_PTR(&native_panel_registered_obj));
+
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        mp_embed_exec_str(PHI_BOOTSTRAP);
+        s_phi_namespace = mp_obj_dict_get(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("phi")));
+        nlr_pop();
+    } else {
+        printf("[mp_port] PHI_BOOTSTRAP raised during phi_mp_init -- phi.panel/phi.prop_get/set will be unavailable:\n");
+        mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
+    }
+}
+
 void phi_mp_init(void *stack_top) {
     mp_embed_init(&s_mp_heap[0], sizeof(s_mp_heap), stack_top);
     /* mp_embed_init only calls the deprecated mp_stack_set_top(), which
@@ -77,6 +298,7 @@ void phi_mp_init(void *stack_top) {
      * still functional) stackctrl.c API and writes the same
      * MP_STATE_THREAD(stack_limit) cstack.c reads. */
     mp_stack_set_limit(32 * 1024);
+    phi_mp_install_bindings();
 }
 
 char *phi_mp_exec(const char *code) {

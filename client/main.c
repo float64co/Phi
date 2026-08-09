@@ -716,6 +716,12 @@ int main(void) {
     /* Console / Python panel */
     pyconsole_init(&g_cs);
     phi_mp_init(&mp_stack_top);
+    /* DNA/RNA targets -- see phi.md's "Property System (DNA/RNA analogue)".
+     * phi.prop_get/set('object'/'face', ...) read/write through these live
+     * pointers; g_test_mesh_loaded/g_edit_face are passed by address (not
+     * by value) since they change every frame and phi_mp_register_targets
+     * only runs once, here. */
+    phi_mp_register_targets(&g_test_mesh_object, &g_test_mesh_loaded, &g_edit_face);
 
     /* Asset Browser -- see phi.md's "Asset tracking and the Asset Browser
      * panel". net.c requests the initial asset list itself, right after

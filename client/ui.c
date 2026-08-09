@@ -1,5 +1,7 @@
 #include "ui.h"
 #include "area_tree.h"
+#include "phi_prop_registry.h"
+#include "mp_port.h"
 #include "meshobject.h"
 #include "renderer.h"
 #include "gbuffer.h"
@@ -121,7 +123,7 @@ typedef struct {
     Font *font_mono;    /* IBM Plex Mono Regular -- console/chat */
 
     SvgIcon icon_scene, icon_outliner, icon_properties, icon_console, icon_chat;
-    SvgIcon icon_node_editor, icon_curve_editor, icon_undo, icon_redo, icon_asset_browser;
+    SvgIcon icon_node_editor, icon_curve_editor, icon_undo, icon_redo, icon_asset_browser, icon_python_panel;
 
     Area *root;
     Area *panels[16];   /* flat list of every leaf, for hit-testing/iteration */
@@ -161,7 +163,7 @@ typedef struct {
 static UIState g_ui;
 
 static const char *PANEL_NAMES[PANEL_TYPE_COUNT] = {
-    "Scene", "Outliner", "Properties", "Python Console", "Chat", "Node Editor (not implemented yet)", "Curve Editor (not implemented yet)", "Asset Browser"
+    "Scene", "Outliner", "Properties", "Python Console", "Chat", "Node Editor (not implemented yet)", "Curve Editor (not implemented yet)", "Asset Browser", "Python Panel"
 };
 
 /* ---- Draw primitives ---- */
@@ -275,6 +277,7 @@ int ui_init(void) {
     g_ui.icon_undo         = svg_icon_load("assets/icons/undo.svg", 24);
     g_ui.icon_redo         = svg_icon_load("assets/icons/redo.svg", 24);
     g_ui.icon_asset_browser = svg_icon_load("assets/icons/asset_browser.svg", 32);
+    g_ui.icon_python_panel  = svg_icon_load("assets/icons/python_panel.svg", 32);
 
     /* Default layout: golden-ratio split, Scene | (Outliner / Properties).
      * See ui.h's Area comment and phi.md's Native UI System section for
@@ -321,6 +324,7 @@ void ui_destroy(void) {
     svg_icon_destroy(&g_ui.icon_chat); svg_icon_destroy(&g_ui.icon_node_editor);
     svg_icon_destroy(&g_ui.icon_curve_editor); svg_icon_destroy(&g_ui.icon_undo); svg_icon_destroy(&g_ui.icon_redo);
     svg_icon_destroy(&g_ui.icon_asset_browser);
+    svg_icon_destroy(&g_ui.icon_python_panel);
 }
 
 /* ---- Layout ---- */
@@ -376,6 +380,7 @@ static SvgIcon *icon_for_panel(PanelType t) {
         case PANEL_NODE_EDITOR: return &g_ui.icon_node_editor;
         case PANEL_CURVE_EDITOR: return &g_ui.icon_curve_editor;
         case PANEL_ASSET_BROWSER: return &g_ui.icon_asset_browser;
+        case PANEL_PYTHON: return &g_ui.icon_python_panel;
         default: return NULL;
     }
 }
@@ -642,6 +647,32 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
      * scene content that exists right now. */
 }
 
+/* Draws one PhiProp as a labeled row -- the DNA/RNA property registry
+ * (phi_prop.h) is the single source of truth this reads through, not a
+ * hand-picked field per struct type, so any group registered in
+ * phi_prop_registry.c shows up here automatically. Read-only in the C UI
+ * for this pass (see phi.md's DNA/RNA status note for why) -- the same
+ * registry IS writable, just from Python (phi.prop_set) rather than a
+ * click-to-edit widget here yet. */
+static void draw_prop_row(float x, float *y, void *owner, const PhiProp *prop) {
+    char line[128];
+    if (prop->type == PHI_PROP_VEC3) {
+        float v[3];
+        phi_prop_get_vec3(owner, prop, v);
+        snprintf(line, sizeof(line), "%s: %.2f, %.2f, %.2f", prop->display_name, v[0], v[1], v[2]);
+    } else if (prop->type == PHI_PROP_BOOL) {
+        float v;
+        phi_prop_get_float(owner, prop, &v);
+        snprintf(line, sizeof(line), "%s: %s", prop->display_name, v != 0.0f ? "yes" : "no");
+    } else {
+        float v;
+        phi_prop_get_float(owner, prop, &v);
+        snprintf(line, sizeof(line), "%s: %.2f", prop->display_name, v);
+    }
+    ui_text_draw(x, *y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+    *y += 20.0f;
+}
+
 static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
     ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
     float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
@@ -654,44 +685,37 @@ static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
         snprintf(line, sizeof(line), "MeshObject #%d", ctx->test_obj->id);
         ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         y += 22.0f;
-        snprintf(line, sizeof(line), "Position: %.2f, %.2f, %.2f",
-                 ctx->test_obj->position.x, ctx->test_obj->position.y, ctx->test_obj->position.z);
-        ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-        y += 20.0f;
+
+        for (int i = 0; i < g_phi_prop_mesh_object.count; i++) {
+            draw_prop_row(x, &y, ctx->test_obj, &g_phi_prop_mesh_object.props[i]);
+        }
+        /* Orientation isn't in the registry -- Quat (4 floats) isn't a
+         * PhiPropType this pass (only scalar/bool/vec3 are), so it stays
+         * a direct field read here rather than a registered prop. Real
+         * quaternion editing needs real UI (an axis-angle or Euler
+         * widget, not 4 raw numbers a user would ever want to type) that
+         * this pass doesn't build either. */
         snprintf(line, sizeof(line), "Orientation: %.2f, %.2f, %.2f, %.2f",
                  ctx->test_obj->orientation.x, ctx->test_obj->orientation.y,
                  ctx->test_obj->orientation.z, ctx->test_obj->orientation.w);
         ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-        y += 20.0f;
-        ui_text_draw(x, y, ctx->test_obj->is_static ? "Static: yes" : "Static: no", g_ui.font_mono, 13.0f,
-                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         y += 24.0f;
 
         /* Per-face PBR material readout (Phase 1's "PBR material assignment
-         * per face") -- read-only here by design (see meshobject.h's own
-         * comment on the console being the editing side, matching this
-         * task's "simple readout+editor, not a full material-browser UI"
-         * scope). Shows whichever face was last ray-picked (see main.c's
-         * g_edit_face), not necessarily under the cursor right now. */
+         * per face"), now also property-registry-driven. Shows whichever
+         * face was last ray-picked (see main.c's g_edit_face), not
+         * necessarily under the cursor right now. */
         if (ctx->test_obj->hem && ctx->edit_face >= 0 &&
             ctx->edit_face < ctx->test_obj->hem->face_count &&
             !ctx->test_obj->hem->faces[ctx->edit_face].deleted) {
-            const HEFace *face = &ctx->test_obj->hem->faces[ctx->edit_face];
+            HEFace *face = &ctx->test_obj->hem->faces[ctx->edit_face];
             snprintf(line, sizeof(line), "Face %d material:", ctx->edit_face);
             ui_text_draw(x, y, line, g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
             y += 20.0f;
-            snprintf(line, sizeof(line), "  base_color: %.2f, %.2f, %.2f",
-                     face->base_color[0], face->base_color[1], face->base_color[2]);
-            ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-            y += 18.0f;
-            snprintf(line, sizeof(line), "  metallic: %.2f  roughness: %.2f", face->metallic, face->roughness);
-            ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-            y += 18.0f;
-            snprintf(line, sizeof(line), "  emission: %.2f, %.2f, %.2f",
-                     face->emission[0], face->emission[1], face->emission[2]);
-            ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-            y += 20.0f;
-            ui_text_draw(x, y, "console: matcolor/matmetal/matrough/matemit", g_ui.font_body, 12.0f,
+            for (int i = 0; i < g_phi_prop_heface.count; i++) {
+                draw_prop_row(x + 8.0f, &y, face, &g_phi_prop_heface.props[i]);
+            }
+            ui_text_draw(x, y, "console: matcolor/matmetal/matrough/matemit, or phi.prop_set(...)", g_ui.font_body, 12.0f,
                          UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         } else {
             ui_text_draw(x, y, "No face selected (click a face)", g_ui.font_body, 13.0f,
@@ -988,6 +1012,63 @@ static void draw_panel_stub(Area *a, const char *name) {
                  g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
 }
 
+/* Python Panel (see phi.md's "Python-extensible panels" / mp_port.h) --
+ * renders whatever the FIRST @phi.panel-registered class's draw(ctx)
+ * returned (a plain list of text-row strings, see phi_mp_draw_panel's own
+ * comment on why this pass doesn't build real interactive Python-defined
+ * widgets yet). Which panel to show when more than one is registered
+ * isn't decided by anything yet either -- always panel 0 -- a known,
+ * documented simplification, not an oversight. ctx isn't used: everything
+ * this needs (phi_mp_panel_count/name/draw_panel) is process-global state
+ * in mp_port.c, the same way console.c's ConsoleState-free functions
+ * would be if console_append() didn't need a specific target instance. */
+static void draw_panel_python(Area *a, const UIRenderContext *ctx) {
+    (void)ctx;
+    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
+    float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
+
+    int count = phi_mp_panel_count();
+    if (count == 0) {
+        ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Python Panel", g_ui.font_bold, 15.0f,
+                     UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+        y += 26.0f;
+        ui_text_draw(x, y, "No @phi.panel registered yet.", g_ui.font_body, 13.0f,
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        y += 20.0f;
+        ui_text_draw(x, y, "Define one from the Python Console, e.g.:", g_ui.font_body, 13.0f,
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        y += 20.0f;
+        ui_text_draw(x, y, "@phi.panel('My Panel')", g_ui.font_mono, 12.0f,
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        return;
+    }
+
+    ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, phi_mp_panel_name(0), g_ui.font_bold, 15.0f,
+                 UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    y += 26.0f;
+
+    char lines[16][256];
+    int n = phi_mp_draw_panel(0, lines, 16);
+    if (n < 0) {
+        ui_text_draw(x, y, "draw() raised -- see the Console log", g_ui.font_body, 13.0f,
+                     0.9f, 0.35f, 0.3f, 1.0f);
+        y += 20.0f;
+        char first_line[96];
+        const char *err = phi_mp_last_captured_output();
+        const char *nl = strchr(err, '\n');
+        size_t n_copy = nl ? (size_t)(nl - err) : strlen(err);
+        if (n_copy >= sizeof(first_line)) n_copy = sizeof(first_line) - 1;
+        memcpy(first_line, err, n_copy);
+        first_line[n_copy] = 0;
+        ui_text_draw(x, y, first_line, g_ui.font_mono, 12.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        ui_text_draw(x, y, lines[i], g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        y += 18.0f;
+    }
+}
+
 static void draw_leaf(Area *a, const UIRenderContext *ctx) {
     switch (a->panel_type) {
         case PANEL_SCENE:      draw_panel_scene(a, ctx); break;
@@ -996,6 +1077,7 @@ static void draw_leaf(Area *a, const UIRenderContext *ctx) {
         case PANEL_CONSOLE:    draw_panel_console(a, ctx); break;
         case PANEL_CHAT:       draw_panel_chat(a, ctx); break;        /* ditto */
         case PANEL_ASSET_BROWSER: draw_panel_asset_browser(a, ctx); break;
+        case PANEL_PYTHON:     draw_panel_python(a, ctx); break;
         case PANEL_NODE_EDITOR:  ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Node Editor"); break;
         case PANEL_CURVE_EDITOR: ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Curve Editor"); break;
         default: break;

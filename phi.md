@@ -2087,6 +2087,110 @@ class FracturePanel(phi.Panel):
 This is structurally identical to how Blender defines its panels in Python — the
 panel body is Python, the rendering is C.
 
+**Status: a real, verified first slice landed, 2026-08-10** — deliberately
+scoped down from the full sketch above, with every scope cut documented
+below rather than silently assumed away. Not the `phi.h` C API surface
+from Phase 5 (`phi.raycast`, `phi.spawn`, `phi.mesh_subdivide`, etc.) —
+that's still an unimplemented design sketch, out of scope here.
+
+**`PhiProp` (`client/phi_prop.h`/`.c`)**: the DNA/RNA descriptor exactly
+as sketched (`identifier`/`display_name`/`type`/`range`/`offset`),
+offset-based (`offsetof()` at registration time, `client/
+phi_prop_registry.c`) rather than getter/setter-function-pointer-based —
+the common case (a plain float/vec3/bool field at a fixed struct offset)
+needs zero per-property C code, matching Blender's own actual DNA/RNA
+approach, not just its name. Registered this pass: `MeshObject.position`/
+`is_static`, `HEFace.base_color`/`metallic`/`roughness`/`emission`
+(`metallic`/`roughness` clamp to `[0,1]` on set, matching
+`halfedge_set_face_material`'s existing behavior exactly; `base_color`/
+`emission` stay unclamped for the same reason `emission` already did —
+bloom needs values above 1.0). `ui.c`'s Properties panel now reads
+through this registry generically (a loop over `PhiPropGroup.props`, not
+a hand-written line per field) instead of hardcoding each field — real
+single-source-of-truth, not just a doc claim. Still read-only *from the C
+UI* this pass (a click-to-edit numeric widget is real, additional
+interaction-design work on top of what's here, not just plumbing) —
+editing is fully real, just from Python (`phi.prop_set`) rather than a
+UI widget yet.
+
+**MicroPython binding (`mp_port.c`, extended)**: `phi.prop_get(target,
+identifier)` / `phi.prop_set(target, identifier, value)`, where `target`
+is `"object"` (the one test-object slot, see `main.c`) or `"face"` (the
+last ray-picked `HEFace`, `g_edit_face`) — a deliberate simplification of
+`ctx.prop(obj, name)`'s object-handle sketch: there's no general Python
+object-wrapper system yet (nothing in this engine hands Python a live
+reference to an arbitrary C struct), so this pass exposes the *specific*
+two live targets that actually exist right now by name, honestly, rather
+than half-building a general handle system. `phi_mp_register_targets()`
+(called once from `main()`) hands `mp_port.c` the live pointers to read
+through — `test_obj_loaded`/`edit_face` are passed *by address*, not by
+value, since they change every frame and registration happens once.
+Unknown target/identifier, or a target that isn't currently resolvable
+(e.g. `"face"` with nothing selected), raises a real Python `ValueError`
+rather than returning a wrong/stale value silently.
+
+**`@phi.panel`**: the exact class-decorator pattern already prototyped
+and confirmed working against real MicroPython in `mp_test_main.c` step
+4 (Phase 5, months earlier) — reused verbatim as the bootstrap script
+`phi_mp_init` now installs, not reinvented. New: registration is captured
+*eagerly*, the moment a class's decorator actually runs (a native
+callback the decorator invokes, `_native_panel_registered`), which
+instantiates and caches the instance right then rather than C ever
+needing to introspect Python's `_panel_registry` dict from outside it —
+simpler than walking a MicroPython dict's internal map, and it's the
+natural point to instantiate anyway. `phi_mp_draw_panel(index, ...)`
+calls the cached instance's `draw(ctx)` (nlr-protected, same exception-
+safety convention every MicroPython entry point in this file already
+uses) and expects a **plain list of strings back, one per text row** —
+not the interactive `ctx.separator()`/`ctx.button()`/`phi.emit()` widget
+calls the original sketch shows. Building real Python-driven immediate-
+mode widgets (a shared layout cursor across multiple calls, button click-
+state round-tripping back into Python, an event bus) is genuinely more
+interaction-design work on top of everything above, not just plumbing —
+scoped out of this pass and flagged here rather than silently
+under-delivered. A new `PANEL_PYTHON` panel type (`ui.c`) renders
+whichever panel is registered first (`index 0` — picking *which*
+registered panel to show isn't built either, a known simplification) by
+calling `phi_mp_draw_panel` directly from its own draw function every
+frame and drawing each returned string as a row; a raised `draw()` shows
+an inline error instead of crashing the panel (or the process).
+
+**A real regression this pass caught its own build for**: `mp_port.c`
+gained a hard link dependency on `phi_prop.c`/`phi_prop_registry.c`, but
+four *pre-existing* Makefile targets that already linked `mp_port.c`
+(`mp_test`, `mp_test_win32`, `mp_test_wasm` via `MP_TEST_SRCS`,
+`mp_console_test`, `mp_stress`) didn't list them — broke at link time
+(`undefined reference to 'g_phi_prop_mesh_object'`) the moment those
+targets were rebuilt, caught immediately by this session's own "rebuild
+every standalone harness before calling a chunk done" discipline, not
+discovered later. Fixed by adding both files to each affected `_SRCS`
+list; re-verified all previously-passing harnesses (`mp_test`, `mp_stress`)
+still pass with real behavior, not just that they link again.
+
+Verified: `client/mp_prop_panel_test_main.c` (new, `make
+mp_prop_panel_test`) drives the real embedded interpreter end to end —
+`phi.prop_get`/`phi.prop_set` reading and writing a real `MeshObject`'s
+`position` and a real `HEFace`'s `metallic` (including the range clamp
+applying when set *from Python*, not just from C callers), an unknown
+identifier and an unresolvable target each raising a catchable
+`ValueError` (process still alive afterward, checked explicitly), a
+registered panel's `draw(ctx)` calling back into `ctx.prop_get` and
+returning real values reflecting whatever C-side state was set moments
+earlier from a *different* Python call, `self.n` instance state
+persisting correctly across two separate `phi_mp_draw_panel` calls (not
+re-initialized each time — the exact property `mp_test_main.c` first
+proved for this pattern, now proven again for the real cached-instance
+path), and a panel whose `draw()` raises reporting failure (`-1`) with
+the traceback actually captured, without taking any other registered
+panel down with it. All checks pass against the real interpreter, not a
+mock. Native/wasm/win32 all still link clean; every other standalone
+harness (`mesh_edit_test`/`fracture_test`/`area_tree_test`/
+`phi_prop_test`/`asset_protocol_test`/`mp_test`/`mp_console_test`/
+`mp_stress`) still passes. Live GUI verification (typing `@phi.panel(...)`
+into the real Console, watching the Python Panel render it) is still not
+possible in this sandbox, same `XOpenDisplay()` limitation as everything
+else this session needing a real window.
+
 ### Fracturing
 
 Meshes are authored with a fracture pattern at creation time. The editor provides

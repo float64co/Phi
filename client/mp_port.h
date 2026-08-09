@@ -1,5 +1,6 @@
 #pragma once
 #include <stddef.h>
+#include "meshobject.h"
 
 /* Phi's own thin API over the embedded MicroPython interpreter (see
  * mp_port.c) -- wraps the exact init/exec pattern client/mp_test_main.c
@@ -38,3 +39,61 @@ void phi_mp_init(void *stack_top);
  * caller frees it. Never returns NULL; an empty string means the code
  * printed nothing and didn't raise. */
 char *phi_mp_exec(const char *code);
+
+/* ---- DNA/RNA property system + @phi.panel, exposed to Python ----
+ * (see phi.md's "Property System (DNA/RNA analogue)" / "Python-
+ * extensible panels" and phi_prop.h). phi_mp_init() installs a bootstrap
+ * script defining a `phi` namespace with `phi.prop_get`/`phi.prop_set`
+ * (thin wrappers over phi_prop_registry.c's registries) and
+ * `phi.panel`/`phi.Panel` (the exact @phi.panel class-decorator pattern
+ * already prototyped and confirmed working against real MicroPython in
+ * mp_test_main.c step 4 -- this reuses that proven pattern rather than
+ * inventing a new one). */
+
+/* Registers the live pointers phi.prop_get/set read/write through --
+ * call once from main(), mirrors console_set_target/
+ * asset_browser_set_target's "single instance, registered once"
+ * pattern. `test_obj_loaded`/`edit_face` are read fresh on every call
+ * (not snapshotted at registration time), since main.c's g_test_mesh_
+ * loaded/g_edit_face change every frame -- pass their addresses, not
+ * their values. `target="object"` in Python resolves to `test_obj`
+ * (once loaded); `target="face"` resolves to
+ * `test_obj->hem->faces[*edit_face]` (once a face is actually selected). */
+void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face);
+
+/* Number of currently-registered @phi.panel classes. Panels are captured
+ * (name + a freshly instantiated, cached instance) the moment their
+ * decorator runs, via a native callback the bootstrap's @phi.panel
+ * decorator invokes -- see mp_port.c -- rather than C ever needing to
+ * introspect the Python-side registry dict directly. */
+int phi_mp_panel_count(void);
+
+/* Name (the string literal passed to @phi.panel(...)) of the panel at
+ * `index`, 0 <= index < phi_mp_panel_count(). Returned pointer is into
+ * this module's own static storage (a plain C copy taken at registration
+ * time, not a MicroPython object) -- valid for the process's lifetime,
+ * no need to copy it. */
+const char *phi_mp_panel_name(int index);
+
+/* Calls panel `index`'s cached instance's draw(ctx) (ctx == the same
+ * `phi` namespace object every panel sees, exposing prop_get/prop_set --
+ * see phi.md's note on this being a deliberate simplification of the
+ * `ctx.prop(obj, name)` sketch, not the literal signature), and expects
+ * it to return a plain list of strings, each one row of text to render
+ * -- no interactive widgets (buttons, separators) this pass, see phi.md.
+ * Writes up to `max_lines` of them into `out_lines` (each truncated to
+ * `line_cap`-1 bytes), returns how many were written. Returns -1 if the
+ * call raised (the traceback is captured into the same buffer
+ * phi_mp_exec's output is, readable afterward via
+ * phi_mp_last_captured_output() below -- unlike phi_mp_exec, this
+ * doesn't return the text itself, since the common case is "print it to
+ * the Console log only on failure", not every call) or if draw() didn't
+ * return a list at all. */
+int phi_mp_draw_panel(int index, char out_lines[][256], int max_lines);
+
+/* Returns whatever the most recent phi_mp_draw_panel/phi_mp_exec call
+ * printed or raised, WITHOUT resetting it (unlike phi_mp_exec, which
+ * always starts a call by clearing this same buffer) -- borrowed
+ * pointer, valid until the next phi_mp_* call, copy it if it needs to
+ * outlive that. Never NULL; empty string if nothing's been captured yet. */
+const char *phi_mp_last_captured_output(void);

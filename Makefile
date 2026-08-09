@@ -48,10 +48,12 @@ COMMON_SRCS := \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c            \
 	$(SRCDIR)/area_tree.c     \
+	$(SRCDIR)/phi_prop.c      \
+	$(SRCDIR)/phi_prop_registry.c \
 	$(SRCDIR)/mp_port.c       \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test
 
 all: wasm native
 
@@ -199,6 +201,18 @@ $(OUT_AREA_TREE_TEST): $(AREA_TREE_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -g -fsanitize=address -Wall -Wextra -I$(SRCDIR) $(AREA_TREE_TEST_SRCS) -o $(OUT_AREA_TREE_TEST) -lm
 	@echo "area_tree_test build complete -> $(OUT_AREA_TREE_TEST)"
 
+# phi_prop.c/phi_prop_registry.c (DNA/RNA-style property descriptors)
+# self-test -- same no-GL-dependency rationale as area_tree_test above.
+PHI_PROP_TEST_SRCS := $(SRCDIR)/phi_prop_test_main.c $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c
+OUT_PHI_PROP_TEST   := $(BUILDDIR)/phi_prop_test
+
+phi_prop_test: $(OUT_PHI_PROP_TEST)
+	./$(OUT_PHI_PROP_TEST)
+
+$(OUT_PHI_PROP_TEST): $(PHI_PROP_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -Wall -Wextra -I$(SRCDIR) $(PHI_PROP_TEST_SRCS) -o $(OUT_PHI_PROP_TEST) -lm
+	@echo "phi_prop_test build complete -> $(OUT_PHI_PROP_TEST)"
+
 # Voronoi fracture (client/fracture.c) topology/volume self-test -- same
 # no-GL-dependency rationale as mesh_edit_test above.
 FRACTURE_TEST_SRCS := $(SRCDIR)/fracture_test_main.c $(SRCDIR)/halfedge.c \
@@ -225,7 +239,8 @@ $(OUT_FRACTURE_TEST): $(FRACTURE_TEST_SRCS) | $(BUILDDIR)
 # defined near COMMON_SRCS now, not here, since the real build needs them
 # too.
 # ---------------------------------------------------------------
-MP_TEST_SRCS  := $(SRCDIR)/mp_test_main.c $(SRCDIR)/mp_port.c $(MP_EMBED_SRCS)
+MP_TEST_SRCS  := $(SRCDIR)/mp_test_main.c $(SRCDIR)/mp_port.c \
+                  $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c $(MP_EMBED_SRCS)
 MP_TEST_CFLAGS := -O1 -Wall -Wno-unused-parameter -I$(SRCDIR) $(MP_INCLUDES)
 
 OUT_MP_TEST := $(BUILDDIR)/mp_test
@@ -236,12 +251,29 @@ $(OUT_MP_TEST): $(MP_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_TEST_SRCS) -o $(OUT_MP_TEST) -lm
 	@echo "mp_test build complete -> $(OUT_MP_TEST)"
 
+# DNA/RNA property system + @phi.panel binding layer self-test (mp_port.c's
+# phi.prop_get/set + phi_mp_panel_count/name/draw_panel, see phi_prop.h) --
+# same no-GL-dependency rationale as mp_test above, against a real embedded
+# interpreter (not a mock).
+MP_PROP_PANEL_TEST_SRCS := $(SRCDIR)/mp_prop_panel_test_main.c $(SRCDIR)/mp_port.c \
+                            $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                            $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c $(MP_EMBED_SRCS)
+OUT_MP_PROP_PANEL_TEST := $(BUILDDIR)/mp_prop_panel_test
+
+mp_prop_panel_test: $(OUT_MP_PROP_PANEL_TEST)
+	./$(OUT_MP_PROP_PANEL_TEST)
+
+$(OUT_MP_PROP_PANEL_TEST): $(MP_PROP_PANEL_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_PROP_PANEL_TEST_SRCS) -o $(OUT_MP_PROP_PANEL_TEST) -lm
+	@echo "mp_prop_panel_test build complete -> $(OUT_MP_PROP_PANEL_TEST)"
+
 # Console-facing glue self-test (phi_mp_init/phi_mp_exec/output capture,
 # see mp_port.h) -- distinct from mp_test above (Phase 5 decorator
 # patterns, out of scope here): this is what Phase 1's Console-as-real-
 # Python-REPL piece actually depends on. No GL dependency, same rationale
 # as mesh_edit_test/fracture_test.
-MP_CONSOLE_TEST_SRCS := $(SRCDIR)/mp_console_test_main.c $(SRCDIR)/mp_port.c $(MP_EMBED_SRCS)
+MP_CONSOLE_TEST_SRCS := $(SRCDIR)/mp_console_test_main.c $(SRCDIR)/mp_port.c \
+                         $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c $(MP_EMBED_SRCS)
 OUT_MP_CONSOLE_TEST   := $(BUILDDIR)/mp_console_test
 
 mp_console_test: $(OUT_MP_CONSOLE_TEST)
@@ -279,7 +311,8 @@ $(OUT_MP_TEST_WIN32): $(MP_TEST_SRCS) | $(BUILDDIR)
 	chmod +x $(OUT_MP_TEST_WIN32)
 	@echo "mp_test_win32 build complete -> $(OUT_MP_TEST_WIN32)"
 
-MP_STRESS_SRCS := $(SRCDIR)/mp_stress_test_main.c $(SRCDIR)/mp_port.c $(MP_EMBED_SRCS)
+MP_STRESS_SRCS := $(SRCDIR)/mp_stress_test_main.c $(SRCDIR)/mp_port.c \
+                   $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c $(MP_EMBED_SRCS)
 OUT_MP_STRESS  := $(BUILDDIR)/mp_stress
 
 mp_stress: $(OUT_MP_STRESS)
