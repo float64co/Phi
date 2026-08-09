@@ -41,7 +41,7 @@
 #define UI_BAR_H      (UI_MENU_H   * UI_PHI)          /* ~36.65 */
 #define UI_TOP_CHROME_H (UI_BAR_H + UI_MENU_H)        /* branding row + menu row together */
 #define UI_PANEL_PAD  10.0f
-#define UI_TYPE_ICON_SIZE 20.0f  /* per-panel corner type-switcher button */
+#define UI_TYPE_ICON_SIZE 14.0f  /* per-panel corner type-switcher button -- top-left corner, see draw_area_chrome */
 
 typedef enum {
     PANEL_SCENE = 0,

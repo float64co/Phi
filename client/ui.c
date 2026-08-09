@@ -455,25 +455,38 @@ static int point_in_rect(float px, float py, float x, float y, float w, float h)
     return px >= x && px < x + w && py >= y && py < y + h;
 }
 
+/* Top-left corner of a panel's own type-switcher icon -- shared by the
+ * drawing code below and hit_test_area's click routing so the two can
+ * never disagree about where the icon actually is. */
+static void type_icon_rect(Area *a, float *bx, float *by) {
+    *bx = a->x + 4.0f;
+    *by = a->y + 4.0f;
+}
+
 static void draw_area_chrome(Area *a) {
     ui_rect(a->x, a->y, a->w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
     ui_rect(a->x, a->y, 1.0f, a->h, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
 
-    float bx = a->x + a->w - UI_TYPE_ICON_SIZE - 4.0f;
-    float by = a->y + 4.0f;
+    float bx, by;
+    type_icon_rect(a, &bx, &by);
     SvgIcon *icon = icon_for_panel(a->panel_type);
     if (icon) ui_icon_draw(bx, by, UI_TYPE_ICON_SIZE, *icon, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 0.85f);
 
     if (a->type_menu_open) {
         float menu_w = 170.0f, row_h = 24.0f;
         float menu_h = row_h * PANEL_TYPE_COUNT;
-        float menu_x = bx + UI_TYPE_ICON_SIZE - menu_w;
+        /* Spawns directly underneath the icon now that the icon lives in
+         * the top-left corner -- left edges aligned, growing down and to
+         * the right, rather than the old top-right icon's right-aligned
+         * leftward-growing menu. */
+        float menu_x = bx;
         float menu_y = by + UI_TYPE_ICON_SIZE + 2.0f;
         ui_rect(menu_x, menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
         ui_rect(menu_x, menu_y, menu_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
         for (int i = 0; i < PANEL_TYPE_COUNT; i++) {
             float ry = menu_y + i * row_h;
             SvgIcon *ri = icon_for_panel((PanelType)i);
+            /* "[icon] Panelname" rows */
             if (ri) ui_icon_draw(menu_x + 6.0f, ry + 3.0f, 18.0f, *ri, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.85f);
             ui_text_draw(menu_x + 30.0f, ry + 3.0f, PANEL_NAMES[i], g_ui.font_body, 13.0f,
                          UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
@@ -528,7 +541,12 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
     float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
     float row_h = 20.0f;
     int row_index = 0;
-    ui_text_draw(x, y, "Outliner", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    /* Title only, shifted right past the type-switcher icon now sitting in
+     * this same top-left corner (see draw_area_chrome) and raised to sit
+     * level with it (icon top is a->y+4, not the normal a->y+UI_PANEL_PAD
+     * content margin) -- the rows below it start further down, clear of
+     * the icon already, so they keep the normal left margin and y. */
+    ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Outliner", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     y += row_h + 6.0f;
 
     char line[128];
@@ -567,7 +585,7 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
 static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
     ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
     float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
-    ui_text_draw(x, y, "Properties", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Properties", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     y += 26.0f;
 
     if (ctx->test_obj_loaded && ctx->test_obj &&
@@ -617,7 +635,7 @@ static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
     (void)ctx;
     ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
     float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
-    ui_text_draw(x, y, "Chat", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Chat", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     y += 26.0f;
     /* Explicitly not connected to a real LLM yet -- that needs a
      * server-side proxy per phi.md's Hard Architectural Decision that the
@@ -634,7 +652,7 @@ static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
 }
 
 static void draw_panel_stub(Area *a, const char *name) {
-    ui_text_draw(a->x + UI_PANEL_PAD, a->y + UI_PANEL_PAD, name, g_ui.font_bold, 15.0f,
+    ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, name, g_ui.font_bold, 15.0f,
                  UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     ui_text_draw(a->x + UI_PANEL_PAD, a->y + UI_PANEL_PAD + 24.0f, "Not implemented yet.",
                  g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
@@ -713,8 +731,8 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
         return hit_test_area(a->child[0], x, y, button, pressed, ctx) ||
                hit_test_area(a->child[1], x, y, button, pressed, ctx);
     }
-    float bx = a->x + a->w - UI_TYPE_ICON_SIZE - 4.0f;
-    float by = a->y + 4.0f;
+    float bx, by;
+    type_icon_rect(a, &bx, &by);
     if (button == 0 && pressed && point_in_rect((float)x, (float)y, bx, by, UI_TYPE_ICON_SIZE, UI_TYPE_ICON_SIZE)) {
         a->type_menu_open = !a->type_menu_open;
         return 1;
@@ -722,7 +740,7 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
     if (a->type_menu_open) {
         float menu_w = 170.0f, row_h = 24.0f;
         float menu_h = row_h * PANEL_TYPE_COUNT;
-        float menu_x = bx + UI_TYPE_ICON_SIZE - menu_w;
+        float menu_x = bx;  /* mirrors draw_area_chrome's now top-left-aligned menu spawn */
         float menu_y = by + UI_TYPE_ICON_SIZE + 2.0f;
         if (button == 0 && pressed) {
             if (point_in_rect((float)x, (float)y, menu_x, menu_y, menu_w, menu_h)) {
