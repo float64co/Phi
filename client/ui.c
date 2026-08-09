@@ -412,17 +412,6 @@ static void draw_branding_bar(void) {
 
     ui_rect(w1, 0.0f, w2, UI_BAR_H, 0.0f, 0.0f, 0.0f, 1.0f);
     ui_text_draw(w1 + pad_x, text_y, t2, g_ui.font_bold, brand_font, 1.0f, 1.0f, 1.0f, 1.0f);
-
-    /* Undo/redo, right-aligned (Zenith's icons, reused verbatim per
-     * instruction). No real undo stack exists yet to drive these -- drawn
-     * so the branding bar's layout is complete and they have a home,
-     * functional wiring is follow-up work once there's something to undo. */
-    float btn = UI_BAR_H * 0.5f, gap = 8.0f, right_pad = 16.0f;
-    float redo_x = (float)g_ui.screen_w - right_pad - btn;
-    float undo_x = redo_x - gap - btn;
-    float icon_y = (UI_BAR_H - btn) * 0.5f;
-    ui_icon_draw(undo_x, icon_y, btn, g_ui.icon_undo, UI_BRAND_TEXT_R, UI_BRAND_TEXT_G, UI_BRAND_TEXT_B, 0.85f);
-    ui_icon_draw(redo_x, icon_y, btn, g_ui.icon_redo, UI_BRAND_TEXT_R, UI_BRAND_TEXT_G, UI_BRAND_TEXT_B, 0.85f);
 }
 
 /* Main menu row, directly under the branding bar — Zenith's dark palette,
@@ -444,6 +433,19 @@ static void draw_menu_row(void) {
                      UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         x += w;
     }
+
+    /* Undo/redo, moved here from the branding bar and scaled down to fit
+     * this shorter row (UI_MENU_H, not UI_BAR_H), to the right of the
+     * File/Edit/View/Help entries above -- Zenith's icons, reused verbatim
+     * per the original instruction. No real undo stack exists yet to drive
+     * these; functional wiring is follow-up work once there's something to
+     * undo. */
+    float btn = UI_MENU_H * 0.55f, gap = 6.0f;
+    float icon_y = y + (UI_MENU_H - btn) * 0.5f;
+    x += 14.0f;  /* extra breathing room after "Help" before these start */
+    ui_icon_draw(x, icon_y, btn, g_ui.icon_undo, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 0.9f);
+    x += btn + gap;
+    ui_icon_draw(x, icon_y, btn, g_ui.icon_redo, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 0.9f);
 }
 
 /* ---- Per-area chrome: background, border, and the Blender-authentic
