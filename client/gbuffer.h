@@ -52,8 +52,8 @@ typedef struct {
     unsigned int fbo;
     unsigned int tex_albedo;       /* RGBA8: base color (RGB) + AO (A, unused yet, always 1.0) */
     unsigned int tex_normal;       /* RGB10_A2: world normal *0.5+0.5 (RGB) + metallic (A, unused yet) */
-    unsigned int tex_material;     /* RGBA8: roughness/emissive-mask/object-tag/spare — allocated, not yet meaningfully populated */
-    unsigned int tex_emissive;     /* R11F_G11F_B10F: allocated, always black — no emissive surfaces yet */
+    unsigned int tex_material;     /* RGBA8: R=metallic, G=roughness (B/A spare) — real per-face values for MeshObjects (renderer.c's PBR shader), a neutral 0/1 dielectric-rough default from the shared world/ground/players/rockets shader */
+    unsigned int tex_emissive;     /* R11F_G11F_B10F: real per-face emission for MeshObjects, always black from the shared shader (no emissive surfaces there yet) */
     unsigned int tex_velocity;     /* RG16F: real camera-motion UV-space delta, see renderer.c's u_prev_mvp */
     unsigned int tex_object_id;    /* R32UI: per-pixel object id, see gbuffer_pick_object_id */
     unsigned int tex_depth_stencil;/* DEPTH24_STENCIL8, samplable */
@@ -83,12 +83,14 @@ typedef struct {
     /* Bloom: threshold-extract (tex_bright) then a same-resolution 2-pass
      * separable blur (tex_blur_a = horizontal pass, tex_blur_b = vertical
      * pass = final blurred result), additively composited back into
-     * hdr_tex before tonemap. Honest caveat: current lighting math never
-     * produces HDR values above ~1.0 (no emissive materials, no
-     * over-bright lights exist yet) — the standard >1.0 threshold means
-     * this is correct, working plumbing with nothing to visibly bloom
-     * under current game content, the same situation tex_material/
-     * tex_emissive above are already in. Not a full mip-chain
+     * hdr_tex before tonemap. Honest caveat: MOST current game content
+     * (world/ground/players/rockets) still never exceeds ~1.0 HDR — no
+     * emissive materials, no over-bright lights on that shared shader path
+     * — but a MeshObject face with a high emission value (see halfedge.h's
+     * per-face material, settable via the console's matemit command) now
+     * genuinely can, and will genuinely bloom; the standard >1.0 threshold
+     * was already correct, working plumbing, it just had nothing to catch
+     * before this. Not a full mip-chain
      * downsample/upsample (real bloom implementations usually use one
      * for a softer falloff) — same-resolution 2-pass blur is enough for
      * a first pass. */
@@ -133,6 +135,7 @@ typedef struct {
     unsigned int brightpass_program, blur_program, composite_program;
     int light_u_albedo, light_u_normal, light_u_depth, light_u_light_dir, light_u_sky_color;
     int light_u_inv_view_proj, light_u_light_vp, light_u_shadow_map;
+    int light_u_material, light_u_emissive, light_u_cam_pos;
     int tonemap_u_hdr;
     int fxaa_u_tex, fxaa_u_resolution;
     int bright_u_tex, bright_u_threshold;
@@ -175,9 +178,12 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
  * Call once per frame after gbuffer_render_shadow_map. inv_view_proj is
  * the camera's inverse view-projection matrix
  * (renderer_get_inverse_view_proj), needed to reconstruct world-space
- * position from G-buffer depth for shadow-space projection. */
+ * position from G-buffer depth for shadow-space projection. cam_pos
+ * (Renderer.cam_pos) is the camera's world-space position, needed for the
+ * lighting pass's specular view direction now that it reads real per-face
+ * metallic/roughness (see LIGHTING_FRAG_SRC's own comment). */
 void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color,
-                      const float *inv_view_proj);
+                      const float *inv_view_proj, const float *cam_pos);
 
 /* Phase 0's "readPixels object ID selection" deliverable: reads back one
  * texel of the object-id attachment. (x,y) are framebuffer pixels,

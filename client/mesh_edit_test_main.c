@@ -158,6 +158,31 @@ int main(void) {
     CHECK(check_twin_integrity(hem), "no live edge twins a deleted face after loop cut");
     halfedge_destroy(hem);
 
+    /* ---- Per-face PBR material: default, set, and extrude/loop-cut
+     * inheritance (Phase 1's "PBR material assignment per face") ---- */
+    printf("[mesh_edit_test] per-face material: default, set, and inheritance...\n");
+    hem = halfedge_load_gltf("assets/cube.gltf");
+    CHECK(hem->faces[0].metallic == 0.0f && hem->faces[0].roughness == 0.8f,
+          "new faces default to metallic=0, roughness=0.8 (neutral dielectric/rough)");
+    float red[3] = {0.9f, 0.1f, 0.1f}, glow[3] = {2.0f, 0.0f, 0.0f};
+    halfedge_set_face_material(hem, 0, red, 1.5f /* out-of-range, should clamp */, -0.5f /* also clamps */, glow);
+    CHECK(hem->faces[0].base_color[0] == 0.9f && hem->faces[0].base_color[1] == 0.1f,
+          "matcolor-equivalent set applies base_color unclamped");
+    CHECK(hem->faces[0].metallic == 1.0f, "metallic clamps to [0,1] (1.5 -> 1.0)");
+    CHECK(hem->faces[0].roughness == 0.0f, "roughness clamps to [0,1] (-0.5 -> 0.0)");
+    CHECK(hem->faces[0].emission[0] == 2.0f, "emission is left unclamped (2.0 stays 2.0, for real bloom)");
+
+    int cap2 = mesh_edit_extrude_face(hem, 0, 4.0f);
+    CHECK(cap2 >= 0 &&
+          hem->faces[cap2].base_color[0] == 0.9f && hem->faces[cap2].metallic == 1.0f &&
+          hem->faces[cap2].roughness == 0.0f && hem->faces[cap2].emission[0] == 2.0f,
+          "extrude's new cap face inherits the source face's material exactly");
+    /* Spot-check one of the 6 new wall faces too (cap_face is always the
+     * first face added in extrude_or_inset, so the very next index is the
+     * first wall triangle -- see mesh_edit.c's own ordering). */
+    CHECK(hem->faces[cap2 + 1].base_color[0] == 0.9f, "extrude's wall faces also inherit the source material");
+    halfedge_destroy(hem);
+
     /* ---- Defensive: invalid inputs fail cleanly, don't crash ---- */
     printf("[mesh_edit_test] defensive checks (bad inputs)...\n");
     hem = halfedge_load_gltf("assets/cube.gltf");

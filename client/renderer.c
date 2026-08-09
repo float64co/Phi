@@ -76,7 +76,13 @@ static const char *FRAG_SRC =
     "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
     "  out_albedo    = vec4(u_mat_color, 1.0);\n"
     "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
-    "  out_material  = vec4(0.5, 0.0, 0.0, 0.0);\n"
+    /* Neutral dielectric/fully-rough default (metallic=0, roughness=1) --
+     * this shared shader (world/ground/players/rockets) has no real PBR
+     * material of its own yet, only a per-draw-call flat color. Matches a
+     * plain Lambertian look under gbuffer.c's lighting pass now that it
+     * actually reads this channel (see MeshObject's own PBR shader below
+     * for the real, per-face version of this data). */
+    "  out_material  = vec4(0.0, 1.0, 0.0, 0.0);\n"
     "  out_emissive  = vec4(0.0);\n"
     /* Screen-space UV-space motion vector: current NDC minus reprojected-
      * previous-frame NDC (see prev_mvp's comment in renderer.h — camera
@@ -142,12 +148,149 @@ static const char *FRAG_SRC =
     "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
     "  out_albedo    = vec4(u_mat_color, 1.0);\n"
     "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
-    "  out_material  = vec4(0.5, 0.0, 0.0, 0.0);\n"
+    /* Neutral dielectric/fully-rough default (metallic=0, roughness=1) --
+     * this shared shader (world/ground/players/rockets) has no real PBR
+     * material of its own yet, only a per-draw-call flat color. Matches a
+     * plain Lambertian look under gbuffer.c's lighting pass now that it
+     * actually reads this channel (see MeshObject's own PBR shader below
+     * for the real, per-face version of this data). */
+    "  out_material  = vec4(0.0, 1.0, 0.0, 0.0);\n"
     "  out_emissive  = vec4(0.0);\n"
     /* Screen-space UV-space motion vector: current NDC minus reprojected-
      * previous-frame NDC (see prev_mvp's comment in renderer.h — camera
      * motion only, not per-object motion), scaled by 0.5 since NDC's
      * [-1,1] range maps to UV's [0,1] range at half the extent. */
+    "  vec2 ndc_curr = v_clip_curr.xy / v_clip_curr.z;\n"
+    "  vec2 ndc_prev = v_clip_prev.xy / v_clip_prev.z;\n"
+    "  out_velocity  = vec4((ndc_curr - ndc_prev) * 0.5, 0.0, 0.0);\n"
+    "  out_object_id = u_object_id;\n"
+    "}\n";
+#endif
+
+/* ---- MeshObject's own PBR shader (Phase 1's "PBR material assignment per
+ * face") ----
+ * Separate program from VERT_SRC/FRAG_SRC above -- see meshobject.h's
+ * MESHOBJ_VERTEX_STRIDE comment for why this isn't just the shared program
+ * with a bigger vertex format. Real per-face baseColor/metallic/roughness/
+ * emission (as vertex attributes, duplicated per corner the same way
+ * meshobject_build_render_mesh_from_halfedge already duplicates per-face
+ * normals) flow straight into the G-buffer's albedo/material/emissive
+ * outputs — this is what gbuffer.c's lighting pass now actually samples
+ * (see its own comment) to produce a real, non-placeholder specular
+ * response instead of the shared shader's neutral dielectric/rough
+ * default. */
+#ifdef __EMSCRIPTEN__
+static const char *PBR_VERT_SRC =
+    "#version 300 es\n"
+    "in vec3 a_pos;\n"
+    "in vec3 a_normal;\n"
+    "in vec3 a_base_color;\n"
+    "in float a_metallic;\n"
+    "in float a_roughness;\n"
+    "in vec3 a_emission;\n"
+    "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_prev_mvp;\n"
+    "out vec3 v_normal;\n"
+    "out vec3 v_base_color;\n"
+    "out float v_metallic;\n"
+    "out float v_roughness;\n"
+    "out vec3 v_emission;\n"
+    "out vec3 v_clip_curr;\n"
+    "out vec3 v_clip_prev;\n"
+    "void main() {\n"
+    "  vec4 clip = u_mvp * vec4(a_pos, 1.0);\n"
+    "  gl_Position = clip;\n"
+    "  v_clip_curr = vec3(clip.xy, clip.w);\n"
+    "  vec4 clip_prev = u_prev_mvp * vec4(a_pos, 1.0);\n"
+    "  v_clip_prev = vec3(clip_prev.xy, clip_prev.w);\n"
+    "  v_normal = a_normal;\n"
+    "  v_base_color = a_base_color;\n"
+    "  v_metallic = a_metallic;\n"
+    "  v_roughness = a_roughness;\n"
+    "  v_emission = a_emission;\n"
+    "}\n";
+
+static const char *PBR_FRAG_SRC =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "in vec3  v_normal;\n"
+    "in vec3  v_base_color;\n"
+    "in float v_metallic;\n"
+    "in float v_roughness;\n"
+    "in vec3  v_emission;\n"
+    "in vec3  v_clip_curr;\n"
+    "in vec3  v_clip_prev;\n"
+    "uniform uint  u_object_id;\n"
+    "layout(location=0) out vec4 out_albedo;\n"
+    "layout(location=1) out vec4 out_normal;\n"
+    "layout(location=2) out vec4 out_material;\n"
+    "layout(location=3) out vec4 out_emissive;\n"
+    "layout(location=4) out vec4 out_velocity;\n"
+    "layout(location=5) out uint out_object_id;\n"
+    "void main() {\n"
+    "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
+    "  out_albedo    = vec4(v_base_color, 1.0);\n"
+    "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
+    "  out_material  = vec4(v_metallic, v_roughness, 0.0, 0.0);\n"
+    "  out_emissive  = vec4(v_emission, 0.0);\n"
+    "  vec2 ndc_curr = v_clip_curr.xy / v_clip_curr.z;\n"
+    "  vec2 ndc_prev = v_clip_prev.xy / v_clip_prev.z;\n"
+    "  out_velocity  = vec4((ndc_curr - ndc_prev) * 0.5, 0.0, 0.0);\n"
+    "  out_object_id = u_object_id;\n"
+    "}\n";
+#else
+static const char *PBR_VERT_SRC =
+    "#version 330 core\n"
+    "in vec3 a_pos;\n"
+    "in vec3 a_normal;\n"
+    "in vec3 a_base_color;\n"
+    "in float a_metallic;\n"
+    "in float a_roughness;\n"
+    "in vec3 a_emission;\n"
+    "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_prev_mvp;\n"
+    "out vec3 v_normal;\n"
+    "out vec3 v_base_color;\n"
+    "out float v_metallic;\n"
+    "out float v_roughness;\n"
+    "out vec3 v_emission;\n"
+    "out vec3 v_clip_curr;\n"
+    "out vec3 v_clip_prev;\n"
+    "void main() {\n"
+    "  vec4 clip = u_mvp * vec4(a_pos, 1.0);\n"
+    "  gl_Position = clip;\n"
+    "  v_clip_curr = vec3(clip.xy, clip.w);\n"
+    "  vec4 clip_prev = u_prev_mvp * vec4(a_pos, 1.0);\n"
+    "  v_clip_prev = vec3(clip_prev.xy, clip_prev.w);\n"
+    "  v_normal = a_normal;\n"
+    "  v_base_color = a_base_color;\n"
+    "  v_metallic = a_metallic;\n"
+    "  v_roughness = a_roughness;\n"
+    "  v_emission = a_emission;\n"
+    "}\n";
+
+static const char *PBR_FRAG_SRC =
+    "#version 330 core\n"
+    "in vec3  v_normal;\n"
+    "in vec3  v_base_color;\n"
+    "in float v_metallic;\n"
+    "in float v_roughness;\n"
+    "in vec3  v_emission;\n"
+    "in vec3  v_clip_curr;\n"
+    "in vec3  v_clip_prev;\n"
+    "uniform uint  u_object_id;\n"
+    "layout(location=0) out vec4 out_albedo;\n"
+    "layout(location=1) out vec4 out_normal;\n"
+    "layout(location=2) out vec4 out_material;\n"
+    "layout(location=3) out vec4 out_emissive;\n"
+    "layout(location=4) out vec4 out_velocity;\n"
+    "layout(location=5) out uint out_object_id;\n"
+    "void main() {\n"
+    "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
+    "  out_albedo    = vec4(v_base_color, 1.0);\n"
+    "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
+    "  out_material  = vec4(v_metallic, v_roughness, 0.0, 0.0);\n"
+    "  out_emissive  = vec4(v_emission, 0.0);\n"
     "  vec2 ndc_curr = v_clip_curr.xy / v_clip_curr.z;\n"
     "  vec2 ndc_prev = v_clip_prev.xy / v_clip_prev.z;\n"
     "  out_velocity  = vec4((ndc_curr - ndc_prev) * 0.5, 0.0, 0.0);\n"
@@ -285,6 +428,36 @@ static unsigned int link_program(const char *vsrc, const char *fsrc) {
     return p;
 }
 
+/* Same shape as link_program, but binds MeshObject's own PBR attribute set
+ * (see PBR_VERT_SRC/PBR_FRAG_SRC's own comment) instead of a_pos/a_normal/
+ * a_mat_id -- kept as a separate function rather than parameterizing
+ * link_program's attribute list, since this is the only other program
+ * this renderer ever links and a one-off list doesn't earn a shared
+ * general mechanism. */
+static unsigned int link_pbr_program(const char *vsrc, const char *fsrc) {
+    unsigned int vs = compile_shader(GL_VERTEX_SHADER,   vsrc);
+    unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fsrc);
+    unsigned int p  = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glBindAttribLocation(p, 0, "a_pos");
+    glBindAttribLocation(p, 1, "a_normal");
+    glBindAttribLocation(p, 2, "a_base_color");
+    glBindAttribLocation(p, 3, "a_metallic");
+    glBindAttribLocation(p, 4, "a_roughness");
+    glBindAttribLocation(p, 5, "a_emission");
+    glLinkProgram(p);
+    int ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512]; glGetProgramInfoLog(p, 512, NULL, log);
+        printf("[renderer] PBR program link error: %s\n", log);
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    gl_check("link_pbr_program");
+    return p;
+}
+
 /* ---- Box VBO (pos+normal, 6 floats/vert, 36 verts) ---- */
 static void build_box_vbo(unsigned int *vbo, float hw, float h, float hd) {
     float verts[36 * 6];
@@ -407,6 +580,13 @@ Renderer *renderer_create(int width, int height) {
 
     printf("[renderer] prog=%u mvp=%d prev_mvp=%d ldir=%d mcol=%d\n",
            r->program, r->u_mvp, r->u_prev_mvp, r->u_light_dir, r->u_mat_color);
+
+    r->pbr_program    = link_pbr_program(PBR_VERT_SRC, PBR_FRAG_SRC);
+    r->pbr_u_mvp      = glGetUniformLocation(r->pbr_program, "u_mvp");
+    r->pbr_u_prev_mvp = glGetUniformLocation(r->pbr_program, "u_prev_mvp");
+    r->pbr_u_object_id = glGetUniformLocation(r->pbr_program, "u_object_id");
+    printf("[renderer] pbr_prog=%u pbr_mvp=%d pbr_prev_mvp=%d\n",
+           r->pbr_program, r->pbr_u_mvp, r->pbr_u_prev_mvp);
 
     build_box_vbo_centered(&r->rocket_vbo, 3.0f, 3.0f, 12.0f);
     init_palette(r);
@@ -555,15 +735,15 @@ void renderer_draw_world(Renderer *r, RenderMesh *mesh) {
 }
 
 /* Phase 1 foundation: draws a MeshObject (glTF-sourced, via the half-edge
- * structure — see meshobject.h/halfedge_gltf.c) through the same shader/
- * pipeline as everything else, just with its own position+orientation
- * model transform. Same VERTEX_STRIDE=7 (pos,normal,mat_id) layout
- * renderer_draw_world already uses, since meshobject_build_render_mesh_
- * from_halfedge produces exactly that shape. */
+ * structure — see meshobject.h/halfedge_gltf.c) with its own position/
+ * orientation model transform, through its OWN PBR shader/program (see
+ * PBR_VERT_SRC/PBR_FRAG_SRC and meshobject.h's MESHOBJ_VERTEX_STRIDE) —
+ * not the shared world/ground/players/rockets program, since only this
+ * entity type carries real per-face material data. */
 void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     if (!obj->render_mesh || obj->render_mesh->count == 0) return;
 
-    mesh_upload(obj->render_mesh);
+    mesh_upload_stride(obj->render_mesh, MESHOBJ_VERTEX_STRIDE);
     if (!obj->render_mesh->vbo) return;
 
     float vp[16]; build_vp(r, vp);
@@ -580,23 +760,26 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
 
     r->cur_object_id = 4000u + (unsigned int)obj->id;
 
-    glUseProgram(r->program);
+    glUseProgram(r->pbr_program);
     bind_renderer_vao(r);
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
-    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, prev_mvp);
-    float ld[3] = {0.577f, 0.577f, 0.577f};
-    glUniform3fv(r->u_light_dir, 1, ld);
-    glUniform3f(r->u_mat_color, 0.75f, 0.35f, 0.85f);  /* distinct purple, not used by any existing draw call */
-    glUniform1ui(r->u_object_id, r->cur_object_id);
+    glUniformMatrix4fv(r->pbr_u_mvp, 1, GL_FALSE, mvp);
+    glUniformMatrix4fv(r->pbr_u_prev_mvp, 1, GL_FALSE, prev_mvp);
+    glUniform1ui(r->pbr_u_object_id, r->cur_object_id);
 
     glBindBuffer(GL_ARRAY_BUFFER, obj->render_mesh->vbo);
-    int stride = VERTEX_STRIDE * (int)sizeof(float);
+    int stride = MESHOBJ_VERTEX_STRIDE * (int)sizeof(float);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)(9*sizeof(float)));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void*)(10*sizeof(float)));
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, stride, (void*)(11*sizeof(float)));
 
     glDrawArrays(GL_TRIANGLES, 0, obj->render_mesh->count);
     gl_check("draw_mesh_object");
@@ -604,6 +787,9 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     glDisableVertexAttribArray(0);
     glDisableVertexAttribArray(1);
     glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
+    glDisableVertexAttribArray(4);
+    glDisableVertexAttribArray(5);
 }
 
 static void draw_box(const Renderer *r, unsigned int vbo,

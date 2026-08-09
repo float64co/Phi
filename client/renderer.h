@@ -30,6 +30,20 @@ typedef struct {
     int a_normal;
     int a_mat_id;
 
+    /* MeshObject's own PBR shader/program (see meshobject.h's
+     * MESHOBJ_VERTEX_STRIDE) -- a separate program from the shared one
+     * above rather than growing it for everyone, see meshobject.h's own
+     * comment on why. Attribute locations (0=a_pos, 1=a_normal,
+     * 2=a_base_color, 3=a_metallic, 4=a_roughness, 5=a_emission) are bound
+     * in link_pbr_program and only ever used by renderer_draw_mesh_object,
+     * so unlike a_pos/a_normal/a_mat_id above they don't need their own
+     * Renderer fields -- the one draw call that uses them just hardcodes
+     * the same fixed locations link_pbr_program bound. */
+    unsigned int pbr_program;
+    int pbr_u_mvp;
+    int pbr_u_prev_mvp;
+    int pbr_u_object_id;
+
     /* Camera */
     float cam_pos[3];
     float cam_yaw;

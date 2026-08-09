@@ -85,7 +85,36 @@ int halfedge_add_face(HalfEdgeMesh *hem, const int *vert_indices, int n) {
     hem->faces[face_idx].edge = first_edge;
     hem->faces[face_idx].count = n;
     hem->faces[face_idx].deleted = 0;
+    /* Neutral dielectric/rough default -- close to this codebase's
+     * pre-PBR flat-lit look (see renderer.c's lighting-pass comment on
+     * why the shared, non-editable geometry's own material placeholder
+     * was changed to match: metallic 0, roughness near 1 keeps a plain
+     * diffuse response, no surprising bright specular out of nowhere). */
+    hem->faces[face_idx].base_color[0] = 0.7f;
+    hem->faces[face_idx].base_color[1] = 0.7f;
+    hem->faces[face_idx].base_color[2] = 0.7f;
+    hem->faces[face_idx].metallic  = 0.0f;
+    hem->faces[face_idx].roughness = 0.8f;
+    hem->faces[face_idx].emission[0] = 0.0f;
+    hem->faces[face_idx].emission[1] = 0.0f;
+    hem->faces[face_idx].emission[2] = 0.0f;
     return face_idx;
+}
+
+static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+void halfedge_set_face_material(HalfEdgeMesh *hem, int f, const float base_color[3],
+                                 float metallic, float roughness, const float emission[3]) {
+    if (f < 0 || f >= hem->face_count || hem->faces[f].deleted) return;
+    HEFace *face = &hem->faces[f];
+    face->base_color[0] = base_color[0];
+    face->base_color[1] = base_color[1];
+    face->base_color[2] = base_color[2];
+    face->metallic  = clamp01(metallic);
+    face->roughness = clamp01(roughness);
+    face->emission[0] = emission[0];
+    face->emission[1] = emission[1];
+    face->emission[2] = emission[2];
 }
 
 void halfedge_delete_face(HalfEdgeMesh *hem, int f) {

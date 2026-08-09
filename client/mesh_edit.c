@@ -39,9 +39,17 @@ static int extrude_or_inset(HalfEdgeMesh *hem, int f, const int *verts, int n, c
     for (int i = 0; i < n; i++)
         new_v[i] = halfedge_add_vertex(hem, new_pos[i][0], new_pos[i][1], new_pos[i][2]);
 
+    /* Copy the source face's material before deleting it -- extruding or
+     * insetting a red face should still look red, not silently revert to
+     * halfedge_add_face's neutral default. Applied uniformly to the cap
+     * and every wall triangle (a real editor might let walls diverge, but
+     * uniform inheritance is the honest minimal behavior for this pass). */
+    HEFace src = hem->faces[f];
+
     halfedge_delete_face(hem, f);
 
     int cap_face = halfedge_add_face(hem, new_v, n);
+    halfedge_set_face_material(hem, cap_face, src.base_color, src.metallic, src.roughness, src.emission);
 
     for (int i = 0; i < n; i++) {
         int a = verts[i], b = verts[(i + 1) % n];
@@ -56,8 +64,10 @@ static int extrude_or_inset(HalfEdgeMesh *hem, int f, const int *verts, int n, c
          * that bordered the original face. */
         int tri1[3] = { a, b, nb };
         int tri2[3] = { a, nb, na };
-        halfedge_add_face(hem, tri1, 3);
-        halfedge_add_face(hem, tri2, 3);
+        int w1 = halfedge_add_face(hem, tri1, 3);
+        int w2 = halfedge_add_face(hem, tri2, 3);
+        halfedge_set_face_material(hem, w1, src.base_color, src.metallic, src.roughness, src.emission);
+        halfedge_set_face_material(hem, w2, src.base_color, src.metallic, src.roughness, src.emission);
     }
     return cap_face;
 }
@@ -129,22 +139,32 @@ int mesh_edit_loop_cut_edge(HalfEdgeMesh *hem, int e) {
     const float *pb = hem->verts[b].pos;
     int mv = halfedge_add_vertex(hem, (pa[0] + pb[0]) * 0.5f, (pa[1] + pb[1]) * 0.5f, (pa[2] + pb[2]) * 0.5f);
 
+    /* Copy each source face's material before deleting it, same reasoning
+     * as extrude_or_inset -- splitting a face shouldn't silently revert
+     * its pieces to the default material. */
+    HEFace src1 = hem->faces[f1];
+    HEFace src2 = f2 >= 0 ? hem->faces[f2] : src1;
+
     halfedge_delete_face(hem, f1);
     if (f2 >= 0) halfedge_delete_face(hem, f2);
 
     /* f1's loop was (a, b, c) CCW; splitting edge a-b at mv fans from c. */
     int tri1[3] = { a, mv, c };
     int tri2[3] = { mv, b, c };
-    halfedge_add_face(hem, tri1, 3);
-    halfedge_add_face(hem, tri2, 3);
+    int nf1 = halfedge_add_face(hem, tri1, 3);
+    int nf2 = halfedge_add_face(hem, tri2, 3);
+    halfedge_set_face_material(hem, nf1, src1.base_color, src1.metallic, src1.roughness, src1.emission);
+    halfedge_set_face_material(hem, nf2, src1.base_color, src1.metallic, src1.roughness, src1.emission);
 
     if (f2 >= 0) {
         /* f2's loop was (b, a, d) CCW (twin runs the opposite direction of
          * e) -- splitting edge b-a at mv fans from d, same pattern. */
         int tri3[3] = { b, mv, d };
         int tri4[3] = { mv, a, d };
-        halfedge_add_face(hem, tri3, 3);
-        halfedge_add_face(hem, tri4, 3);
+        int nf3 = halfedge_add_face(hem, tri3, 3);
+        int nf4 = halfedge_add_face(hem, tri4, 3);
+        halfedge_set_face_material(hem, nf3, src2.base_color, src2.metallic, src2.roughness, src2.emission);
+        halfedge_set_face_material(hem, nf4, src2.base_color, src2.metallic, src2.roughness, src2.emission);
     }
     return mv;
 }

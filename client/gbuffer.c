@@ -135,17 +135,31 @@ static const char *QUAD_VERT_SRC =
     "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
     "}\n";
 
+/* Lighting pass -- reads the FULL G-buffer now, not just albedo/normal:
+ * out_material (metallic/roughness) and out_emissive were being written by
+ * the geometry pass all along but never sampled here, so every surface's
+ * real material data was silently discarded and every object looked
+ * flat-diffuse regardless of what it actually was (see phi.md's PBR
+ * material note). This is a deliberately simplified Blinn-Phong-with-PBR-
+ * inputs approximation, not a full Cook-Torrance/GGX BRDF -- real
+ * metallic/roughness/emission now genuinely change the lit result (a
+ * mirror-smooth metal face visibly differs from a rough dielectric one),
+ * which is the actual bar for "real PBR inputs" this phase needs, without
+ * a large new BRDF implementation it doesn't. */
 static const char *LIGHTING_FRAG_SRC =
     GBUF_SHADER_HEADER
     "in vec2 v_uv;\n"
     "uniform sampler2D u_albedo;\n"
     "uniform sampler2D u_normal;\n"
     "uniform sampler2D u_depth;\n"
+    "uniform sampler2D u_material;\n"
+    "uniform sampler2D u_emissive;\n"
     "uniform sampler2D u_shadow_map;\n"
     "uniform mat4 u_inv_view_proj;\n"
     "uniform mat4 u_light_vp;\n"
     "uniform vec3 u_light_dir;\n"
     "uniform vec3 u_sky_color;\n"
+    "uniform vec3 u_cam_pos;\n"
     "out vec4 out_hdr;\n"
     "void main() {\n"
     /* Untouched/background pixels read back the far-plane depth this
@@ -156,6 +170,10 @@ static const char *LIGHTING_FRAG_SRC =
     "  if (depth >= 0.999999) { out_hdr = vec4(u_sky_color, 1.0); return; }\n"
     "  vec3 albedo = texture(u_albedo, v_uv).rgb;\n"
     "  vec3 n = texture(u_normal, v_uv).rgb * 2.0 - 1.0;\n"
+    "  vec2 mat = texture(u_material, v_uv).rg;\n"
+    "  float metallic = mat.x;\n"
+    "  float roughness = clamp(mat.y, 0.05, 1.0);\n"   /* floor avoids a divide-by-zero-ish infinite-shininess highlight at roughness==0 */
+    "  vec3 emissive = texture(u_emissive, v_uv).rgb;\n"
     "  float diff = max(dot(n, u_light_dir), 0.0);\n"
     "  float ambient = 0.3;\n"
     /* Reconstruct world-space position from this pixel's UV + depth via
@@ -174,7 +192,20 @@ static const char *LIGHTING_FRAG_SRC =
     "    float bias = 0.002;\n"   /* tuned to avoid acne on this scene's scale; may need revisiting once seen visually */
     "    if (lsc.z - bias > occluder_depth) shadow = 0.3;\n"  /* in shadow: dim, not black — crude, no PCF/soft edges yet */
     "  }\n"
-    "  out_hdr = vec4(albedo * (ambient + diff * 0.7 * shadow), 1.0);\n"
+    /* Metallic surfaces have ~no separate diffuse albedo in a physically-
+     * based model (their reflectance is all specular, tinted by their own
+     * color instead of white) — diffuse_albedo fades toward 0 as metallic
+     * rises, f0 (specular reflectance at normal incidence) blends from a
+     * flat 0.04 dielectric baseline toward the surface's own albedo. */
+    "  vec3 view_dir = normalize(u_cam_pos - world.xyz);\n"
+    "  vec3 half_dir = normalize(u_light_dir + view_dir);\n"
+    "  float ndoth = max(dot(n, half_dir), 0.0);\n"
+    "  float shininess = mix(4.0, 128.0, pow(1.0 - roughness, 2.0));\n"
+    "  vec3 f0 = mix(vec3(0.04), albedo, metallic);\n"
+    "  vec3 specular = f0 * pow(ndoth, shininess) * (1.0 - roughness * 0.9) * shadow;\n"
+    "  vec3 diffuse_albedo = albedo * (1.0 - metallic);\n"
+    "  vec3 lit = diffuse_albedo * (ambient + diff * 0.7 * shadow) + specular + emissive;\n"
+    "  out_hdr = vec4(lit, 1.0);\n"
     "}\n";
 
 static const char *SHADOW_VERT_SRC =
@@ -535,6 +566,9 @@ GBuffer *gbuffer_create(int w, int h) {
     gb->light_u_inv_view_proj = glGetUniformLocation(gb->lighting_program, "u_inv_view_proj");
     gb->light_u_light_vp      = glGetUniformLocation(gb->lighting_program, "u_light_vp");
     gb->light_u_shadow_map    = glGetUniformLocation(gb->lighting_program, "u_shadow_map");
+    gb->light_u_material      = glGetUniformLocation(gb->lighting_program, "u_material");
+    gb->light_u_emissive      = glGetUniformLocation(gb->lighting_program, "u_emissive");
+    gb->light_u_cam_pos       = glGetUniformLocation(gb->lighting_program, "u_cam_pos");
 
     gb->tonemap_program = link(QUAD_VERT_SRC, TONEMAP_FRAG_SRC);
     gb->tonemap_u_hdr = glGetUniformLocation(gb->tonemap_program, "u_hdr");
@@ -734,7 +768,7 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
 }
 
 void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color,
-                      const float *inv_view_proj) {
+                      const float *inv_view_proj, const float *cam_pos) {
     /* ---- Lighting: G-buffer -> HDR ---- */
     glBindFramebuffer(GL_FRAMEBUFFER, gb->hdr_fbo);
     glViewport(0, 0, gb->w, gb->h);
@@ -748,8 +782,13 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glUniform1i(gb->light_u_depth, 2);
     glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gb->shadow_tex);
     glUniform1i(gb->light_u_shadow_map, 3);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, gb->tex_material);
+    glUniform1i(gb->light_u_material, 4);
+    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, gb->tex_emissive);
+    glUniform1i(gb->light_u_emissive, 5);
     glUniform3fv(gb->light_u_light_dir, 1, light_dir);
     glUniform3fv(gb->light_u_sky_color, 1, sky_color);
+    glUniform3fv(gb->light_u_cam_pos, 1, cam_pos);
     glUniformMatrix4fv(gb->light_u_inv_view_proj, 1, GL_FALSE, inv_view_proj);
     glUniformMatrix4fv(gb->light_u_light_vp, 1, GL_FALSE, gb->light_vp);
     glBindVertexArray(gb->quad_vao);

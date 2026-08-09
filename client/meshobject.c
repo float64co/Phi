@@ -76,9 +76,9 @@ static int ray_intersect_triangle(Vec3f orig, Vec3f dir, Vec3f v0, Vec3f v1, Vec
 }
 
 /* Ray-vs-MeshObject picking: tests every triangle in render_mesh (already
- * flattened/vertex-duplicated-per-triangle, VERTEX_STRIDE=7 floats/vertex —
- * see octree_render.h), transformed into world space by the object's own
- * position+orientation, and returns the NEAREST hit (not just the first
+ * flattened/vertex-duplicated-per-triangle, MESHOBJ_VERTEX_STRIDE floats/
+ * vertex — see meshobject.h), transformed into world space by the object's
+ * own position+orientation, and returns the NEAREST hit (not just the first
  * triangle that happens to intersect) so overlapping/self-occluding
  * geometry picks the visually-correct face. O(triangle count) per call —
  * fine for this phase's small test assets (a handful to a few thousand
@@ -95,7 +95,7 @@ int meshobject_ray_pick(const MeshObject *obj, Vec3f ray_origin, Vec3f ray_dir, 
     for (int i = 0; i < tri_count; i++) {
         Vec3f local[3], world[3];
         for (int k = 0; k < 3; k++) {
-            const float *vp = data + (size_t)(i * 3 + k) * VERTEX_STRIDE;
+            const float *vp = data + (size_t)(i * 3 + k) * MESHOBJ_VERTEX_STRIDE;
             local[k] = (Vec3f){ vp[0], vp[1], vp[2] };
             world[k] = vec3_add(mat4_rotate_vec3(rot, local[k]), obj->position);
         }
@@ -171,10 +171,22 @@ static void face_normal(const HalfEdgeMesh *hem, const int *verts, float *n) {
     if (len > 1e-8f) { n[0] /= len; n[1] /= len; n[2] /= len; }
 }
 
-void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeMesh *hem, float mat_id) {
+void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeMesh *hem) {
     out->count = 0;
+    /* out->data may have been allocated by the generic mesh_create() (sized
+     * for octree_render.h's VERTEX_STRIDE=7), but this function's layout is
+     * MESHOBJ_VERTEX_STRIDE=14 floats/vertex -- correct the underlying
+     * buffer size for OUR stride up front (a no-op on later calls, once
+     * it's already sized right) rather than assuming whatever capacity was
+     * inherited is already byte-sized correctly. A bit more memory than the
+     * bare minimum (mesh_create's ~262k-vertex default capacity, now at 14
+     * floats/vertex instead of 7), but still trivial in absolute terms for
+     * this phase's single test-object slot. */
+    if (out->capacity < 1) out->capacity = 1;
+    out->data = (float *)realloc(out->data, (size_t)out->capacity * MESHOBJ_VERTEX_STRIDE * sizeof(float));
     for (int f = 0; f < hem->face_count; f++) {
         if (hem->faces[f].deleted) continue;
+        const HEFace *face = &hem->faces[f];
         int verts[3];
         halfedge_face_verts(hem, f, verts);
         float n[3];
@@ -182,13 +194,16 @@ void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeM
         for (int i = 0; i < 3; i++) {
             if (out->count >= out->capacity) {
                 out->capacity *= 2;
-                out->data = (float *)realloc(out->data, (size_t)out->capacity * VERTEX_STRIDE * sizeof(float));
+                out->data = (float *)realloc(out->data, (size_t)out->capacity * MESHOBJ_VERTEX_STRIDE * sizeof(float));
             }
             const float *p = hem->verts[verts[i]].pos;
-            float *v = out->data + out->count * VERTEX_STRIDE;
+            float *v = out->data + out->count * MESHOBJ_VERTEX_STRIDE;
             v[0] = p[0]; v[1] = p[1]; v[2] = p[2];
             v[3] = n[0]; v[4] = n[1]; v[5] = n[2];
-            v[6] = mat_id;
+            v[6] = face->base_color[0]; v[7] = face->base_color[1]; v[8] = face->base_color[2];
+            v[9]  = face->metallic;
+            v[10] = face->roughness;
+            v[11] = face->emission[0]; v[12] = face->emission[1]; v[13] = face->emission[2];
             out->count++;
         }
     }

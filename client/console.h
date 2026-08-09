@@ -4,6 +4,7 @@
 #include "net.h"
 #include "physics.h"
 #include "renderer.h"
+#include "meshobject.h"
 
 #define CONSOLE_LOG_LINES  12
 #define CONSOLE_LINE_LEN   128
@@ -38,8 +39,16 @@ typedef struct {
  * single-instance s_inp pattern) — there's only ever one console. */
 void console_init(ConsoleState *cs);
 
+/* mesh_obj/edit_face: the Phase 1 test MeshObject slot and whichever hem
+ * face was last ray-picked (see main.c's g_edit_face), for the matcolor/
+ * matmetal/matrough/matemit commands below to act on -- edit_face is -1
+ * when nothing's picked, mesh_obj->hem is NULL until a MeshObject has ever
+ * been spawned; both are checked before use, same "one slot, not general"
+ * honesty already established for the console's other MeshObject-adjacent
+ * behavior (see main.c's Add/Delete comments). */
 void console_update(ConsoleState *cs, InputState *inp, EditorState *ed,
-                    NetState *ns, GameState *gs, Renderer *r, Player *local);
+                    NetState *ns, GameState *gs, Renderer *r, Player *local,
+                    MeshObject *mesh_obj, int edit_face);
 
 /* Appends a line to the console log. Called by net.c on PKT_CONSOLE_MSG,
  * and usable for any other "print to console" need. */

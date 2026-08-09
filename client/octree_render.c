@@ -157,11 +157,15 @@ void mesh_rebuild(RenderMesh *m, const Octree *ot) {
 }
 
 void mesh_upload(RenderMesh *m) {
+    mesh_upload_stride(m, VERTEX_STRIDE);
+}
+
+void mesh_upload_stride(RenderMesh *m, int stride_floats) {
     if (!m->dirty) return;
     if (!m->vbo) glGenBuffers(1, &m->vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m->vbo);
     glBufferData(GL_ARRAY_BUFFER,
-                 m->count * VERTEX_STRIDE * sizeof(float),
+                 (size_t)m->count * (size_t)stride_floats * sizeof(float),
                  m->data, GL_STATIC_DRAW);
     m->dirty = 0;
 }

@@ -20,5 +20,11 @@ typedef struct {
 RenderMesh *mesh_create(void);
 void        mesh_destroy(RenderMesh *m);
 void        mesh_rebuild(RenderMesh *m, const Octree *ot);
-void        mesh_upload(RenderMesh *m);   /* uploads to GPU */
+void        mesh_upload(RenderMesh *m);   /* uploads to GPU, assumes VERTEX_STRIDE */
+/* Same as mesh_upload but for a buffer whose vertex layout isn't the
+ * generic VERTEX_STRIDE=7 format -- MeshObject's own richer PBR layout
+ * (see meshobject.h's MESHOBJ_VERTEX_STRIDE) uses this instead, since
+ * uploading its 14-float vertices through the hardcoded-stride mesh_upload
+ * would only copy roughly half of each vertex's actual bytes to the GPU. */
+void        mesh_upload_stride(RenderMesh *m, int stride_floats);
 void        mesh_draw(RenderMesh *m);     /* glDrawArrays */

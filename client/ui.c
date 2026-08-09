@@ -529,7 +529,7 @@ static void draw_panel_scene(Area *a, const UIRenderContext *ctx) {
     gbuffer_render_shadow_map(ctx->gbuf, ctx->world_mesh, ctx->light_dir);
     float inv_vp[16];
     renderer_get_inverse_view_proj(ctx->renderer, inv_vp);
-    gbuffer_resolve(ctx->gbuf, ctx->light_dir, ctx->sky_color, inv_vp);
+    gbuffer_resolve(ctx->gbuf, ctx->light_dir, ctx->sky_color, inv_vp, ctx->renderer->cam_pos);
     renderer_end_frame(ctx->renderer);
 
     /* gbuffer_resolve's FXAA pass just changed which program/VAO/blend
@@ -620,6 +620,38 @@ static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
         y += 20.0f;
         ui_text_draw(x, y, ctx->test_obj->is_static ? "Static: yes" : "Static: no", g_ui.font_mono, 13.0f,
                      UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        y += 24.0f;
+
+        /* Per-face PBR material readout (Phase 1's "PBR material assignment
+         * per face") -- read-only here by design (see meshobject.h's own
+         * comment on the console being the editing side, matching this
+         * task's "simple readout+editor, not a full material-browser UI"
+         * scope). Shows whichever face was last ray-picked (see main.c's
+         * g_edit_face), not necessarily under the cursor right now. */
+        if (ctx->test_obj->hem && ctx->edit_face >= 0 &&
+            ctx->edit_face < ctx->test_obj->hem->face_count &&
+            !ctx->test_obj->hem->faces[ctx->edit_face].deleted) {
+            const HEFace *face = &ctx->test_obj->hem->faces[ctx->edit_face];
+            snprintf(line, sizeof(line), "Face %d material:", ctx->edit_face);
+            ui_text_draw(x, y, line, g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+            y += 20.0f;
+            snprintf(line, sizeof(line), "  base_color: %.2f, %.2f, %.2f",
+                     face->base_color[0], face->base_color[1], face->base_color[2]);
+            ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            y += 18.0f;
+            snprintf(line, sizeof(line), "  metallic: %.2f  roughness: %.2f", face->metallic, face->roughness);
+            ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            y += 18.0f;
+            snprintf(line, sizeof(line), "  emission: %.2f, %.2f, %.2f",
+                     face->emission[0], face->emission[1], face->emission[2]);
+            ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            y += 20.0f;
+            ui_text_draw(x, y, "console: matcolor/matmetal/matrough/matemit", g_ui.font_body, 12.0f,
+                         UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        } else {
+            ui_text_draw(x, y, "No face selected (click a face)", g_ui.font_body, 13.0f,
+                         UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        }
     } else {
         ui_text_draw(x, y, "Nothing selected", g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         y += 22.0f;

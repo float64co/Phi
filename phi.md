@@ -1089,6 +1089,105 @@ after the fix.
   always filling the window. Combined with the already-existing
   `gbuffer_resize()`, this is what makes a non-fullscreen 3D viewport
   panel possible at all.
+- **PBR material assignment per face** (`halfedge.h`'s `HEFace.base_color/
+  metallic/roughness/emission`, `halfedge_set_face_material()`; `client/
+  meshobject.h`'s new `MESHOBJ_VERTEX_STRIDE=14` layout; a new dedicated
+  `renderer.c` shader/program; `gbuffer.c`'s lighting pass extended to
+  actually consume it) — real per-face material, not a cosmetic field.
+  - **Data model**: material lives directly on `HEFace` (base_color[3],
+    metallic, roughness, emission[3]) rather than a separate material
+    table — faces are already the natural per-face unit and this codebase
+    has no other indirect-reference machinery, so a table would be
+    structure for its own sake. `halfedge_add_face()` defaults every new
+    face to a neutral dielectric/rough material (0.7 grey, metallic 0,
+    roughness 0.8); `halfedge_set_face_material()` sets it, clamping
+    metallic/roughness to [0,1] (base color and emission are left
+    unclamped — emission in particular is expected to go above 1.0 for a
+    genuinely bright/bloomable surface). `mesh_edit.c`'s extrude/inset/
+    loop-cut all copy the source face's material onto whatever new faces
+    replace it (captured before `halfedge_delete_face`, since a tombstoned
+    face's data stays intact but its slot is about to represent something
+    else) — extruding or splitting a red face keeps it red rather than
+    silently reverting to the default grey.
+  - **Rendering**: MeshObject's own vertex format
+    (`meshobject_build_render_mesh_from_halfedge`) grew from the shared
+    `VERTEX_STRIDE=7` (pos, normal, an unused `mat_id` float that had no
+    fragment-shader consumer at all — dead plumbing since Phase 1's
+    foundation slice) to a dedicated 14-float layout duplicating the
+    owning face's full material across all 3 corners, the same way
+    per-face flat normals already get duplicated. This is deliberately a
+    SEPARATE format/shader path from the shared world/ground/players/
+    rockets one (`renderer.c`'s new `PBR_VERT_SRC`/`PBR_FRAG_SRC`,
+    `pbr_program`) rather than growing the shared format for everyone —
+    that geometry has no per-face material concept (one `glUniform3f` per
+    whole draw call) and giving every vertex in the game 8 unused extra
+    floats would be pure waste. Discovered and fixed two real correctness
+    issues this required: `octree_render.c`'s `mesh_upload()` hardcoded
+    `VERTEX_STRIDE` for its `glBufferData` byte-size calculation (would
+    have silently uploaded only half of each MeshObject vertex's actual
+    bytes) — factored into a new `mesh_upload_stride(m, stride_floats)`
+    that `mesh_upload()` itself now just calls with the generic constant;
+    and the generic `mesh_create()`'s initial buffer allocation is sized
+    for the generic stride too, so `meshobject_build_render_mesh_from_
+    halfedge` now corrects its own buffer's byte size up front rather than
+    trusting whatever it inherited.
+  - **Lighting**: `gbuffer.c`'s G-buffer had carried dedicated material/
+    emissive render targets since Phase 0, but the lighting pass never
+    actually sampled them — every surface rendered flat-diffuse regardless
+    of what the (unread) material buffer said. Now it does: a deliberately
+    simplified Blinn-Phong-with-real-PBR-inputs approximation (not a full
+    Cook-Torrance/GGX BRDF — that's more than this phase needs), with
+    metallic surfaces losing their separate diffuse term and gaining an
+    albedo-tinted specular one, dielectrics keeping a flat 0.04 specular
+    reflectance, and roughness controlling both specular sharpness and
+    strength. `gbuffer_resolve()` gained a `cam_pos` parameter (the
+    specular term needs a view direction) threaded from `ui.c`'s existing
+    `Renderer*`. The shared world/ground/players/rockets shader's own
+    material placeholder changed from an arbitrary `(0.5,0,0,0)` to a
+    deliberate neutral `(metallic=0, roughness=1)` — plain Lambertian,
+    matching that geometry's pre-existing flat-diffuse look now that the
+    channel is actually read, rather than an arbitrary half-metallic value
+    suddenly becoming visible.
+  - **Editor**: a per-face material readout in the Properties panel
+    (base_color/metallic/roughness/emission for whichever face was last
+    ray-picked — `ui.c`'s `draw_panel_properties`, reading a new
+    `UIRenderContext.edit_face`) plus four new console commands
+    (`matcolor r g b`, `matmetal v`, `matrough v`, `matemit r g b`) that
+    edit it, per this task's "simple readout+editor, not a full
+    material-browser UI" scope. `main.c`'s `try_pick_object` now does
+    face-level picking (`meshobject_ray_pick_face`, already built for
+    extrude/inset/loop-cut) on every Scene-panel click, not just
+    right-click, so the Properties readout and the context-menu edit
+    target both track "whichever face was last actually clicked."
+    `console_update`/`console_submit`/`console_dispatch` all gained
+    `MeshObject*`/`edit_face` parameters to reach this — `console.h` now
+    includes `meshobject.h`.
+  - **Verification**: this iteration hit a deeper environment problem than
+    the extrude/inset/loop-cut work earlier in this same loop — the X
+    server became fully unresponsive (`xdpyinfo` itself hangs/times out,
+    not just the game window's own connection resetting), so not even a
+    single native GL context could be created, headless or otherwise, at
+    any point while this feature was built. No live or numeric-readback GL
+    verification was possible this pass — flagged honestly rather than
+    guessed at. What WAS verified: the data-model layer (`halfedge.c`'s
+    material defaults/clamping/inheritance) via `mesh_edit_test`'s
+    existing no-GL harness, extended with real checks (default values,
+    `halfedge_set_face_material`'s clamping behavior, and that extrude's
+    new cap AND wall faces both inherit the source face's exact material)
+    — all passing. The GL-dependent layer (shader compilation, vertex
+    attribute wiring, the lighting pass's new sampling/specular math) was
+    verified by careful manual cross-checification instead of execution:
+    every attribute name in `PBR_VERT_SRC` matches `link_pbr_program`'s
+    `glBindAttribLocation` calls; every vertex attribute's byte offset in
+    `renderer_draw_mesh_object` matches `meshobject_build_render_mesh_
+    from_halfedge`'s actual write layout field-by-field; every sampler/
+    uniform name in `LIGHTING_FRAG_SRC` matches its `glGetUniformLocation`
+    call and its `gbuffer_resolve` binding; texture units 0-5 are each
+    used exactly once. This is real scrutiny, not a substitute for
+    actually running it — the shader logic itself (in particular the
+    simplified specular BRDF's visual balance) remains genuinely unseen
+    and should be the first thing checked once a real display is
+    available again.
 
 **Design reference**: evaluated a separate, mature CAD tool's C++/Python UI
 codebase as reference material (brought in temporarily, read-only, removed

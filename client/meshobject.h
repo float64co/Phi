@@ -33,6 +33,27 @@ typedef struct {
     HalfEdgeMesh *hem;
 } MeshObject;
 
+/* MeshObject's own vertex layout (interleaved, non-indexed/vertex-
+ * duplicated-per-triangle, same shape as octree_render.h's generic
+ * VERTEX_STRIDE=7 format but richer -- a real per-face PBR material
+ * replaces the old single unused mat_id float, see meshobject_build_
+ * render_mesh_from_halfedge). Deliberately a SEPARATE format/shader path
+ * from the shared world/ground/players/rockets one (renderer.c's
+ * VERTEX_STRIDE=7 + its shared program) rather than growing that shared
+ * format for everyone: those draw calls have no per-face material concept
+ * at all (their color is one glUniform3f per whole draw call) and don't
+ * need one, so giving every vertex in the game 8 extra floats it'd never
+ * use would be pure waste for no benefit outside the one editable entity
+ * type that actually has faces worth coloring individually.
+ *   pos:        3 x float (12 bytes)
+ *   normal:     3 x float (12 bytes)
+ *   base_color: 3 x float (12 bytes)
+ *   metallic:   1 x float ( 4 bytes)
+ *   roughness:  1 x float ( 4 bytes)
+ *   emission:   3 x float (12 bytes)
+ */
+#define MESHOBJ_VERTEX_STRIDE 14
+
 Quat quat_identity(void);
 
 /* Column-major 4x4 rotation matrix from a unit quaternion, same layout
@@ -43,16 +64,17 @@ Quat quat_identity(void);
  * matrix/rotation code (see renderer.c's mat4_inverse comment). */
 void quat_to_mat4(const Quat *q, float *out16);
 
-/* Builds render_mesh's flat (pos,normal,mat_id) triangle list (RenderMesh's
- * existing VERTEX_STRIDE=7 format, non-indexed/vertex-duplicated-per-
- * triangle — same shape octree_render.c's mesh_rebuild already produces)
- * from a HalfEdgeMesh. Computes flat per-face normals since this phase's
- * test asset carries no NORMAL attribute (see halfedge_gltf.c's load
- * path) — every corner of a face gets that face's flat normal, so
- * lighting is faceted rather than smooth-shaded. mat_id is a fixed value
- * for the whole object (no per-face material assignment yet, that's an
- * editor feature out of scope for this foundation slice). */
-void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeMesh *hem, float mat_id);
+/* Builds render_mesh's flat MESHOBJ_VERTEX_STRIDE-per-vertex triangle list
+ * (non-indexed/vertex-duplicated-per-triangle) from a HalfEdgeMesh.
+ * Computes flat per-face normals since this phase's test asset carries no
+ * NORMAL attribute (see halfedge_gltf.c's load path) — every corner of a
+ * face gets that face's flat normal, so lighting is faceted rather than
+ * smooth-shaded. Every corner of a face also gets that face's real PBR
+ * material (HEFace's own base_color/metallic/roughness/emission fields,
+ * see halfedge.h) — a genuine per-face value now, not the old fixed-
+ * per-whole-object mat_id float this function used to take as a
+ * parameter. */
+void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeMesh *hem);
 
 /* Real ray/triangle picking against obj's actual world-space geometry
  * (Möller–Trumbore, not a bounding-box approximation) — returns 1 and

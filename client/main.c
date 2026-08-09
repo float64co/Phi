@@ -136,7 +136,7 @@ static void spawn_test_mesh_object(void) {
     for (int i = 0; i < hem->vert_count; i++)
         for (int a = 0; a < 3; a++)
             hem->verts[i].pos[a] *= 16.0f;
-    meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, hem, 4.0f);
+    meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, hem);
     /* Kept alive (not halfedge_destroy'd) as the object's live editable
      * representation -- extrude/inset/loop-cut (mesh_edit.c) mutate this
      * in place and re-flatten, so it needs to survive past this one
@@ -163,6 +163,7 @@ static void delete_test_mesh_object(void) {
     halfedge_destroy(g_test_mesh_object.hem);
     g_test_mesh_object.hem = NULL;
     g_test_mesh_loaded = 0;
+    g_edit_face = -1;
     printf("[main] deleted MeshObject\n");
 }
 
@@ -173,7 +174,7 @@ static void delete_test_mesh_object(void) {
  * behavior over cosmetic-only claims" bar the ray-picking/gizmo work
  * already established this session), not just "it compiled". */
 static void rebuild_test_mesh_render(const char *op_name, int tris_before) {
-    meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, g_test_mesh_object.hem, 4.0f);
+    meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, g_test_mesh_object.hem);
     int tris_after = g_test_mesh_object.render_mesh->count / 3;
     printf("[main] mesh edit '%s': %d -> %d triangles\n", op_name, tris_before, tris_after);
 }
@@ -266,11 +267,21 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
         }
     }
 
-    float t;
-    if (g_test_mesh_loaded && meshobject_ray_pick(&g_test_mesh_object, origin, dir, &t)) {
+    /* Face-level pick (not just whole-object) so g_edit_face -- and
+     * therefore the Properties panel's material readout -- stays in sync
+     * with plain left-clicks too, not only the right-click-to-open-the-
+     * context-menu path (see g_edit_face's own comment). Uses hem directly
+     * via meshobject_ray_pick_face rather than the coarser render_mesh-
+     * only meshobject_ray_pick, since the test object always has a hem
+     * once loaded (see spawn_test_mesh_object) and this gives a face index
+     * for free from the same ray cast. */
+    float t; int face;
+    if (g_test_mesh_loaded && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
         ui_set_selected_object(4000u + (unsigned int)g_test_mesh_object.id);
+        g_edit_face = face;
     } else {
         ui_set_selected_object(0xFFFFFFFFu);
+        g_edit_face = -1;
     }
 }
 
@@ -323,6 +334,7 @@ static void main_loop(void *userdata) {
     ui_ctx.local_player_id = g_ns.local_id;
     ui_ctx.test_obj = &g_test_mesh_object;
     ui_ctx.test_obj_loaded = g_test_mesh_loaded;
+    ui_ctx.edit_face = g_edit_face;
     ui_ctx.console = &g_cs;
     memcpy(ui_ctx.light_dir, light_dir, sizeof(light_dir));
     memcpy(ui_ctx.sky_color, sky, sizeof(sky));
@@ -502,7 +514,8 @@ static void main_loop(void *userdata) {
     }
 
     if (local && local->alive) {
-        console_update(&g_cs, &g_inp, &g_ed, &g_ns, &g_gs, g_renderer, local);
+        console_update(&g_cs, &g_inp, &g_ed, &g_ns, &g_gs, g_renderer, local,
+                       &g_test_mesh_object, g_edit_face);
         editor_update(&g_ed, &g_gs, local, &g_inp, &g_ns, dt);
 
         if (g_ed.world_dirty) {

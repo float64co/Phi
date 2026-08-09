@@ -40,6 +40,8 @@ static void print_help(ConsoleState *cs) {
     log_push(cs, "fov <n> | sensitivity <n> | name <name> | players | kill | clear");
     log_push(cs, "save [name] | load [name] | newmap | maps | addbot | delbot");
     log_push(cs, "bind <key> <cmd> | unbind <key>");
+    log_push(cs, "matcolor r g b | matmetal v | matrough v | matemit r g b");
+    log_push(cs, "  (act on the last face right/left-clicked on the MeshObject)");
 }
 
 void console_init(ConsoleState *cs) {
@@ -59,7 +61,8 @@ void console_append(const char *line) {
  * press), so a bind behaves exactly as if its command had been typed. */
 static void console_dispatch(ConsoleState *cs, EditorState *ed, NetState *ns,
                              GameState *gs, Renderer *r, InputState *inp,
-                             Player *local, const char *line) {
+                             Player *local, MeshObject *mesh_obj, int edit_face,
+                             const char *line) {
     char cmd[32] = {0}, rest[CONSOLE_INPUT_LEN] = {0}, out[CONSOLE_LINE_LEN];
     int n = sscanf(line, "%31s %95[^\n]", cmd, rest);
     if (n < 1) return;
@@ -244,6 +247,64 @@ static void console_dispatch(ConsoleState *cs, EditorState *ed, NetState *ns,
         } else {
             log_push(cs, "usage: unbind <key>");
         }
+    } else if (strcmp(cmd, "matcolor") == 0 || strcmp(cmd, "matmetal") == 0 ||
+               strcmp(cmd, "matrough") == 0 || strcmp(cmd, "matemit") == 0) {
+        /* All four share one guard: a live face to act on. mesh_obj->hem is
+         * NULL until a MeshObject has ever been spawned (see meshobject.h);
+         * edit_face is -1 until something's actually been picked (see
+         * console_update's own doc comment). halfedge_set_face_material
+         * itself also guards against a stale/deleted index, so this isn't
+         * the only check, just the one that gives a clear message instead
+         * of a silent no-op. */
+        if (!mesh_obj || !mesh_obj->hem || edit_face < 0) {
+            log_push(cs, "no face selected (click a face on the MeshObject first)");
+        } else if (strcmp(cmd, "matcolor") == 0) {
+            float rr, gg, bb;
+            if (sscanf(rest, "%f %f %f", &rr, &gg, &bb) == 3) {
+                HEFace *f = &mesh_obj->hem->faces[edit_face];
+                halfedge_set_face_material(mesh_obj->hem, edit_face, (float[3]){rr,gg,bb},
+                                            f->metallic, f->roughness, f->emission);
+                meshobject_build_render_mesh_from_halfedge(mesh_obj->render_mesh, mesh_obj->hem);
+                snprintf(out, sizeof(out), "face %d base_color = %.2f %.2f %.2f", edit_face, rr, gg, bb);
+                log_push(cs, out);
+            } else {
+                log_push(cs, "usage: matcolor r g b (each 0..1)");
+            }
+        } else if (strcmp(cmd, "matmetal") == 0) {
+            float v;
+            if (sscanf(rest, "%f", &v) == 1) {
+                HEFace *f = &mesh_obj->hem->faces[edit_face];
+                halfedge_set_face_material(mesh_obj->hem, edit_face, f->base_color, v, f->roughness, f->emission);
+                meshobject_build_render_mesh_from_halfedge(mesh_obj->render_mesh, mesh_obj->hem);
+                snprintf(out, sizeof(out), "face %d metallic = %.2f", edit_face, mesh_obj->hem->faces[edit_face].metallic);
+                log_push(cs, out);
+            } else {
+                log_push(cs, "usage: matmetal <0..1>");
+            }
+        } else if (strcmp(cmd, "matrough") == 0) {
+            float v;
+            if (sscanf(rest, "%f", &v) == 1) {
+                HEFace *f = &mesh_obj->hem->faces[edit_face];
+                halfedge_set_face_material(mesh_obj->hem, edit_face, f->base_color, f->metallic, v, f->emission);
+                meshobject_build_render_mesh_from_halfedge(mesh_obj->render_mesh, mesh_obj->hem);
+                snprintf(out, sizeof(out), "face %d roughness = %.2f", edit_face, mesh_obj->hem->faces[edit_face].roughness);
+                log_push(cs, out);
+            } else {
+                log_push(cs, "usage: matrough <0..1>");
+            }
+        } else {  /* matemit */
+            float rr, gg, bb;
+            if (sscanf(rest, "%f %f %f", &rr, &gg, &bb) == 3) {
+                HEFace *f = &mesh_obj->hem->faces[edit_face];
+                halfedge_set_face_material(mesh_obj->hem, edit_face, f->base_color, f->metallic, f->roughness,
+                                            (float[3]){rr,gg,bb});
+                meshobject_build_render_mesh_from_halfedge(mesh_obj->render_mesh, mesh_obj->hem);
+                snprintf(out, sizeof(out), "face %d emission = %.2f %.2f %.2f", edit_face, rr, gg, bb);
+                log_push(cs, out);
+            } else {
+                log_push(cs, "usage: matemit r g b (each >= 0, above 1.0 for real bloom)");
+            }
+        }
     } else {
         snprintf(out, sizeof(out), "unknown command: %s (try 'help')", cmd);
         log_push(cs, out);
@@ -251,7 +312,8 @@ static void console_dispatch(ConsoleState *cs, EditorState *ed, NetState *ns,
 }
 
 static void console_submit(ConsoleState *cs, EditorState *ed, NetState *ns,
-                           GameState *gs, Renderer *r, InputState *inp, Player *local) {
+                           GameState *gs, Renderer *r, InputState *inp, Player *local,
+                           MeshObject *mesh_obj, int edit_face) {
     char line[CONSOLE_INPUT_LEN];
     strncpy(line, cs->input, sizeof(line) - 1);
     line[sizeof(line) - 1] = 0;
@@ -264,11 +326,12 @@ static void console_submit(ConsoleState *cs, EditorState *ed, NetState *ns,
     cs->input[0] = 0;
     cs->input_len = 0;
 
-    console_dispatch(cs, ed, ns, gs, r, inp, local, line);
+    console_dispatch(cs, ed, ns, gs, r, inp, local, mesh_obj, edit_face, line);
 }
 
 void console_update(ConsoleState *cs, InputState *inp, EditorState *ed,
-                    NetState *ns, GameState *gs, Renderer *r, Player *local) {
+                    NetState *ns, GameState *gs, Renderer *r, Player *local,
+                    MeshObject *mesh_obj, int edit_face) {
     /* Consume-on-read: always clear these edges so an unopened/just-closed
      * console never leaves them stuck for next frame. */
     int toggle = inp->console_toggle; inp->console_toggle = 0;
@@ -326,7 +389,7 @@ void console_update(ConsoleState *cs, InputState *inp, EditorState *ed,
                     char msg[CONSOLE_LINE_LEN];
                     snprintf(msg, sizeof(msg), "[bind %s] %s", codes[i], cs->bind_cmds[b]);
                     log_push(cs, msg);
-                    console_dispatch(cs, ed, ns, gs, r, inp, local, cs->bind_cmds[b]);
+                    console_dispatch(cs, ed, ns, gs, r, inp, local, mesh_obj, edit_face, cs->bind_cmds[b]);
                     break;
                 }
             }
@@ -373,6 +436,6 @@ void console_update(ConsoleState *cs, InputState *inp, EditorState *ed,
         }
     }
     if (enter) {
-        console_submit(cs, ed, ns, gs, r, inp, local);
+        console_submit(cs, ed, ns, gs, r, inp, local, mesh_obj, edit_face);
     }
 }

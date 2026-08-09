@@ -116,6 +116,7 @@ typedef struct {
     int         local_player_id;
     MeshObject *test_obj;        /* Phase 1's assets/cube.gltf test object, see main.c */
     int         test_obj_loaded;
+    int         edit_face;       /* main.c's g_edit_face -- last ray-picked hem face, -1 if none. Properties reads this for the per-face material readout. */
     ConsoleState *console;
     float       light_dir[3];
     float       sky_color[3];

@@ -40,6 +40,21 @@ typedef struct {
     int edge;     /* one half-edge bordering this face */
     int count;    /* number of vertices/edges in this face's loop */
     int deleted;  /* soft-delete tombstone, see halfedge_delete_face() */
+    /* Real per-face PBR material (Phase 1's "PBR material assignment per
+     * face" -- see phi.md). Lives directly on the face rather than in a
+     * separate material table/index: this structure has no other indirect-
+     * reference machinery (faces already ARE the natural per-face unit),
+     * and a session's worth of faces is small enough that a few extra
+     * floats per HEFace is negligible. halfedge_add_face() defaults every
+     * new face to a neutral dielectric/rough material (see its own
+     * comment); halfedge_set_face_material() is the intended way to
+     * change it (clamps metallic/roughness to sane ranges), though nothing
+     * stops direct field access the way .deleted already gets set/read
+     * directly elsewhere in this codebase. */
+    float base_color[3];
+    float metallic;
+    float roughness;
+    float emission[3];
 } HEFace;
 
 typedef struct {
@@ -56,8 +71,18 @@ int halfedge_add_vertex(HalfEdgeMesh *hem, float x, float y, float z);
 
 /* Adds a face from a CCW-wound loop of `n` existing vertex indices,
  * creating its half-edges and linking twins against any matching
- * already-existing opposite edges. Returns the new face's index. */
+ * already-existing opposite edges. Returns the new face's index. New
+ * faces default to a neutral dielectric/rough material (base_color
+ * 0.7,0.7,0.7, metallic 0, roughness 0.8, emission 0) — see
+ * halfedge_set_face_material() to change it. */
 int halfedge_add_face(HalfEdgeMesh *hem, const int *vert_indices, int n);
+
+/* Sets face f's PBR material, clamping metallic/roughness to [0,1] (base
+ * color and emission are left unclamped -- emission in particular is
+ * expected to go above 1.0 for a genuinely bright emissive surface). No-op
+ * if f is out of range or already deleted. */
+void halfedge_set_face_material(HalfEdgeMesh *hem, int f, const float base_color[3],
+                                 float metallic, float roughness, const float emission[3]);
 
 /* Soft-deletes face `f`: marks it (and its edges) as gone and resets any
  * twin link pointing at one of its edges back to -1, so a neighboring face
