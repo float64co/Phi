@@ -1,0 +1,127 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "phi-armature-testgen (one-off script, not part of the build)"
+  },
+  "buffers": [
+    {
+      "uri": "armature_test.bin",
+      "byteLength": 232
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 192
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 192,
+      "byteLength": 8
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 200,
+      "byteLength": 32
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 3,
+      "type": "MAT4"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 2,
+      "type": "SCALAR",
+      "min": [
+        0.0
+      ],
+      "max": [
+        1.0
+      ]
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 2,
+      "type": "VEC4"
+    }
+  ],
+  "nodes": [
+    {
+      "name": "root",
+      "translation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "children": [
+        1
+      ]
+    },
+    {
+      "name": "mid",
+      "translation": [
+        0.0,
+        2.0,
+        0.0
+      ],
+      "children": [
+        2
+      ]
+    },
+    {
+      "name": "tip",
+      "translation": [
+        0.0,
+        2.0,
+        0.0
+      ]
+    }
+  ],
+  "skins": [
+    {
+      "name": "test_armature",
+      "joints": [
+        2,
+        0,
+        1
+      ],
+      "inverseBindMatrices": 0
+    }
+  ],
+  "animations": [
+    {
+      "name": "rotate_mid_90z",
+      "samplers": [
+        {
+          "input": 1,
+          "output": 2,
+          "interpolation": "LINEAR"
+        }
+      ],
+      "channels": [
+        {
+          "sampler": 0,
+          "target": {
+            "node": 1,
+            "path": "rotation"
+          }
+        }
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "scene": 0
+}

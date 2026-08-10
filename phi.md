@@ -2733,6 +2733,131 @@ once those are built in Phase 6.
 
 ## Phase 4 — Animation Editor
 
+### Status: Armature + Clip/Curve/Playback data foundation landed, 2026-08-10; GPU skinning, timeline UI, and ragdoll handoff not started
+
+A real, verified first slice of this phase's "Architecture" section below
+(Clip/Curve/Playback) plus the Armature half of "Armatures and skinning" —
+deliberately scoped to the DATA layer only this pass: no GPU vertex
+skinning yet (no mesh is bound to a skeleton anywhere in this slice), no
+timeline/curve-editor UI, no ragdoll handoff. Ordered this way
+deliberately, same reasoning Phase 1's mesh editor followed (halfedge.c's
+pure data layer landed and was standalone-tested before any of it touched
+rendering) — the interpolation math and bone hierarchy are worth getting
+right and proving in isolation before spending time on the GL/UI layers
+that consume them.
+
+**`client/armature.h`/`.c`** (new): loads a real bone hierarchy from a
+`cgltf_skin` — rest-pose TRS per bone, inverse bind matrices (read via
+`cgltf_accessor_read_float`, not raw buffer pointer math, matching
+`halfedge_gltf.c`'s own established precedent for accessor reads that
+correctly handles a non-default stride rather than assuming tight
+packing). **Topologically sorts joints into parent-before-child order**
+rather than trusting the glTF file's own `joints` array order — the spec
+does not guarantee that order, and real authoring tools don't always
+emit it sorted, so the loader has to be robust to that rather than
+assuming the common case. `armature_compute_world_transforms` then
+relies on that guarantee to compute every bone's world matrix in a
+single forward pass (`parent_world * local`), no recursion needed.
+
+**`client/animation.h`/`.c`** (new): `AnimClip`/`AnimChannel`
+(Clip+Curve — a channel's keyframes ARE its curve, interpolation lives
+inside `animation_sample_clip`) and `AnimPlayback`. Real interpolation
+for all three of glTF's modes — LINEAR (quaternion channels use real
+`quat_slerp`, not a lerp-then-normalize approximation), STEP, and CUBIC
+SPLINE (the spec's Hermite formula, tangents scaled by the keyframe
+interval as the spec requires, with the result renormalized for
+rotation channels since Hermite interpolation doesn't preserve unit
+quaternion length). A channel targeting a glTF node that isn't one of
+the armature's own bones (a camera, a whole-object transform) is
+silently skipped, not an error — real files can have those; a clip left
+with zero usable channels after that filtering is dropped entirely.
+Morph-target (`weights`) channels are skipped too, out of scope this
+pass.
+
+**`Quat quat_slerp`/`quat_normalize`** added to `meshobject.h`/`.c`
+(the existing Quat-utility home alongside `quat_identity`/
+`quat_to_mat4`) — real spherical linear interpolation (shorter-path
+fix via the dot-product-sign check, linear-interpolate-then-normalize
+fallback near-parallel to avoid a `sin(theta)`-in-the-denominator
+blowup), needed by `animation.c`'s rotation-channel sampling.
+
+**A real bug, caught by actually running the new test rather than
+trusting "it compiled":** the first version of `AnimChannel` embedded a
+fixed `float values[512][3][4]` array directly in the struct. With up
+to `ANIM_MAX_CHANNELS` (originally 64) channels per clip,
+`sizeof(AnimClip)` came out to roughly **1.7 MB**, and
+`animation_test_main.c`'s own stack-allocated `AnimClip clips[8]`
+overflowed the stack — a real, immediate segfault (confirmed via
+AddressSanitizer: `stack-overflow ... in main`), not a hypothetical
+concern. Fixed at the root, not by raising or shrinking the fixed cap
+(which would only move the same problem to a different clip size):
+`AnimChannel.times`/`.values` are now heap-allocated, sized exactly to
+each channel's real keyframe count at load time (`animation_load_clips`),
+with a new `animation_clip_free` to release them. No arbitrary
+per-channel keyframe cap exists anymore at all.
+
+**Test fixture** (`tools/gen_test_armature.py`, new, hand-rolled glTF
+JSON + binary buffer — same "no external tooling" precedent
+`tools/gen_test_assets.py`/`assets/cube.gltf` already established): a
+3-bone chain (root → mid → tip, each offset (0,2,0) from its parent)
+with one animation rotating the mid bone 90° about Z over 1 second,
+LINEAR. **The skin's `joints` array is deliberately scrambled
+(`[tip, root, mid]`, not parent-before-child)** specifically to exercise
+the loader's topological sort against something harder than the trivial
+already-sorted case — the inverse bind matrices accessor is reordered to
+match (the Nth IBM corresponds to the Nth `joints` entry, per spec, not
+node index order — a real detail the generator script has its own
+comment on getting right).
+
+Verified (`client/animation_test_main.c`, new, `make animation_test`,
+same no-GL standalone-harness precedent as `mesh_edit_test`/
+`area_tree_test`): the topological sort resolves `mid`'s and `tip`'s
+parents correctly despite the scrambled input; rest-pose world
+transforms compose correctly through the hierarchy (tip at world y=4,
+i.e. 0+2+2, proving the hierarchy walk is real, not just per-bone local
+values echoed back); clip loading finds the right channel/bone/duration;
+keyframe sampling checked against **hand-derived exact expected
+quaternions**, not just "produced a value" — slerp at the exact
+halfway point between identity and a 90° rotation is checked against
+the precise 45°-rotation quaternion (the defining mathematical property
+of slerp along a fixed axis, not an approximation); and a full
+pipeline check (sample the clip, feed the result through
+`armature_compute_world_transforms`) is checked against a hand-derived
+expected world position, `(-2, 2, 0)`, independently re-derived against
+`quat_to_mat4`'s actual column-major convention rather than assumed —
+proving the rotation really propagates from a bone to its child, not
+just that each function works in isolation. `AnimPlayback`'s loop-wrap
+and non-loop-clamp-and-stop behavior both verified too. ASan-clean (no
+leaks, confirming `animation_clip_free` actually releases everything
+`animation_load_clips` allocates). Native/wasm/win32 all rebuilt clean
+from a forced clean state; every other standalone harness re-verified
+passing after the `meshobject.h`/`.c` and Makefile `COMMON_SRCS`
+changes.
+
+Cubic-spline interpolation is implemented (real Hermite math, matching
+the glTF spec) but **not exercised by the current test fixture** — an
+honest, documented gap, not silently assumed correct; the fixture only
+covers LINEAR.
+
+`armature_compute_skinning_matrices` (world[i] * inverse_bind[i], the
+standard second half of GPU skinning a vertex shader would consume) also
+landed and is verified against a real, checkable invariant: at rest
+pose, with no animation applied, every bone's skin matrix is EXACTLY
+identity (not approximately — `world[i]` at rest pose is by construction
+the same transform `inverse_bind[i]` was computed to undo). Deliberately
+a plain CPU data function with no GL/UBO upload — that's the renderer's
+job once a real skinned-mesh render path exists.
+
+Next real steps for this phase, in the order the "Architecture"/"Editor
+operations" sections below already imply: the vertex-format extension +
+skin-weight loading path (glTF `JOINTS_0`/`WEIGHTS_0`) needed before GPU
+vertex skinning can happen at all, then a real skinning shader, then the
+timeline/curve-editor UI, then the Bullet ragdoll handoff. The shader
+itself is real code this environment cannot verify beyond "it compiles/
+links" (no live GL context is possible here, same `XOpenDisplay()`
+limitation as everything else this session touching rendering) — flagged
+now, before it's written, not discovered as a surprise gap later.
+
 ### What it is
 
 A timeline-based editor for authoring animation clips that drive mesh object

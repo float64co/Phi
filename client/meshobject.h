@@ -66,6 +66,23 @@ typedef struct {
 
 Quat quat_identity(void);
 
+/* Normalizes q -- returns quat_identity() for a near-zero-length input
+ * rather than dividing by ~0, since that's a real, reachable case
+ * (quat_slerp's own linear-interpolation fallback path normalizes an
+ * interpolated result that could in principle be degenerate). */
+Quat quat_normalize(Quat q);
+
+/* Spherical linear interpolation, t in [0,1] -- takes the shorter of the
+ * two paths between a and b (negates b first if the dot product is
+ * negative, the standard fix for quaternion double-cover: q and -q
+ * represent the same rotation, but naively interpolating toward the
+ * "wrong" sign takes the long way around). Falls back to a normalized
+ * linear interpolation when a and b are nearly parallel (dot > 0.9995),
+ * the standard numerical-stability fix for sin(theta)-in-the-denominator
+ * blowing up as theta -> 0. Used by Phase 4's animation.c for rotation-
+ * channel keyframe interpolation (see phi.md's "Animation Editor"). */
+Quat quat_slerp(Quat a, Quat b, float t);
+
 /* Computes a local-space AABB half-extent (for phi_physics_add_box_body's
  * box shape) from hem's actual vertex bounds -- see meshobject.c for the
  * "assumes roughly centered on local origin" caveat. Returns 0 (out

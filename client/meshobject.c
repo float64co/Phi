@@ -8,6 +8,33 @@ Quat quat_identity(void) {
     return q;
 }
 
+Quat quat_normalize(Quat q) {
+    float len = sqrtf(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+    if (len < 1e-8f) return quat_identity();
+    float inv = 1.0f / len;
+    Quat r = { q.x*inv, q.y*inv, q.z*inv, q.w*inv };
+    return r;
+}
+
+Quat quat_slerp(Quat a, Quat b, float t) {
+    float d = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+    if (d < 0.0f) { b.x = -b.x; b.y = -b.y; b.z = -b.z; b.w = -b.w; d = -d; }
+
+    if (d > 0.9995f) {
+        Quat r = { a.x + (b.x-a.x)*t, a.y + (b.y-a.y)*t, a.z + (b.z-a.z)*t, a.w + (b.w-a.w)*t };
+        return quat_normalize(r);
+    }
+
+    float theta0 = acosf(d);
+    float theta  = theta0 * t;
+    float sin_theta0 = sinf(theta0);
+    float sin_theta  = sinf(theta);
+    float s0 = cosf(theta) - d * sin_theta / sin_theta0;
+    float s1 = sin_theta / sin_theta0;
+    Quat r = { a.x*s0 + b.x*s1, a.y*s0 + b.y*s1, a.z*s0 + b.z*s1, a.w*s0 + b.w*s1 };
+    return r;
+}
+
 int meshobject_local_aabb_half_extents(const HalfEdgeMesh *hem, Vec3f *out_half_extents) {
     if (!hem || hem->vert_count <= 0) return 0;
     float mn[3], mx[3];

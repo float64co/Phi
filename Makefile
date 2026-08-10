@@ -65,6 +65,8 @@ COMMON_SRCS := \
 	$(SRCDIR)/meshobject.c    \
 	$(SRCDIR)/mesh_edit.c     \
 	$(SRCDIR)/fracture.c      \
+	$(SRCDIR)/armature.c      \
+	$(SRCDIR)/animation.c     \
 	$(SRCDIR)/gizmo.c         \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
@@ -77,7 +79,7 @@ COMMON_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test
 
 all: wasm native
 
@@ -305,6 +307,25 @@ fracture_test: $(OUT_FRACTURE_TEST)
 $(OUT_FRACTURE_TEST): $(FRACTURE_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(FRACTURE_TEST_SRCS) -o $(OUT_FRACTURE_TEST) -lm
 	@echo "fracture_test build complete -> $(OUT_FRACTURE_TEST)"
+
+# armature.c/animation.c (Phase 4's Clip/Curve/Playback + Armature data
+# layer) self-test -- same no-GL-dependency rationale as mesh_edit_test/
+# fracture_test above, against a real glTF skin+animation fixture
+# (tools/gen_test_armature.py) instead of a hand-authored mesh. Links
+# meshobject.c for quat_slerp/quat_to_mat4 (needs no Bullet linkage --
+# meshobject.c only carries an opaque PhiRigidBody* field, never calls
+# into phi_physics.h's functions itself).
+ANIMATION_TEST_SRCS := $(SRCDIR)/animation_test_main.c $(SRCDIR)/halfedge.c \
+                        $(SRCDIR)/halfedge_gltf.c $(SRCDIR)/meshobject.c \
+                        $(SRCDIR)/armature.c $(SRCDIR)/animation.c
+OUT_ANIMATION_TEST   := $(BUILDDIR)/animation_test
+
+animation_test: $(OUT_ANIMATION_TEST)
+	./$(OUT_ANIMATION_TEST)
+
+$(OUT_ANIMATION_TEST): $(ANIMATION_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(ANIMATION_TEST_SRCS) -o $(OUT_ANIMATION_TEST) -lm
+	@echo "animation_test build complete -> $(OUT_ANIMATION_TEST)"
 
 # ---------------------------------------------------------------
 # MicroPython embedding self-test (Phase 5 first slice originally; the
