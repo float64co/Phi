@@ -58,8 +58,13 @@ char *phi_mp_exec(const char *code);
  * loaded/g_edit_face change every frame -- pass their addresses, not
  * their values. `target="object"` in Python resolves to `test_obj`
  * (once loaded); `target="face"` resolves to
- * `test_obj->hem->faces[*edit_face]` (once a face is actually selected). */
-void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face);
+ * `test_obj->hem->faces[*edit_face]` (once a face is actually selected).
+ * `phys_world` (see phi.md's "Bullet Physics via Emscripten") is what
+ * phi.enable_physics/apply_impulse/get_velocity/set_velocity operate
+ * against -- the same shared world main.c's own CTX_ACTION_ENABLE_
+ * PHYSICS handler and main_loop's step/sync use, not a separate one. */
+void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face,
+                              PhiPhysicsWorld *phys_world);
 
 /* Number of currently-registered @phi.panel classes. Panels are captured
  * (name + a freshly instantiated, cached instance) the moment their

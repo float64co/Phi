@@ -1157,7 +1157,7 @@ void ui_render(const UIRenderContext *ctx) {
         float menu_w = 180.0f, row_h = 24.0f;
         static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
                                         "Extrude Face", "Inset Face", "Loop Cut", "Fracture (Voronoi)",
-                                        "Save as Asset" };
+                                        "Save as Asset", "Enable Physics" };
         int n = (int)(sizeof(items) / sizeof(items[0]));
         float menu_h = row_h * n;
         ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
@@ -1330,7 +1330,7 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
         float menu_w = 180.0f, row_h = 24.0f;
         static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
                                         "Extrude Face", "Inset Face", "Loop Cut", "Fracture (Voronoi)",
-                                        "Save as Asset" };
+                                        "Save as Asset", "Enable Physics" };
         /* Order matches items[] above -- row index maps straight across.
          * Frame Selected/Frame All/Deselect All still just get reported
          * via the printf below; everything else is acted on by main.c. */
@@ -1338,7 +1338,7 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
             CTX_ACTION_ADD_MESH, CTX_ACTION_DELETE, CTX_ACTION_FRAME_SELECTED,
             CTX_ACTION_FRAME_ALL, CTX_ACTION_DESELECT_ALL,
             CTX_ACTION_EXTRUDE_FACE, CTX_ACTION_INSET_FACE, CTX_ACTION_LOOP_CUT,
-            CTX_ACTION_FRACTURE, CTX_ACTION_SAVE_AS_ASSET
+            CTX_ACTION_FRACTURE, CTX_ACTION_SAVE_AS_ASSET, CTX_ACTION_ENABLE_PHYSICS
         };
         int n = (int)(sizeof(items) / sizeof(items[0]));
         float menu_h = row_h * n;

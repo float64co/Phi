@@ -87,6 +87,12 @@ typedef enum {
      * upload; the actual POST only happens once the user fills in a name/
      * tags and submits from the Asset Browser panel's edit form. */
     CTX_ACTION_SAVE_AS_ASSET,
+    /* Phase 2 (see phi.md's "Bullet Physics via Emscripten") -- creates a
+     * dynamic rigid body for the selected MeshObject (box shape from its
+     * own AABB, see meshobject_local_aabb_half_extents), so it starts
+     * falling/colliding from then on. No-op (reported, not silently
+     * ignored) if it already has one. */
+    CTX_ACTION_ENABLE_PHYSICS,
 } CtxMenuAction;
 
 typedef struct Area {

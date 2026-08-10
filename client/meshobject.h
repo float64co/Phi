@@ -2,14 +2,11 @@
 #include "vec3.h"            /* Vec3f */
 #include "octree_render.h"  /* RenderMesh */
 #include "halfedge.h"
+#include "phi_physics.h"    /* PhiRigidBody (opaque) -- see phys_body below */
 
 /* Phase 1 foundation: the MeshObject entity type sketched in phi.md's
  * "Mesh Editor" section — kept minimal for this phase's non-interactive
- * foundation slice (glTF I/O + half-edge structure only, see phi.md).
- * Deliberately NOT included yet: the ConvexHull physics-hull field from
- * phi.md's sketch — Bullet isn't integrated (that's Phase 2's job), so a
- * placeholder field for it would just be dead weight; it'll be added when
- * physics actually lands rather than faked now. */
+ * foundation slice (glTF I/O + half-edge structure only, see phi.md). */
 typedef struct { float x, y, z, w; } Quat;
 
 typedef struct {
@@ -18,6 +15,19 @@ typedef struct {
     Quat       orientation;
     RenderMesh *render_mesh;
     int        is_static;
+    /* NULL = no physics simulation for this object (the common case --
+     * most MeshObjects are just static scene geometry). Non-NULL once
+     * something calls phi_physics_add_box_body and stores the result
+     * here (see main.c's CTX_ACTION_ENABLE_PHYSICS handler) -- main.c's
+     * frame loop then syncs position/orientation FROM this body's
+     * simulated transform every frame instead of leaving them alone.
+     * Owned by this MeshObject once set, same convention as hem/
+     * render_mesh -- freed via phi_physics_remove_body by whatever
+     * deletes the object or disables its physics. Phase 2's real
+     * landing of the ConvexHull-shaped placeholder phi.md's original
+     * sketch had here -- box-shape-from-AABB only this pass, see
+     * phi_physics.h's own note on why convex hulls are deferred. */
+    PhiRigidBody *phys_body;
     /* The live, editable half-edge representation this object's
      * render_mesh was last flattened from — NULL for objects that don't
      * (yet) carry one (kept optional rather than required so existing
@@ -55,6 +65,12 @@ typedef struct {
 #define MESHOBJ_VERTEX_STRIDE 14
 
 Quat quat_identity(void);
+
+/* Computes a local-space AABB half-extent (for phi_physics_add_box_body's
+ * box shape) from hem's actual vertex bounds -- see meshobject.c for the
+ * "assumes roughly centered on local origin" caveat. Returns 0 (out
+ * untouched) if hem is NULL or empty. */
+int meshobject_local_aabb_half_extents(const HalfEdgeMesh *hem, Vec3f *out_half_extents);
 
 /* Column-major 4x4 rotation matrix from a unit quaternion, same layout
  * convention as renderer.c's mat4_* helpers (m[col*4+row]). Standard

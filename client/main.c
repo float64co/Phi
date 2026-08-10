@@ -6,6 +6,7 @@
 #include "phi_platform.h"
 #include "halfedge_gltf.h"
 #include "meshobject.h"
+#include "phi_physics.h"
 #include "mesh_edit.h"
 #include "fracture.h"
 #include "mp_port.h"
@@ -63,6 +64,17 @@ static PyConsoleState g_cs     = {0};
 static AssetBrowserState g_ab  = {0};
 static double       g_last_t   = 0.0;
 
+/* Phase 2 physics (see phi.md's "Bullet Physics via Emscripten") -- one
+ * shared world, stepped every frame in main_loop. g_ground_phys_body is a
+ * single large static (mass=0) box acting as a floor so "Enable Physics"
+ * (see the context-menu handler below) has something to actually land
+ * on -- there's no other scene geometry to collide with since the octree
+ * world was removed (see phi.md's Phase 1 "Client/server model"), and
+ * building a real "author collision geometry" workflow is its own
+ * separate scope, not part of this pass. */
+static PhiPhysicsWorld *g_phys_world      = NULL;
+static PhiRigidBody    *g_ground_phys_body = NULL;
+
 /* Loads any glTF/GLB file into the one test-object slot -- generalized
  * from what used to be spawn_test_mesh_object()'s inline body, once the
  * Asset Browser's "Load" button (see ui.h's AssetBrowserState) needed to
@@ -86,6 +98,10 @@ static int load_mesh_object_from_path(const char *path, float scale) {
     if (g_test_mesh_loaded) {
         mesh_destroy(g_test_mesh_object.render_mesh);
         halfedge_destroy(g_test_mesh_object.hem);
+        if (g_test_mesh_object.phys_body) {
+            phi_physics_remove_body(g_phys_world, g_test_mesh_object.phys_body);
+            g_test_mesh_object.phys_body = NULL;
+        }
     }
     g_test_mesh_object.id = 1;
     g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
@@ -135,6 +151,10 @@ static void delete_test_mesh_object(void) {
     g_test_mesh_object.render_mesh = NULL;
     halfedge_destroy(g_test_mesh_object.hem);
     g_test_mesh_object.hem = NULL;
+    if (g_test_mesh_object.phys_body) {
+        phi_physics_remove_body(g_phys_world, g_test_mesh_object.phys_body);
+        g_test_mesh_object.phys_body = NULL;
+    }
     g_test_mesh_loaded = 0;
     g_edit_face = -1;
     printf("[main] deleted MeshObject\n");
@@ -262,11 +282,27 @@ static void main_loop(void *userdata) {
     float dt = (float)(now - g_last_t);
     g_last_t = now;
     if (dt > 0.05f) dt = 0.05f;   /* cap at 50ms */
-    (void)dt;   /* no per-frame simulation reads this yet -- kept for whatever real game-state tick lands on the repurposed networking layer next */
 
 #ifndef __EMSCRIPTEN__
     net_poll_native();  /* wasm gets messages via an async JS callback instead */
 #endif
+
+    /* Phase 2 physics step -- see phi.md's "Bullet Physics via
+     * Emscripten". phi_physics_world_step already subdivides into fixed
+     * 1/60s substeps internally (see phi_physics.h), so passing this
+     * frame's real (capped) dt straight through is correct, not just
+     * convenient. Synced back to the MeshObject only if it actually has a
+     * body -- most objects don't (phys_body is NULL by default, see
+     * meshobject.h), so this is a no-op for the common case. */
+    phi_physics_world_step(g_phys_world, dt);
+    if (g_test_mesh_loaded && g_test_mesh_object.phys_body) {
+        float orientation[4];
+        phi_physics_get_transform(g_test_mesh_object.phys_body, &g_test_mesh_object.position, orientation);
+        g_test_mesh_object.orientation.x = orientation[0];
+        g_test_mesh_object.orientation.y = orientation[1];
+        g_test_mesh_object.orientation.z = orientation[2];
+        g_test_mesh_object.orientation.w = orientation[3];
+    }
 
     /* --- UI layout + click routing --- ui_layout() needs to run before
      * hit-testing (it's what computes every Area's on-screen rect), and
@@ -488,6 +524,33 @@ static void main_loop(void *userdata) {
                 asset_browser_begin_create(&g_ab, "MeshObject");
             } else {
                 printf("[main] context menu Save as Asset: no MeshObject selected\n");
+            }
+            break;
+        case CTX_ACTION_ENABLE_PHYSICS:
+            /* Box shape from the mesh's own AABB (see meshobject_local_
+             * aabb_half_extents's "assumes roughly centered on local
+             * origin" caveat) -- mass=1.0 (dynamic), a modest restitution
+             * so it doesn't bounce forever. Once created, main_loop's
+             * frame step syncs position/orientation FROM the simulated
+             * body every frame instead of leaving them alone. */
+            if (!g_test_mesh_loaded || ui_get_selected_object() != 4000u + (unsigned int)g_test_mesh_object.id) {
+                printf("[main] context menu Enable Physics: no MeshObject selected\n");
+            } else if (g_test_mesh_object.phys_body) {
+                printf("[main] context menu Enable Physics: already has a physics body\n");
+            } else {
+                Vec3f half_extents;
+                if (!meshobject_local_aabb_half_extents(g_test_mesh_object.hem, &half_extents)) {
+                    printf("[main] context menu Enable Physics: couldn't compute an AABB (empty mesh?)\n");
+                } else {
+                    float orientation[4] = {
+                        g_test_mesh_object.orientation.x, g_test_mesh_object.orientation.y,
+                        g_test_mesh_object.orientation.z, g_test_mesh_object.orientation.w
+                    };
+                    g_test_mesh_object.phys_body = phi_physics_add_box_body(
+                        g_phys_world, half_extents, g_test_mesh_object.position, orientation, 1.0f, 0.3f);
+                    printf("[main] context menu Enable Physics: box half-extents (%.2f, %.2f, %.2f), mass=1.0\n",
+                           half_extents.x, half_extents.y, half_extents.z);
+                }
             }
             break;
         default:
@@ -716,12 +779,32 @@ int main(void) {
     /* Console / Python panel */
     pyconsole_init(&g_cs);
     phi_mp_init(&mp_stack_top);
-    /* DNA/RNA targets -- see phi.md's "Property System (DNA/RNA analogue)".
-     * phi.prop_get/set('object'/'face', ...) read/write through these live
-     * pointers; g_test_mesh_loaded/g_edit_face are passed by address (not
-     * by value) since they change every frame and phi_mp_register_targets
-     * only runs once, here. */
-    phi_mp_register_targets(&g_test_mesh_object, &g_test_mesh_loaded, &g_edit_face);
+
+    /* Phase 2 physics -- see phi.md's "Bullet Physics via Emscripten". A
+     * single large static ground box gives "Enable Physics" (Scene
+     * context menu) something to actually land on -- there's no other
+     * collidable scene geometry (the octree world is gone, see the
+     * Client/server model note in phi.md's Phase 1 status). Ground top
+     * surface sits at y=50 (center 40, half-extent 10), well below the
+     * test object's y=100 default spawn height, so enabling physics on
+     * it is an actually-visible fall, not an instant no-op. Created
+     * BEFORE phi_mp_register_targets below, since that hands the world
+     * pointer off for phi.enable_physics/apply_impulse/etc. to use. */
+    g_phys_world = phi_physics_world_create();
+    {
+        float identity_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        Vec3f ground_half = {200.0f, 10.0f, 200.0f};
+        Vec3f ground_pos  = {128.0f, 40.0f, 90.0f};
+        g_ground_phys_body = phi_physics_add_box_body(g_phys_world, ground_half, ground_pos, identity_quat, 0.0f, 0.3f);
+    }
+
+    /* DNA/RNA + physics targets -- see phi.md's "Property System (DNA/RNA
+     * analogue)". phi.prop_get/set('object'/'face', ...) and phi.
+     * enable_physics/apply_impulse/get_velocity/set_velocity all read/
+     * write through these live pointers; g_test_mesh_loaded/g_edit_face
+     * are passed by address (not by value) since they change every frame
+     * and phi_mp_register_targets only runs once, here. */
+    phi_mp_register_targets(&g_test_mesh_object, &g_test_mesh_loaded, &g_edit_face, g_phys_world);
 
     /* Asset Browser -- see phi.md's "Asset tracking and the Asset Browser
      * panel". net.c requests the initial asset list itself, right after

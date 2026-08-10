@@ -73,14 +73,17 @@ void phi_mp_capture_output(const char *str, size_t len) {
 
 #define PHI_MP_MAX_PANELS 8
 
-static MeshObject *s_target_obj = NULL;
-static const int  *s_target_obj_loaded = NULL;
-static const int  *s_target_edit_face = NULL;
+static MeshObject      *s_target_obj = NULL;
+static const int       *s_target_obj_loaded = NULL;
+static const int       *s_target_edit_face = NULL;
+static PhiPhysicsWorld *s_phys_world = NULL;
 
-void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face) {
+void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face,
+                              PhiPhysicsWorld *phys_world) {
     s_target_obj = test_obj;
     s_target_obj_loaded = test_obj_loaded;
     s_target_edit_face = edit_face;
+    s_phys_world = phys_world;
 }
 
 /* Resolves target="object"/"face" to the live PhiPropGroup+owner pointer
@@ -152,6 +155,81 @@ static mp_obj_t native_prop_set(mp_obj_t target_obj, mp_obj_t identifier_obj, mp
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(native_prop_set_obj, native_prop_set);
 
+/* ---- Physics, exposed to Python (see phi.md's "Bullet Physics via
+ * Emscripten" -- Python API surface) -- operates only on the "object"
+ * target's phys_body (there's no per-face or arbitrary-object physics
+ * concept), a narrower version of phi.prop_get/set's own "object"/"face"
+ * simplification, since only whole objects have rigid bodies at all. */
+
+static mp_obj_t native_enable_physics(mp_obj_t mass_obj, mp_obj_t restitution_obj) {
+    if (!s_target_obj || !s_target_obj_loaded || !*s_target_obj_loaded) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.enable_physics: no MeshObject loaded"));
+    }
+    if (s_target_obj->phys_body) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.enable_physics: already has a physics body"));
+    }
+    Vec3f half_extents;
+    if (!meshobject_local_aabb_half_extents(s_target_obj->hem, &half_extents)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.enable_physics: couldn't compute an AABB (empty mesh?)"));
+    }
+    float orientation[4] = {
+        s_target_obj->orientation.x, s_target_obj->orientation.y,
+        s_target_obj->orientation.z, s_target_obj->orientation.w
+    };
+    float mass = (float)mp_obj_get_float(mass_obj);
+    float restitution = (float)mp_obj_get_float(restitution_obj);
+    s_target_obj->phys_body = phi_physics_add_box_body(s_phys_world, half_extents, s_target_obj->position,
+                                                         orientation, mass, restitution);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_enable_physics_obj, native_enable_physics);
+
+/* Shared guard for the three functions below -- all three are meaningless
+ * (and would otherwise segfault on a NULL phys_body) before phi.
+ * enable_physics has actually created one. */
+static int require_phys_body(void) {
+    return s_target_obj && s_target_obj_loaded && *s_target_obj_loaded && s_target_obj->phys_body != NULL;
+}
+
+static mp_obj_t native_apply_impulse(mp_obj_t impulse_obj, mp_obj_t rel_pos_obj) {
+    if (!require_phys_body()) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.apply_impulse: object has no physics body (call phi.enable_physics first)"));
+    }
+    size_t n; mp_obj_t *items;
+    mp_obj_get_array(impulse_obj, &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.apply_impulse: expected a 3-element impulse vector"));
+    Vec3f impulse = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    mp_obj_get_array(rel_pos_obj, &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.apply_impulse: expected a 3-element rel_pos vector"));
+    Vec3f rel_pos = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    phi_physics_apply_impulse(s_target_obj->phys_body, impulse, rel_pos);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_apply_impulse_obj, native_apply_impulse);
+
+static mp_obj_t native_get_velocity(void) {
+    if (!require_phys_body()) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.get_velocity: object has no physics body (call phi.enable_physics first)"));
+    }
+    Vec3f v = phi_physics_get_linear_velocity(s_target_obj->phys_body);
+    mp_obj_t items[3] = { mp_obj_new_float(v.x), mp_obj_new_float(v.y), mp_obj_new_float(v.z) };
+    return mp_obj_new_tuple(3, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_get_velocity_obj, native_get_velocity);
+
+static mp_obj_t native_set_velocity(mp_obj_t v_obj) {
+    if (!require_phys_body()) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.set_velocity: object has no physics body (call phi.enable_physics first)"));
+    }
+    size_t n; mp_obj_t *items;
+    mp_obj_get_array(v_obj, &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.set_velocity: expected a 3-element velocity vector"));
+    Vec3f v = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    phi_physics_set_linear_velocity(s_target_obj->phys_body, v);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_set_velocity_obj, native_set_velocity);
+
 /* ---- @phi.panel registry (C side) --
  * Captured eagerly the moment a panel's decorator runs (see
  * native_panel_registered below, called from PHI_BOOTSTRAP's @panel
@@ -222,7 +300,11 @@ static const char *PHI_BOOTSTRAP =
     "phi.Panel = Panel\n"
     "phi.panel = _panel_decorator\n"
     "phi.prop_get = _native_prop_get\n"
-    "phi.prop_set = _native_prop_set\n";
+    "phi.prop_set = _native_prop_set\n"
+    "phi.enable_physics = _native_enable_physics\n"
+    "phi.apply_impulse = _native_apply_impulse\n"
+    "phi.get_velocity = _native_get_velocity\n"
+    "phi.set_velocity = _native_set_velocity\n";
 
 int phi_mp_panel_count(void) { return s_panel_count; }
 
@@ -272,6 +354,10 @@ static void phi_mp_install_bindings(void) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_prop_get")), MP_OBJ_FROM_PTR(&native_prop_get_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_prop_set")), MP_OBJ_FROM_PTR(&native_prop_set_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_panel_registered")), MP_OBJ_FROM_PTR(&native_panel_registered_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_enable_physics")), MP_OBJ_FROM_PTR(&native_enable_physics_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_apply_impulse")), MP_OBJ_FROM_PTR(&native_apply_impulse_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_velocity")), MP_OBJ_FROM_PTR(&native_get_velocity_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_velocity")), MP_OBJ_FROM_PTR(&native_set_velocity_obj));
 
     nlr_buf_t nlr;
     if (nlr_push(&nlr) == 0) {

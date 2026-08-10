@@ -2212,11 +2212,108 @@ by Phase 4 no longer needing to stand up its own glTF pipeline)*
 
 ## Phase 2 — Physics
 
+### Status: a real, verified first slice landed, 2026-08-10
+
+**Correction to this section's original claim, below**: Bullet has **no
+official C API** for its core engine — verified by cloning the `bullet3`
+source and checking directly rather than trusting this doc's own prior
+text. The `*_C_API` files that do exist upstream belong to PyBullet's
+unrelated SharedMemory RPC layer, not the physics engine itself. This
+project instead ships a hand-written pure-C wrapper (`client/
+phi_physics.h`/`.cpp`, `extern "C"`-guarded) over Bullet's real C++
+classes — `PhiPhysicsWorld`/`PhiRigidBody` opaque types,
+`phi_physics_world_create/destroy/set_gravity/step`,
+`phi_physics_add_box_body`, `_remove_body`, `_get_transform`/
+`_set_transform`, `_apply_impulse`, `_set_linear_velocity`/
+`_get_linear_velocity`. `phi_physics_world_step` internally subdivides
+into up to 10 fixed 1/60s substeps, so callers (including `main.c`'s
+`main_loop`) can pass a variable frame `dt` straight through.
+
+**Vendored**: only `LinearMath` + `BulletCollision` + `BulletDynamics`
+(`client/vendor/bullet3/`, 153 `.cpp`/232 `.h`, zlib-licensed) — not
+`BulletSoftBody`, `Bullet3*`, or the examples tree, since only rigid-body
+box collision is in scope this pass. Mixed C++ into this project's
+all-C build with **plain `gcc`/`emcc`** (both dispatch `.cpp` files to
+the C++ frontend automatically by extension, verified with a smoke test
+before committing to this approach rather than assumed) plus `-lstdc++`
+at the link step only — no need for a separate `g++`/`em++` driver.
+Bullet's own vehicle/Featherstone code paths (unused by this project's
+box-only integration) emit hundreds of lines of uninitialized-variable
+warnings under `-Wall -Wextra`; tolerated as expected vendored-code
+noise rather than restructuring the single-command build to suppress
+them selectively, matching the existing precedent for vendored nanosvg.
+
+**Collision shapes are AABB-derived boxes only** this pass
+(`meshobject_local_aabb_half_extents`, computed from the real half-edge
+mesh's vertex bounds) — a deliberately scoped-down first slice, not full
+convex-hull generation from arbitrary meshes (explicitly deferred, real
+future work, not silently dropped).
+
+**`MeshObject` integration**: gained a `PhiRigidBody *phys_body` field
+(`NULL` = no simulation for that object, replacing the old "ConvexHull
+not included yet" comment this section used to carry). Reachable from
+the editor via a new "Enable Physics" context-menu action
+(`CTX_ACTION_ENABLE_PHYSICS`) — computes the object's AABB, creates a
+box body (mass 1.0, restitution 0.3). `main.c` creates one physics world
+plus a static ground box at startup, steps the world every frame, and
+syncs `position`/`orientation` back from Bullet's transform whenever
+`phys_body` is set; delete/replace flows call `phi_physics_remove_body`
+and clear the pointer so a destroyed `MeshObject` can't leave a dangling
+body in the world.
+
+**Python API surface — real, not the sketch below**: `phi.enable_physics
+(mass, restitution)`, `phi.apply_impulse(impulse, rel_pos)`,
+`phi.get_velocity()`/`set_velocity(v)`, added to `mp_port.c` alongside
+the DNA/RNA bindings ([[Property System (DNA/RNA analogue)]] above) —
+same `nlr`-protected, `ValueError`-on-misuse convention every other
+native binding in this file already uses (calling any of these before
+`enable_physics`, or calling `enable_physics` twice, raises cleanly
+rather than crashing or silently corrupting state; malformed argument
+shapes, e.g. a 2-element vector, raise instead of reading past the
+array). `phi_mp_register_targets()` gained a fourth parameter
+(`PhiPhysicsWorld *`) to hand the interpreter the live world pointer,
+same by-address pattern as the existing `object`/`face` targets.
+
+**A real cross-target regression this pass caught its own build for**
+(the third time this session the same pattern has bitten): extending
+`mp_port.c`/`meshobject.c` with the physics link dependency broke four
+other pre-existing Makefile targets that already linked those modules
+(`mp_console_test`, `mp_prop_panel_test`, `mp_stress`, and `mp_test` —
+the last one needing a *second*, different fix, since `meshobject.c`
+transitively needs `halfedge.c`/`halfedge_gltf.c`, which `MP_TEST_SRCS`
+alone had never included even before this pass) — caught by this
+session's standing "rebuild every standalone harness before calling a
+chunk done" discipline, not by a later report. Fixed by adding the
+missing sources (and `-lstdc++`) to every affected `_SRCS` list and link
+line.
+
+Verified end to end, no layer trusted in isolation: `phi_physics_test`
+(raw Bullet wrapper — real freefall matches the analytical formula,
+settles at the exact geometric height, impulse/velocity round-trip);
+`phi_physics_meshobject_test` (AABB computed from a real scaled cube
+matches exactly, the full create/step/sync sequence `main.c` itself uses
+produces a settled height within Bullet's normal collision margin);
+`mp_physics_test` (all 7 sections pass against a real interpreter driving
+real Bullet simulation — pre-`enable_physics` calls raise, `enable_physics`
+creates a real body and a second call raises, gravity moves
+`obj.position` when stepped exactly like `main_loop`, get/set_velocity
+and apply_impulse round-trip with correct numbers, malformed args raise,
+teardown doesn't crash). Every other standalone harness (`mesh_edit_test`/
+`fracture_test`/`mp_console_test`/`area_tree_test`/`phi_prop_test`/
+`mp_prop_panel_test`/`mp_stress`/`mp_test`) re-verified passing after the
+Makefile fixes above, and native/wasm/win32 all rebuilt clean from a
+forced clean state (not just incrementally) as the final check. Live GUI
+verification (right-clicking an object, choosing Enable Physics, watching
+it fall on screen) is still not possible in this sandbox, same
+`XOpenDisplay()` limitation as everything else this session needing a
+real window.
+
 ### Bullet Physics via Emscripten
 
 Bullet's C++ source compiles directly with `emcc` and links into `engine.wasm` as
-a first-class subsystem — no JS bridge, no ammo.js middleware. The engine calls
-Bullet's C API. Bullet adds approximately 2–4 MB to the WASM binary.
+a first-class subsystem — no JS bridge, no ammo.js middleware. **Correction,
+2026-08-10: there is no single "Bullet's C API" to call — see the Status
+section above.** Bullet adds approximately 2–4 MB to the WASM binary.
 
 Emscripten flags: `USE_WEBGL2=1`, `FULL_ES3=1`, `USE_PTHREADS=0` (Bullet's
 deterministic mode requires no threads), `ALLOW_MEMORY_GROWTH=1`.

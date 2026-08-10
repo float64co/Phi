@@ -34,7 +34,11 @@ int main(void) {
     int edit_face = 0;
 
     phi_mp_init(&stack_top);
-    phi_mp_register_targets(&obj, &loaded, &edit_face);
+    /* This test doesn't exercise phi.enable_physics/apply_impulse/etc.
+     * (see mp_physics_test_main.c for that) -- NULL is safe here since
+     * mp_port.c only ever reads phys_world from inside those functions,
+     * never during init/bootstrap. */
+    phi_mp_register_targets(&obj, &loaded, &edit_face, NULL);
 
     printf("[mp_prop_panel_test] === 1: phi.prop_get('object', 'position') reads the REAL C struct via Python ===\n");
     char *out = phi_mp_exec("print(phi.prop_get('object', 'position'))");

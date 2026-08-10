@@ -8,6 +8,32 @@ Quat quat_identity(void) {
     return q;
 }
 
+int meshobject_local_aabb_half_extents(const HalfEdgeMesh *hem, Vec3f *out_half_extents) {
+    if (!hem || hem->vert_count <= 0) return 0;
+    float mn[3], mx[3];
+    mn[0] = mx[0] = hem->verts[0].pos[0];
+    mn[1] = mx[1] = hem->verts[0].pos[1];
+    mn[2] = mx[2] = hem->verts[0].pos[2];
+    for (int i = 1; i < hem->vert_count; i++) {
+        for (int a = 0; a < 3; a++) {
+            float v = hem->verts[i].pos[a];
+            if (v < mn[a]) mn[a] = v;
+            if (v > mx[a]) mx[a] = v;
+        }
+    }
+    /* Half of the full extent, per axis -- assumes the mesh is roughly
+     * centered on its own local origin (true of the test cube this pass
+     * actually exercises), NOT the true AABB center for an arbitrary
+     * off-center mesh. A fully general box shape would need a separate
+     * local-space offset the physics body doesn't carry yet -- flagged
+     * rather than silently handled, see phi_physics.h's own note on
+     * scope for this pass. */
+    out_half_extents->x = (mx[0] - mn[0]) * 0.5f;
+    out_half_extents->y = (mx[1] - mn[1]) * 0.5f;
+    out_half_extents->z = (mx[2] - mn[2]) * 0.5f;
+    return 1;
+}
+
 void quat_to_mat4(const Quat *q, float *m) {
     float xx = q->x * q->x, yy = q->y * q->y, zz = q->z * q->z;
     float xy = q->x * q->y, xz = q->x * q->z, yz = q->y * q->z;
