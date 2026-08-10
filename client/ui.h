@@ -151,6 +151,16 @@ typedef struct {
      * MeshObjects + gizmo, not "nothing else ever will." */
     void (*draw_scene_content)(void *userdata);
     void *draw_scene_userdata;
+    /* Mouse-wheel-over-the-Scene-panel zoom (see ui_on_mouse_wheel) --
+     * main.c owns the actual camera position/yaw/pitch (no real camera-
+     * navigation system exists yet beyond this, see phi.md's Phase 1
+     * status), so this is a callback rather than ui.c reaching into
+     * renderer.c's camera fields directly, same division of labor
+     * draw_scene_content already established. delta is InputState::
+     * scroll_delta's own sign convention (positive = wheel scrolled up/
+     * toward the user); main.c's implementation decides what that means
+     * in world units (dolly-forward-by-N along the view direction). */
+    void (*on_scene_zoom)(int delta);
 } UIRenderContext;
 
 /* Draws the branding bar + every panel's chrome and content. Panels whose
@@ -167,6 +177,11 @@ void ui_render(const UIRenderContext *ctx);
  * pointer used for ui_render(). */
 int  ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderContext *ctx);
 void ui_on_mouse_move(int x, int y);
+
+/* Mouse wheel -- see ui.c's own comment on why the Chat panel's
+ * scrollback is currently the only consumer. ctx is read for ctx->chat
+ * only (the same pointer already passed to ui_render/ui_on_mouse_button). */
+void ui_on_mouse_wheel(int x, int y, int delta, const UIRenderContext *ctx);
 
 /* Blender-style area border drag-to-resize -- call once per frame (same
  * shape as the gizmo drag block in main.c) with the current mouse

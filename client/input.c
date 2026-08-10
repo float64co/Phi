@@ -70,13 +70,17 @@ static EM_BOOL mouse_up(int type, const EmscriptenMouseEvent *e, void *ud) {
     return EM_TRUE;
 }
 
-/* Scroll wheel: currently unassigned. Its previous job (Sauerbraten-style
- * octree-editor grid cycling) went away with the Qek editor bindings; the
- * natural future assignment is Scene-panel camera zoom/dolly once real
- * editor navigation lands, which is why the handler shell stays
- * registered rather than being torn out. */
+/* Scroll wheel -- now wired to InputState::scroll_delta (see input.h),
+ * first real consumer is the Chat panel's scrollback (ui_on_mouse_wheel).
+ * deltaY > 0 means the wheel scrolled DOWN/away per the DOM WheelEvent
+ * spec, which is the opposite of scroll_delta's own "positive = toward
+ * older content" sign convention, hence the negation. */
 static EM_BOOL wheel_move(int type, const EmscriptenWheelEvent *e, void *ud) {
-    (void)type; (void)e; (void)ud;
+    (void)type; (void)ud;
+    InputState *inp = s_inp;
+    if (!inp) return EM_FALSE;
+    if (e->deltaY < 0)      inp->scroll_delta += 1;
+    else if (e->deltaY > 0) inp->scroll_delta -= 1;
     return EM_TRUE;
 }
 
@@ -173,8 +177,16 @@ static void handle_button(int is_right, int down, LPARAM lparam) {
 }
 
 static void handle_wheel(WPARAM wparam) {
-    /* Unassigned -- same reasoning as the wasm branch's wheel_move. */
-    (void)wparam;
+    InputState *inp = s_inp;
+    if (!inp) return;
+    /* High word of wParam is a signed delta in multiples of WHEEL_DELTA
+     * (120); positive = wheel rotated forward/away from the user, which
+     * Windows' own UX convention treats as "scroll up" -- matches
+     * scroll_delta's "positive = reveal older content" sign, same as the
+     * wasm/X11 branches. */
+    short raw = (short)HIWORD(wparam);
+    if (raw > 0)      inp->scroll_delta += 1;
+    else if (raw < 0) inp->scroll_delta -= 1;
 }
 
 void input_native_handle_event(void *msgptr) {
@@ -268,9 +280,11 @@ static void handle_button(XButtonEvent *e, int down) {
     } else if (e->button == Button3) {
         inp->rmb_down = down;
         if (down) inp->rmb_click = 1;
+    } else if (e->button == Button4 && down) {
+        inp->scroll_delta += 1;   /* X11's scroll-wheel-as-buttons convention: 4 = up, 5 = down */
+    } else if (e->button == Button5 && down) {
+        inp->scroll_delta -= 1;
     }
-    /* Button4/Button5 (scroll) are unassigned, same reasoning as the wasm
-     * branch's wheel_move. */
 }
 
 void input_native_handle_event(void *xevent) {

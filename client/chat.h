@@ -14,7 +14,12 @@
  * main.c's single per-frame if/else-if/else chain. */
 
 #define CHAT_LOG_LINES   40
-#define CHAT_LINE_LEN    200
+/* Generous -- this holds one whole UNWRAPPED logical line (a model reply
+ * is often one long paragraph with no embedded '\n' at all), not a
+ * screen-width row; draw-time word-wrap (see draw_panel_chat) is what
+ * actually breaks it into rows that fit the panel, so this only needs to
+ * be big enough that a real reply doesn't silently truncate. */
+#define CHAT_LINE_LEN    1024
 #define CHAT_INPUT_LEN   240
 
 typedef enum {
@@ -22,12 +27,38 @@ typedef enum {
     CHAT_FOCUS_INPUT,
 } ChatFocus;
 
+/* One logical (unwrapped) scrollback line -- word-wrapping to fit the
+ * panel's current width happens at DRAW TIME in ui.c (see
+ * draw_panel_chat), not here, since it has to be responsive to a live
+ * resize and this module has no notion of screen geometry. is_msg_start
+ * marks the first logical line of a whole appended message (as opposed
+ * to a continuation line from a real embedded '\n' in that same
+ * message, or an unrelated system/preamble line) -- that's the only
+ * line ui.c will ever try to parse a "Name: " bold-username prefix out
+ * of, so a genuine message body line that happens to contain ": " (e.g.
+ * "Score: 42") never gets mistaken for one. */
+typedef struct {
+    char text[CHAT_LINE_LEN];
+    int  is_msg_start;
+} ChatLogLine;
+
 typedef struct {
     char input[CHAT_INPUT_LEN];
     int  input_len;
 
-    char log[CHAT_LOG_LINES][CHAT_LINE_LEN];
+    ChatLogLine log[CHAT_LOG_LINES];
     int  log_count;
+
+    /* How many lines back into history the scrollback view is scrolled --
+     * 0 = pinned to the bottom (newest line visible, the normal/default
+     * state), up to log_count - visible_capacity when scrolled all the
+     * way back. Owned by ui.c (ui_on_mouse_wheel adjusts it, draw_panel_
+     * chat clamps+renders from it, both via ctx->chat) rather than
+     * chat.c, since scrolling is purely a rendering/input-routing concern
+     * that needs live panel layout -- chat.c has no notion of screen
+     * geometry, same division of labor as ChatFocus vs. the actual click
+     * rects living in ui.c. */
+    int  scroll_offset;
 
     ChatFocus focus;
 
@@ -63,12 +94,25 @@ void chat_init(ChatState *cs);
  * box stays focused after you hit Enter, so you can keep typing. */
 void chat_update_focused_text(ChatState *cs, InputState *inp);
 
-/* Splits `text` on '\n' and pushes each line into the registered
- * ChatState's scrollback ring buffer, same truncation/wrap behavior as
- * console.c's log_push/log_push_multiline. Used both for the local "You:
- * ..." echo (main.c, right after draining send_requested) and for
- * whatever the assistant said. */
+/* Splits `text` on '\n' and pushes each resulting logical line into the
+ * registered ChatState's scrollback ring buffer, same truncation
+ * behavior as console.c's log_push/log_push_multiline -- word-wrapping
+ * to the panel's pixel width is a separate, later, draw-time concern
+ * (see ChatLogLine's own comment). Marks the FIRST resulting line's
+ * is_msg_start (see ChatLogLine) since every real call site here is
+ * genuinely one whole "Name: ..." message: the local "You: ..." echo
+ * (main.c, right after draining send_requested) or whatever the
+ * assistant said (via chat_on_reply, below) -- use
+ * chat_append_system_text instead for plain informational lines with no
+ * username to ever bold. */
 void chat_append_multiline(const char *text);
+
+/* Same line-splitting as chat_append_multiline, but every resulting line
+ * gets is_msg_start = 0 -- for plain system/help text (chat_init's own
+ * preamble is the only caller today) that should never be mistaken for
+ * a "Name: ..." message and have some leading words bolded as if they
+ * were a username. */
+void chat_append_system_text(const char *text);
 
 /* Called by net.c on PKT_CHAT_REPLY: chat_append_multiline(text), then
  * clears waiting_for_reply. */

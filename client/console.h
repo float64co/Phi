@@ -27,6 +27,15 @@ typedef struct {
     char history[CONSOLE_HISTORY][CONSOLE_INPUT_LEN];
     int  history_count;
     int  history_pos;   /* -1 = not browsing history */
+
+    /* How many lines back into the scrollback the view is scrolled -- 0 =
+     * pinned to the newest line (the default). Owned/mutated by ui.c
+     * (ui_on_mouse_wheel adjusts it, draw_panel_console clamps+renders
+     * from it), not console.c, same division of labor as ChatState's own
+     * scroll_offset (see chat.h) -- scrolling is a rendering/hover
+     * concern that needs live panel layout, which this module doesn't
+     * have or need for anything else it does. */
+    int  scroll_offset;
 } PyConsoleState;
 
 /* Registers cs as the target for pyconsole_append() (mirrors input.c's

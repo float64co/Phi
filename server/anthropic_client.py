@@ -23,6 +23,24 @@ API_URL = 'https://api.anthropic.com/v1/messages'
 API_VERSION = '2023-06-01'
 DEFAULT_MODEL = os.environ.get('PHI_ANTHROPIC_MODEL', 'claude-sonnet-5')
 MAX_TOKENS = 1024
+
+# Human-readable labels for the Chat panel's "Name: ..." username prefix
+# (see client/ui.c's draw_panel_chat -- it bolds whatever's before the
+# first ": " on a message-start line) -- "claude-sonnet-5" isn't
+# something a user should have to read in a chat transcript. Falls back
+# to the raw model id for anything not listed here (e.g. a dated/pinned
+# id set via PHI_ANTHROPIC_MODEL) rather than raising, since an unlabeled
+# id is still a correct, honest thing to show.
+MODEL_DISPLAY_NAMES = {
+    'claude-sonnet-5': 'Sonnet 5',
+    'claude-opus-5': 'Opus 5',
+    'claude-fable-5': 'Fable 5',
+    'claude-haiku-4-5-20251001': 'Haiku 4.5',
+}
+
+
+def model_display_name(model_id: str) -> str:
+    return MODEL_DISPLAY_NAMES.get(model_id, model_id)
 # Hard cap on tool-call rounds so a misbehaving loop (or a tool that keeps
 # getting called with bad input) can't hang a chat-handling thread forever
 # -- matches this project's "raise/report a bound rather than spin

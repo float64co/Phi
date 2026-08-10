@@ -64,6 +64,16 @@ typedef struct {
     char search[ASSET_SEARCH_LEN];
     int  search_len;
 
+    /* Index of the first visible row in the item list -- 0 = scrolled to
+     * the top (the default). Unlike ChatState/PyConsoleState's own
+     * scroll_offset (a "distance back from the newest" for a bottom-
+     * anchored log), this is a plain top-anchored list scroll: increasing
+     * it reveals LATER items, not older ones -- see ui.c's
+     * ui_on_mouse_wheel for the sign-convention difference this implies.
+     * Same ownership split as those two: ui.c mutates and clamps it,
+     * this module just carries the field. */
+    int  list_scroll_offset;
+
     /* Which single text field (if any) owns this frame's keyboard input
      * instead of the Python console -- see ui.c's ui_on_mouse_button for
      * the click-away-blurs convention, mirrored from the type-switcher

@@ -19,12 +19,16 @@ needing a real windowed client running.
 
 Usage: ANTHROPIC_API_KEY=... python3 test_chat_protocol.py [host] [port]
 """
+import socket
 import struct
 import sys
 import time
 
 import test_asset_protocol
 from test_asset_protocol import WsTestClient, check
+from anthropic_client import model_display_name, DEFAULT_MODEL
+
+EXPECTED_PREFIX = model_display_name(DEFAULT_MODEL) + ': '
 
 PKT_CHAT_MSG             = 0x20
 PKT_CHAT_REPLY           = 0x21
@@ -80,16 +84,25 @@ def main():
     hello = c.recv_frame()
     check(hello[0] == 0x01, f"first message is PKT_HELLO (got 0x{hello[0]:02x})")
 
-    print("[test_chat_protocol] === 1: plain round trip, no tool use ===")
-    c.send(build_chat_msg("Reply with exactly one word: PONG"))
+    print("[test_chat_protocol] === 1: a message WITHOUT @llm gets no reply at all ===")
+    c.send(build_chat_msg("Reply with exactly one word: PONG"))   # deliberately no @llm
+    try:
+        stray = c.recv_frame(timeout=3.0)
+        check(False, f"unexpected reply to a non-@llm message: 0x{stray[0]:02x}")
+    except (socket.timeout, TimeoutError):
+        check(True, "server stayed silent -- the model is never invoked without @llm in the message")
+
+    print("[test_chat_protocol] === 2: plain round trip, no tool use, real reply prefixed with the model's display name ===")
+    c.send(build_chat_msg("@llm Reply with exactly one word: PONG"))
     reply, used_tool = recv_until_chat_reply(c)
     print(f"  reply: {reply!r}")
+    check(reply.startswith(EXPECTED_PREFIX), f"reply starts with {EXPECTED_PREFIX!r} (the bold-username prefix draw_panel_chat parses)")
     check("PONG" in reply.upper(), "the real assistant reply contains PONG")
     check(not used_tool, "a plain question doesn't trigger a tool call")
 
-    print("[test_chat_protocol] === 2: get_scene_state tool call round-trips through THIS process ===")
+    print("[test_chat_protocol] === 3: get_scene_state tool call round-trips through THIS process ===")
     c.send(build_chat_msg(
-        "Call the get_scene_state tool right now and reply with ONLY the "
+        "@llm Call the get_scene_state tool right now and reply with ONLY the "
         "vert_count number it returns, nothing else."
     ))
     reply2, used_tool2 = recv_until_chat_reply(c)
@@ -97,9 +110,9 @@ def main():
     check(used_tool2, "the model actually issued a get_scene_state tool call (we answered a PKT_SCENE_STATE_REQUEST)")
     check("4242" in reply2, "the final reply reflects the EXACT canned value (4242) this test process sent back, not a guess")
 
-    print("[test_chat_protocol] === 3: get_asset_list tool call reflects the REAL server-side DB ===")
+    print("[test_chat_protocol] === 4: get_asset_list tool call reflects the REAL server-side DB ===")
     c.send(build_chat_msg(
-        "Call get_asset_list and reply with ONLY the total count of assets listed, as a number, nothing else."
+        "@llm Call get_asset_list and reply with ONLY the total count of assets listed, as a number, nothing else."
     ))
     reply3, _ = recv_until_chat_reply(c)
     print(f"  reply: {reply3!r}")

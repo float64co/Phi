@@ -20,6 +20,15 @@ Area *area_tree_find_border_hit(Area *a, int x, int y) {
     return found ? found : area_tree_find_border_hit(a->child[1], x, y);
 }
 
+Area *area_tree_find_leaf_at(Area *a, int x, int y) {
+    if (!a) return NULL;
+    if ((float)x < a->x || (float)x >= a->x + a->w || (float)y < a->y || (float)y >= a->y + a->h)
+        return NULL;
+    if (a->kind == AREA_LEAF) return a;
+    Area *found = area_tree_find_leaf_at(a->child[0], x, y);
+    return found ? found : area_tree_find_leaf_at(a->child[1], x, y);
+}
+
 void area_tree_resize_to_mouse(Area *a, int mouse_x, int mouse_y) {
     if (a->kind == AREA_SPLIT_H) {
         if (a->w < 1.0f) return;

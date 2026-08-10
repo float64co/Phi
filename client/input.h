@@ -35,6 +35,16 @@ typedef struct {
     int   typed_count;
     int   enter_edge, backspace_edge;
     int   histup_edge, histdown_edge;   /* Up / Down arrows: input history */
+
+    /* Mouse wheel, accumulated (there can be more than one wheel event per
+     * frame) since the last time a consumer drained it to 0 -- same
+     * producer-sets/consumer-clears convention as lmb_click. Positive =
+     * scrolled up/toward the user (reveals OLDER content, e.g. further
+     * back in the Chat panel's scrollback); negative = scrolled down.
+     * Previously captured by all three platforms' event handlers but never
+     * wired to anything (see input.c's own history here) -- now consumed
+     * by ui_on_mouse_wheel for the Chat panel's scrollback. */
+    int   scroll_delta;
 } InputState;
 
 void input_init(InputState *inp);

@@ -67,6 +67,14 @@ int main(void) {
     check(area_tree_find_border_hit(&root, 450, 300) == NULL, "far from the border misses");
     check(area_tree_find_border_hit(root.child[0], 400, 300) == NULL, "a leaf has no border of its own to hit");
 
+    printf("[area_tree_test] === 4b: find_leaf_at (hover routing, e.g. mouse-wheel scroll target) ===\n");
+    check(area_tree_find_leaf_at(&root, 100, 300) == root.child[0], "a point in the left half finds the left leaf");
+    check(area_tree_find_leaf_at(&root, 700, 300) == root.child[1], "a point in the right half finds the right leaf");
+    check(area_tree_find_leaf_at(&root, 400, 300) == root.child[1], "the exact border x belongs to the right leaf (half-open [x, x+w) ranges)");
+    check(area_tree_find_leaf_at(&root, -10, 300) == NULL, "outside the tree's own bounds (negative x) misses entirely");
+    check(area_tree_find_leaf_at(&root, 100, 700) == NULL, "outside the tree's own bounds (y past the bottom) misses entirely");
+    check(area_tree_find_leaf_at(NULL, 100, 300) == NULL, "a NULL root is a safe miss, not a crash");
+
     printf("[area_tree_test] === 5: resize-to-mouse, including clamping ===\n");
     area_tree_resize_to_mouse(&root, 200, 300);
     check(root.split == 0.25f, "split recomputed from mouse x / area width (200/800 = 0.25)");
@@ -83,6 +91,8 @@ int main(void) {
     check(right->kind == AREA_SPLIT_V, "right child is now its own SPLIT_V");
     check(area_tree_find_border_hit(&root, 500, 300) == right, "a click inside the nested split's region finds the NESTED border, not the outer one");
     check(area_tree_find_border_hit(&root, 400, 300) == &root, "a click on the OUTER border still finds root, not the nested split");
+    check(area_tree_find_leaf_at(&root, 500, 100) == right->child[0], "find_leaf_at recurses into a nested split correctly (top half)");
+    check(area_tree_find_leaf_at(&root, 500, 500) == right->child[1], "find_leaf_at recurses into a nested split correctly (bottom half)");
 
     printf("[area_tree_test] === 7: join collapses a split back into a single leaf ===\n");
     Area *right_top = right->child[0];

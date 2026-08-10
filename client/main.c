@@ -66,6 +66,17 @@ static AssetBrowserState g_ab  = {0};
 static ChatState    g_chat     = {0};
 static double       g_last_t   = 0.0;
 
+/* Editor camera -- a plain eye-position + yaw/pitch fly camera (no real
+ * orbit/pan/fly navigation system exists yet, see phi.md's Phase 1
+ * status), previously set ONCE at startup and never touched again since
+ * nothing needed to change it. Mouse-wheel-over-the-Scene-panel zoom
+ * (scene_zoom_cb below) is the first thing that does, hence promoting
+ * this from a one-shot renderer_set_camera argument to real persistent
+ * state main.c can mutate frame to frame. */
+static Vec3f  g_cam_pos   = {128.0f, 100.0f, 120.0f};
+static float  g_cam_yaw   = 0.0f;
+static float  g_cam_pitch = 0.0f;
+
 /* Phase 2 physics (see phi.md's "Bullet Physics via Emscripten") -- one
  * shared world, stepped every frame in main_loop. g_ground_phys_body is a
  * single large static (mass=0) box acting as a floor so "Enable Physics"
@@ -188,6 +199,29 @@ static void scene_content_cb(void *userdata) {
     (void)userdata;
     if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
     if (selected_is_test_mesh()) gizmo_draw(g_renderer, g_test_mesh_object.position);
+}
+
+/* Mouse-wheel-over-the-Scene-panel zoom (ui.c's UIRenderContext::
+ * on_scene_zoom, routed by hover, see ui_on_mouse_wheel) -- dollies the
+ * camera forward/backward along its own view direction, the natural
+ * "zoom" for a free/fly camera that has no orbit target/distance concept
+ * to shrink instead (unlike an orbit camera's usual scroll-to-zoom).
+ * Forward-vector formula matched exactly against compute_scene_ray/
+ * renderer.c's build_vp (fwd = (-sin(yaw)cos(pitch), sin(pitch),
+ * -cos(yaw)cos(pitch))) so zooming always moves toward what's actually
+ * on screen, not a re-derived approximation of it. No minimum-distance
+ * clamp -- a plain dolly has no "orbit target" to overshoot the way an
+ * orbit camera would, so there's nothing to clamp against yet; a real
+ * one would need real scene-geometry awareness this pass doesn't add. */
+static void scene_zoom_cb(int delta) {
+    float sy = sinf(g_cam_yaw),   cy = cosf(g_cam_yaw);
+    float sp = sinf(g_cam_pitch), cp = cosf(g_cam_pitch);
+    Vec3f fwd = { -sy*cp, sp, -cy*cp };
+    float step = 8.0f * (float)delta;   /* world units per wheel notch -- tuned against this scene's own scale (see phi.md's Phase 1 status: the test cube is scaled to a 16-unit edge, ground plane is 400x400) */
+    g_cam_pos.x += fwd.x * step;
+    g_cam_pos.y += fwd.y * step;
+    g_cam_pos.z += fwd.z * step;
+    renderer_set_camera(g_renderer, g_cam_pos, g_cam_yaw, g_cam_pitch);
 }
 
 /* Constructs a world-space ray from a screen point inside the Scene
@@ -338,6 +372,15 @@ static void main_loop(void *userdata) {
     memcpy(ui_ctx.light_dir, light_dir, sizeof(light_dir));
     memcpy(ui_ctx.sky_color, sky, sizeof(sky));
     ui_ctx.draw_scene_content = scene_content_cb;
+    ui_ctx.on_scene_zoom = scene_zoom_cb;
+
+    /* Mouse wheel — rising-value-drained-here, same convention as every
+     * other one-shot InputState field main.c reads. Currently only the
+     * Chat panel's scrollback consumes this (see ui_on_mouse_wheel). */
+    if (g_inp.scroll_delta != 0) {
+        ui_on_mouse_wheel(g_inp.mouse_x, g_inp.mouse_y, g_inp.scroll_delta, &ui_ctx);
+        g_inp.scroll_delta = 0;
+    }
 
     /* Real clicks (lmb_click/rmb_click) — same "rising edge, drained and
      * cleared here" convention as enter_edge etc. Routes into the panel
@@ -581,13 +624,20 @@ static void main_loop(void *userdata) {
     /* Chat one-shot send, same "UI raises intent, main.c executes"
      * pattern as the Asset Browser flags right below -- echoes the
      * outgoing message locally (a real server round trip is not
-     * instant), then hands it to net.c. */
+     * instant), then hands it to net.c. waiting_for_reply (the "Claude is
+     * thinking..." indicator) is only set when the message actually
+     * contains "@llm" -- server.py's own PKT_CHAT_MSG handler silently
+     * does NOT invoke the model (and so never sends a PKT_CHAT_REPLY back)
+     * for a message without it, matching a Slack-bot-style @mention
+     * convention; without this check the indicator would spin forever on
+     * a reply that was never coming for any message that doesn't mention
+     * the model. */
     if (g_chat.send_requested) {
         g_chat.send_requested = 0;
         char echo[CHAT_LINE_LEN];
         snprintf(echo, sizeof(echo), "You: %s", g_chat.pending_send);
         chat_append_multiline(echo);
-        g_chat.waiting_for_reply = 1;
+        if (strstr(g_chat.pending_send, "@llm") != NULL) g_chat.waiting_for_reply = 1;
         net_send_chat_msg(&g_ns, g_chat.pending_send);
     }
 
@@ -849,7 +899,7 @@ int main(void) {
      * with the rest of that code (see phi.md's Phase 1 status, "Client/
      * server model"), so this is set once here and never touched again
      * unless/until real camera controls land. */
-    renderer_set_camera(g_renderer, (Vec3f){128.0f, 100.0f, 120.0f}, 0.0f, 0.0f);
+    renderer_set_camera(g_renderer, g_cam_pos, g_cam_yaw, g_cam_pitch);
 
     /* Input */
     input_init(&g_inp);

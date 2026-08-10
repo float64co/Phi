@@ -158,6 +158,14 @@ typedef struct {
     int   area_menu_open;
     Area *area_menu_target;
     float area_menu_x, area_menu_y;
+
+    /* Python Panel scroll (see draw_panel_python) -- lives here rather
+     * than in mp_port.c's state, since it's a pure rendering/hover
+     * concern with no Python-visible meaning, same reasoning ChatState/
+     * PyConsoleState's own scroll_offset fields already establish for
+     * their panels. Top-anchored (0 = scrolled to the first returned
+     * line), same convention as the Asset Browser's list_scroll_offset. */
+    int   python_panel_scroll;
 } UIState;
 
 static UIState g_ui;
@@ -728,10 +736,74 @@ static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
     }
 }
 
+#define UI_SCROLL_ROW_H 18.0f
+
+/* Generic scroll-offset clamp + scrollbar-thumb rendering, shared by
+ * every panel with overflowable content (Chat/Console scrollbacks,
+ * the Asset Browser's item list, the Python Panel's returned rows) --
+ * one geometry formula instead of four copies of the same math. Callers
+ * own their own "how many rows fit"/"what's the log area's rect"
+ * geometry (that part differs per panel: bottom-anchored logs vs. a
+ * top-anchored list), but funnel into these two once they have top/
+ * bottom/total/visible/offset. */
+static int ui_clamp_scroll(int offset, int total, int visible) {
+    int max_scroll = total > visible ? total - visible : 0;
+    if (offset < 0) offset = 0;
+    if (offset > max_scroll) offset = max_scroll;
+    return offset;
+}
+
+/* Draws a thin track + thumb on the right edge of [top,bottom] -- only
+ * called when total > visible (callers check first, same "no chrome for
+ * a state that can't occur" principle as the Area menu's Join row being
+ * hidden when there's no sibling).
+ *
+ * `anchor_bottom` picks which end offset==0 sits at, since this codebase
+ * has two genuinely different kinds of scrollable content: Chat/Console
+ * are bottom-anchored logs (offset==0 means "pinned to the newest line",
+ * i.e. the BOTTOM of the track, matching a terminal's own convention),
+ * while the Asset Browser's item list and the Python Panel's rows are
+ * ordinary top-anchored lists (offset==0 means "scrolled to the top",
+ * i.e. the TOP of the track, matching a normal scrollbar) -- these are
+ * mirror-image thumb-position formulas, not the same math, so the flag
+ * is load-bearing, not cosmetic. */
+static void ui_draw_scrollbar(float bar_x, float top, float bottom, int total, int visible, int offset, int anchor_bottom) {
+    float track_h = bottom - top;
+    if (track_h <= 0.0f || visible <= 0) return;
+    float thumb_h = track_h * ((float)visible / (float)total);
+    if (thumb_h < 12.0f) thumb_h = 12.0f;
+    if (thumb_h > track_h) thumb_h = track_h;
+    int max_scroll = total - visible;
+    float scroll_frac = max_scroll > 0 ? (float)offset / (float)max_scroll : 0.0f;
+    float thumb_y = anchor_bottom
+        ? bottom - thumb_h - scroll_frac * (track_h - thumb_h)
+        : top + scroll_frac * (track_h - thumb_h);
+    ui_rect(bar_x, top, 3.0f, track_h, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 0.5f);
+    ui_rect(bar_x, thumb_y, 3.0f, thumb_h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.85f);
+}
+
+/* Vertical span the scrollback has to draw in: from the panel's own top
+ * padding down to just above the input prompt row + its 20px gap --
+ * shared by the draw loop, the scroll clamp, and the scrollbar so none
+ * of the three can disagree (same pattern chat_log_area_rect established
+ * for the Chat panel). */
+static void console_log_area_rect(Area *a, float *top, float *bottom) {
+    *top = a->y + UI_PANEL_PAD;
+    *bottom = a->y + a->h - UI_PANEL_PAD - 18.0f - 20.0f;
+}
+
+static int console_visible_row_count(Area *a) {
+    float top, bottom;
+    console_log_area_rect(a, &top, &bottom);
+    float avail = bottom - top;
+    return avail > 0.0f ? (int)(avail / UI_SCROLL_ROW_H) : 0;
+}
+
 static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
     float x = a->x + UI_PANEL_PAD, y = a->y + a->h - UI_PANEL_PAD - 18.0f;
     ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_HD_R, UI_ZEN_PANEL_HD_G, UI_ZEN_PANEL_HD_B, 0.95f);
     if (!ctx->console) return;
+    PyConsoleState *cs = ctx->console;
 
     /* Input row pinned to the bottom, log scrolling up from just above it
      * -- newest line closest to the input, matching normal terminal/chat
@@ -739,7 +811,7 @@ static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
      * prefix (Python-REPL convention) so the live input row and its
      * echoed history read identically. */
     char prompt[CONSOLE_INPUT_LEN + 8];
-    snprintf(prompt, sizeof(prompt), ">>> %s", ctx->console->input);
+    snprintf(prompt, sizeof(prompt), ">>> %s", cs->input);
     ui_text_draw(x, y, prompt, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
 
     /* Caret -- always present, since the Python panel is an always-focused
@@ -754,9 +826,21 @@ static void draw_panel_console(Area *a, const UIRenderContext *ctx) {
     }
     y -= 20.0f;
 
-    for (int i = ctx->console->log_count - 1; i >= 0 && y > a->y + UI_PANEL_PAD; i--) {
-        ui_text_draw(x, y, ctx->console->log[i], g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-        y -= 18.0f;
+    int visible = console_visible_row_count(a);
+    cs->scroll_offset = ui_clamp_scroll(cs->scroll_offset, cs->log_count, visible);
+
+    int start = cs->log_count - 1 - cs->scroll_offset;
+    for (int shown = 0; shown < visible && start - shown >= 0; shown++) {
+        int i = start - shown;
+        ui_text_draw(x, y, cs->log[i], g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        y -= UI_SCROLL_ROW_H;
+    }
+
+    if (cs->log_count > visible) {
+        float top, bottom;
+        console_log_area_rect(a, &top, &bottom);
+        float bar_x = a->x + a->w - UI_PANEL_PAD - 4.0f;
+        ui_draw_scrollbar(bar_x, top, bottom, cs->log_count, visible, cs->scroll_offset, 1);
     }
 }
 
@@ -870,41 +954,60 @@ static Area *find_area_by_type_r(Area *a, PanelType t) {
     return found ? found : find_area_by_type_r(a->child[1], t);
 }
 
-/* Clamps the row list to what actually fits above the Load/Delete button
- * row -- same "stop when you run out of vertical space" bound
- * draw_panel_console's scrollback loop already uses (there: `y > a->y +
- * UI_PANEL_PAD`), just precomputed once here since hit-testing needs the
- * same count, not just the draw loop. */
-static int asset_browser_visible_row_count(Area *a, const AssetBrowserState *ab) {
+/* Pure vertical capacity -- how many rows fit above the Load/Delete
+ * button row, independent of how many items actually exist or where the
+ * list is scrolled to. Used directly as the scrollbar's "visible" count
+ * (a constant viewport size makes for a correctly-sized thumb even on a
+ * partially-filled last page -- see asset_browser_rows_to_draw below for
+ * the count that's actually clamped to what's left to show). */
+static int asset_browser_row_capacity(Area *a, const AssetBrowserState *ab) {
     float lx, ly, lw, rnx, rny, rnw, dx, dy, dw, bh;
     asset_browser_action_rects(a, &lx, &ly, &lw, &rnx, &rny, &rnw, &dx, &dy, &dw, &bh);
     float avail = ly - 6.0f - asset_browser_list_top(a, ab);
-    int max_rows = avail > 0.0f ? (int)(avail / ASSET_BROWSER_ROW_H) : 0;
-    return ab->count < max_rows ? ab->count : max_rows;
+    return avail > 0.0f ? (int)(avail / ASSET_BROWSER_ROW_H) : 0;
 }
 
-/* Draws one text-entry field (used for both the search bar and the
- * rename/create edit form's name/tags fields): background, focus accent,
- * current text or a dimmed placeholder, and a blinking caret when this
- * exact field owns focus. `is_focused` decides the accent/caret; the
- * caret's x position accounts for whatever's already typed via
- * font_text_width, same measurement draw_panel_console's own caret uses. */
+/* How many rows actually get drawn/are clickable THIS frame: capacity,
+ * further clamped by how many items remain at/after the current scroll
+ * position -- shared by the draw loop and the row-click hit-test so a
+ * click can never land on a row that isn't actually showing an item. */
+static int asset_browser_rows_to_draw(Area *a, const AssetBrowserState *ab) {
+    int capacity = asset_browser_row_capacity(a, ab);
+    int remaining = ab->count - ab->list_scroll_offset;
+    if (remaining < 0) remaining = 0;
+    return remaining < capacity ? remaining : capacity;
+}
+
+/* Draws one text-entry field (used for the search bar, the rename/create
+ * edit form's name/tags fields, and the Chat input box): background,
+ * focus accent, current text or a dimmed placeholder, and a blinking
+ * caret when this exact field owns focus. `is_focused` decides the
+ * accent/caret; the caret's x position accounts for whatever's already
+ * typed via font_text_width, same measurement draw_panel_console's own
+ * caret uses. `text_y_offset` is the text/placeholder's y nudge from the
+ * field's own top edge (callers pass their own constant rather than this
+ * function hardcoding one) -- added so the Chat input specifically could
+ * be lowered 2px per an explicit request without also shifting the Asset
+ * Browser's search/name/tags fields, which share this same function and
+ * were never asked to move; the caret tracks 1px above whatever
+ * text_y_offset the caller chose, preserving the original 3.0/2.0
+ * text/caret relationship. */
 static void draw_text_field(float x, float y, float w, float h, const char *text,
-                             const char *placeholder, int is_focused) {
+                             const char *placeholder, int is_focused, float text_y_offset) {
     ui_rect(x, y, w, h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
     if (is_focused) {
         ui_rect(x, y, w, 2.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
     }
     if (text[0]) {
-        ui_text_draw(x + 6.0f, y + 3.0f, text, g_ui.font_body, 12.0f,
+        ui_text_draw(x + 6.0f, y + text_y_offset, text, g_ui.font_body, 12.0f,
                      UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     } else if (!is_focused && placeholder) {
-        ui_text_draw(x + 6.0f, y + 3.0f, placeholder, g_ui.font_body, 12.0f,
+        ui_text_draw(x + 6.0f, y + text_y_offset, placeholder, g_ui.font_body, 12.0f,
                      UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
     }
     if (is_focused && fmod(phi_platform_now(), 1.0) < 0.5) {
         float caret_x = x + 6.0f + (text[0] ? font_text_width(g_ui.font_body, text, 12.0f) : 0.0f);
-        ui_rect(caret_x, y + 2.0f, 6.0f, h - 4.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.9f);
+        ui_rect(caret_x, y + text_y_offset - 1.0f, 6.0f, h - 4.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 0.9f);
     }
 }
 
@@ -922,11 +1025,11 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
     ui_text_draw(rx + 6.0f, ry + 3.0f, "Refresh", g_ui.font_body, 11.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
 
     if (!ctx->asset_browser) return;
-    const AssetBrowserState *ab = ctx->asset_browser;
+    AssetBrowserState *ab = ctx->asset_browser;
 
     float sx, sy, sw, sh;
     asset_browser_search_rect(a, &sx, &sy, &sw, &sh);
-    draw_text_field(sx, sy, sw, sh, ab->search, "Search...", ab->focus == AB_FOCUS_SEARCH);
+    draw_text_field(sx, sy, sw, sh, ab->search, "Search...", ab->focus == AB_FOCUS_SEARCH, 3.0f);
 
     if (ab->editing_id != AB_EDITING_NONE) {
         float content_top = asset_browser_content_top(a);
@@ -938,11 +1041,11 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
 
         float nx, ny, nw, nh;
         asset_browser_edit_name_rect(a, &nx, &ny, &nw, &nh);
-        draw_text_field(nx, ny, nw, nh, ab->edit_name, "Name...", ab->focus == AB_FOCUS_EDIT_NAME);
+        draw_text_field(nx, ny, nw, nh, ab->edit_name, "Name...", ab->focus == AB_FOCUS_EDIT_NAME, 3.0f);
 
         float tx, ty, tw, th;
         asset_browser_edit_tags_rect(a, &tx, &ty, &tw, &th);
-        draw_text_field(tx, ty, tw, th, ab->edit_tags, "tags, comma, separated", ab->focus == AB_FOCUS_EDIT_TAGS);
+        draw_text_field(tx, ty, tw, th, ab->edit_tags, "tags, comma, separated", ab->focus == AB_FOCUS_EDIT_TAGS, 3.0f);
 
         float bsx, bsy, bsw, bcx, bcy, bcw, bbh;
         asset_browser_edit_buttons_rect(a, &bsx, &bsy, &bsw, &bcx, &bcy, &bcw, &bbh);
@@ -957,10 +1060,16 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
         ui_text_draw(a->x + UI_PANEL_PAD, asset_browser_list_top(a, ab), "No assets indexed. Click Refresh.",
                      g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
     }
-    int visible = asset_browser_visible_row_count(a, ab);
-    for (int i = 0; i < visible; i++) {
+    int capacity = asset_browser_row_capacity(a, ab);
+    /* Defensive re-clamp every frame, same reasoning as Chat/Console's own
+     * scroll_offset clamps -- the list can shrink (a delete, or a new
+     * search/refresh reply) out from under a stale scroll position. */
+    ab->list_scroll_offset = ui_clamp_scroll(ab->list_scroll_offset, ab->count, capacity);
+    int rows = asset_browser_rows_to_draw(a, ab);
+    for (int row = 0; row < rows; row++) {
+        int i = row + ab->list_scroll_offset;   /* absolute index into ab->items[] */
         float x, y, w, h;
-        asset_browser_row_rect(a, ab, i, &x, &y, &w, &h);
+        asset_browser_row_rect(a, ab, row, &x, &y, &w, &h);
         if (i == ab->selected) {
             ui_rect(x, y - 2.0f, w, h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.35f);
         }
@@ -971,6 +1080,16 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
         else
             snprintf(line, sizeof(line), "#%u  %s", as->id, as->name);
         ui_text_draw(x + 4.0f, y, line, g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    }
+    if (ab->count > capacity) {
+        float top = asset_browser_list_top(a, ab);
+        float lx2, ly2, lw2, rnx2, rny2, rnw2, dx2, dy2, dw2, bh2;
+        asset_browser_action_rects(a, &lx2, &ly2, &lw2, &rnx2, &rny2, &rnw2, &dx2, &dy2, &dw2, &bh2);
+        float bar_x = a->x + a->w - 6.0f;
+        /* Top-anchored: offset==0 shows the top of the list, matching a
+         * normal scrollbar's own convention (see ui_draw_scrollbar's own
+         * comment on why this differs from Chat/Console's bottom anchor). */
+        ui_draw_scrollbar(bar_x, top, ly2 - 6.0f, ab->count, capacity, ab->list_scroll_offset, 0);
     }
 
     float lx, ly, lw, rnx, rny, rnw, dx, dy, dw, bh;
@@ -985,6 +1104,8 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
     ui_text_draw(dx + 8.0f, dy + 4.0f, "Delete", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, dim);
 }
 
+#define CHAT_ROW_H UI_SCROLL_ROW_H
+
 /* Input row pinned to the bottom, same geometry shape asset_browser's
  * field rects use (a dedicated function shared between drawing and
  * hit-testing, see hit_test_area/ui_on_mouse_button below, so the two can
@@ -996,6 +1117,127 @@ static void chat_input_rect(Area *a, float *x, float *y, float *w, float *h) {
     *y = a->y + a->h - UI_PANEL_PAD - *h;
 }
 
+/* Vertical span the scrollback actually has to draw in: from just below
+ * the "Chat" title row down to a real 20px clearance above the input box
+ * (matching draw_panel_console's own input-to-first-log-line gap) --
+ * previously only 8px, which let the bottom of the newest line's glyphs
+ * clip into the input box's top edge, a real reported bug. Shared by the
+ * draw loop, the wheel-scroll clamp, and the scrollbar thumb geometry so
+ * none of the three can disagree about how much room there is. */
+static void chat_log_area_rect(Area *a, float *top, float *bottom) {
+    float ix, iy, iw, ih;
+    chat_input_rect(a, &ix, &iy, &iw, &ih);
+    *top = a->y + 30.0f;
+    *bottom = iy - 20.0f;
+}
+
+/* How many scrollback rows actually fit right now -- reserve_rows lets
+ * the caller carve out space for the "Claude is thinking..." row when
+ * it's showing, so that indicator doesn't silently steal a row's worth
+ * of space nobody accounted for. */
+static int chat_visible_row_count(Area *a, int reserve_rows) {
+    float top, bottom;
+    chat_log_area_rect(a, &top, &bottom);
+    float avail = (bottom - top) - (float)reserve_rows * CHAT_ROW_H;
+    return avail > 0.0f ? (int)(avail / CHAT_ROW_H) : 0;
+}
+
+#define CHAT_VISUAL_ROW_LEN   128
+#define CHAT_MAX_VISUAL_ROWS  256
+#define CHAT_MAX_WRAP_PER_MSG 24
+
+/* Greedy word-wrap: breaks `text` into rows no wider than avail_w
+ * (measured via font_text_width at the given font/size), splitting on
+ * spaces. The very first word attempted on a row is always taken even if
+ * it alone exceeds avail_w (no mid-word hard-breaking -- a rare edge
+ * case for real chat text, not worth the complexity here), so this can
+ * never get stuck making zero progress. An empty `text` still produces
+ * one empty row rather than zero, so a deliberate blank scrollback line
+ * (see chat_init's preamble spacing) still occupies real vertical space
+ * instead of silently vanishing. Returns the row count written (capped
+ * at max_rows). */
+static int wrap_text(const char *text, float avail_w, const Font *font, float size,
+                      char out[][CHAT_VISUAL_ROW_LEN], int max_rows) {
+    if (max_rows <= 0) return 0;
+    if (!text[0]) { out[0][0] = 0; return 1; }
+
+    int n = 0;
+    const char *p = text;
+    while (*p == ' ') p++;
+    while (*p && n < max_rows) {
+        const char *row_start = p;
+        const char *cursor = p;
+        const char *last_good_end = row_start;
+        for (;;) {
+            const char *word_start = cursor;
+            while (*word_start == ' ') word_start++;
+            if (!*word_start) { last_good_end = word_start; cursor = word_start; break; }
+            const char *word_end = word_start;
+            while (*word_end && *word_end != ' ') word_end++;
+
+            size_t len = (size_t)(word_end - row_start);
+            if (len >= CHAT_VISUAL_ROW_LEN) len = CHAT_VISUAL_ROW_LEN - 1;
+            char candidate[CHAT_VISUAL_ROW_LEN];
+            memcpy(candidate, row_start, len);
+            candidate[len] = 0;
+
+            if (word_start == row_start || font_text_width(font, candidate, size) <= avail_w) {
+                last_good_end = word_end;
+                cursor = word_end;
+                if (!*word_end) break;
+            } else {
+                break;
+            }
+        }
+        size_t row_len = (size_t)(last_good_end - row_start);
+        if (row_len >= CHAT_VISUAL_ROW_LEN) row_len = CHAT_VISUAL_ROW_LEN - 1;
+        memcpy(out[n], row_start, row_len);
+        out[n][row_len] = 0;
+        n++;
+        p = last_good_end;
+        while (*p == ' ') p++;
+    }
+    return n;
+}
+
+typedef struct {
+    char text[CHAT_VISUAL_ROW_LEN];
+    /* > 0 = draw text[0..bold_prefix_len) in g_ui.font_bold, then
+     * text[bold_prefix_len..] (starting at the ": ") in the normal body
+     * font -- see ChatLogLine's own comment on why only a wrapped row's
+     * first line of a real message-start entry ever gets this. */
+    int  bold_prefix_len;
+} ChatVisualRow;
+
+/* Rebuilds the flat, currently-visible-width-wrapped row list from
+ * cs->log[] every frame (never cached) -- the only way wrapping can
+ * genuinely be "responsive to pane resizes" the way it was asked to be,
+ * since a cached pre-wrapped version would go stale the moment the panel
+ * (or the window) resizes. Returns the row count written (capped at
+ * max_out); indices run oldest-to-newest, same order as cs->log[]
+ * itself, so all the existing scroll_offset/visible/scrollbar math below
+ * can operate on this exactly the way it operated on cs->log[] directly
+ * before word-wrap existed. */
+static int chat_build_visual_rows(const ChatState *cs, float avail_w, ChatVisualRow *out, int max_out) {
+    int n = 0;
+    for (int e = 0; e < cs->log_count && n < max_out; e++) {
+        const ChatLogLine *entry = &cs->log[e];
+        char wrapped[CHAT_MAX_WRAP_PER_MSG][CHAT_VISUAL_ROW_LEN];
+        int wn = wrap_text(entry->text, avail_w, g_ui.font_body, 13.0f, wrapped, CHAT_MAX_WRAP_PER_MSG);
+        for (int w = 0; w < wn && n < max_out; w++) {
+            ChatVisualRow *row = &out[n++];
+            strncpy(row->text, wrapped[w], CHAT_VISUAL_ROW_LEN - 1);
+            row->text[CHAT_VISUAL_ROW_LEN - 1] = 0;
+            row->bold_prefix_len = 0;
+            if (w == 0 && entry->is_msg_start) {
+                const char *colon = strstr(row->text, ": ");
+                if (colon) row->bold_prefix_len = (int)(colon - row->text);
+            }
+        }
+    }
+    return n;
+}
+
 /* Chat panel -- a real text field wired to a real server-side Anthropic
  * tool-use loop (see chat.h / server/anthropic_client.py / phi.md's
  * "Where AI fits"), not the placeholder shell this used to be. Click the
@@ -1003,25 +1245,76 @@ static void chat_input_rect(Area *a, float *x, float *y, float *w, float *h) {
  * click-away-blur handling below, mirroring the Asset Browser's fields
  * exactly), type, Enter to send. reuses draw_text_field, the same
  * focus-accent/placeholder/caret widget the Asset Browser's search/name/
- * tags fields already use, rather than a bespoke input box. */
+ * tags fields already use, rather than a bespoke input box -- lowered
+ * 2px from that shared default via draw_text_field's text_y_offset
+ * parameter, per an explicit request scoped to just this panel. */
 static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
     ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
     float x = a->x + UI_PANEL_PAD;
     ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Chat", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
     if (!ctx->chat) return;
+    ChatState *cs = ctx->chat;
 
     float ix, iy, iw, ih;
     chat_input_rect(a, &ix, &iy, &iw, &ih);
-    draw_text_field(ix, iy, iw, ih, ctx->chat->input, "Type a message...", ctx->chat->focus == CHAT_FOCUS_INPUT);
+    draw_text_field(ix, iy, iw, ih, cs->input, "Type a message...", cs->focus == CHAT_FOCUS_INPUT, 5.0f);
 
-    float y = iy - 8.0f;
-    if (ctx->chat->waiting_for_reply) {
+    /* Symmetric margins: text starts UI_PANEL_PAD in from the left, so it
+     * wraps UI_PANEL_PAD before the right edge too -- per an explicit
+     * request that the two match, rather than wrapping flush against the
+     * panel edge or the scrollbar. Recomputed from `a->w` every frame
+     * (never cached), which is what actually makes this resize-
+     * responsive. */
+    float avail_w = a->w - UI_PANEL_PAD * 2.0f;
+    static ChatVisualRow rows[CHAT_MAX_VISUAL_ROWS];   /* function-local static: avoids a large per-frame stack allocation; single-threaded rendering, one Chat panel, no reentrancy concern */
+    int total_rows = chat_build_visual_rows(cs, avail_w, rows, CHAT_MAX_VISUAL_ROWS);
+
+    int reserve = cs->waiting_for_reply ? 1 : 0;
+    int visible = chat_visible_row_count(a, reserve);
+    /* Defensive re-clamp every frame (not just on wheel events) -- the
+     * row count can change under a stale scroll_offset for several
+     * reasons now (a new reply, a resize changing the wrap, a panel
+     * resize/join), so this can't only be enforced at the moment of
+     * scrolling. */
+    cs->scroll_offset = ui_clamp_scroll(cs->scroll_offset, total_rows, visible);
+
+    float y = iy - 20.0f;
+    if (cs->waiting_for_reply) {
         ui_text_draw(x, y, "Claude is thinking...", g_ui.font_body, 12.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
-        y -= 18.0f;
+        y -= CHAT_ROW_H;
     }
-    for (int i = ctx->chat->log_count - 1; i >= 0 && y > a->y + 30.0f; i--) {
-        ui_text_draw(x, y, ctx->chat->log[i], g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-        y -= 18.0f;
+
+    /* Newest-closest-to-input, same scrollback orientation draw_panel_
+     * console uses -- `start` is the bottom-most (newest-of-the-visible-
+     * window) row index; scroll_offset > 0 walks it back into history. */
+    int start = total_rows - 1 - cs->scroll_offset;
+    for (int shown = 0; shown < visible && start - shown >= 0; shown++) {
+        int i = start - shown;
+        const ChatVisualRow *row = &rows[i];
+        if (row->bold_prefix_len > 0) {
+            char prefix[CHAT_VISUAL_ROW_LEN];
+            int plen = row->bold_prefix_len;
+            if (plen >= CHAT_VISUAL_ROW_LEN) plen = CHAT_VISUAL_ROW_LEN - 1;
+            memcpy(prefix, row->text, (size_t)plen);
+            prefix[plen] = 0;
+            ui_text_draw(x, y, prefix, g_ui.font_bold, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            float rest_x = x + font_text_width(g_ui.font_bold, prefix, 13.0f);
+            ui_text_draw(rest_x, y, row->text + plen, g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        } else {
+            ui_text_draw(x, y, row->text, g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        }
+        y -= CHAT_ROW_H;
+    }
+
+    /* Scrollbar -- bottom-anchored (offset==0 pins to the newest line at
+     * the bottom of the track), wheel-only for now (not draggable), a
+     * known first-pass scope cut, not an oversight. */
+    if (total_rows > visible) {
+        float top, bottom;
+        chat_log_area_rect(a, &top, &bottom);
+        bottom -= (float)reserve * CHAT_ROW_H;
+        float bar_x = a->x + a->w - UI_PANEL_PAD - 4.0f;
+        ui_draw_scrollbar(bar_x, top, bottom, total_rows, visible, cs->scroll_offset, 1);
     }
 }
 
@@ -1083,9 +1376,22 @@ static void draw_panel_python(Area *a, const UIRenderContext *ctx) {
         ui_text_draw(x, y, first_line, g_ui.font_mono, 12.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         return;
     }
-    for (int i = 0; i < n; i++) {
-        ui_text_draw(x, y, lines[i], g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-        y += 18.0f;
+    float list_top = y;
+    float list_bottom = a->y + a->h - UI_PANEL_PAD;
+    int capacity = list_bottom > list_top ? (int)((list_bottom - list_top) / UI_SCROLL_ROW_H) : 0;
+    g_ui.python_panel_scroll = ui_clamp_scroll(g_ui.python_panel_scroll, n, capacity);
+    int remaining = n - g_ui.python_panel_scroll;
+    if (remaining < 0) remaining = 0;
+    int rows = remaining < capacity ? remaining : capacity;
+    for (int row = 0; row < rows; row++) {
+        ui_text_draw(x, y, lines[row + g_ui.python_panel_scroll], g_ui.font_mono, 13.0f,
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        y += UI_SCROLL_ROW_H;
+    }
+    if (n > capacity) {
+        float bar_x = a->x + a->w - 6.0f;
+        /* Top-anchored, same convention as the Asset Browser's list. */
+        ui_draw_scrollbar(bar_x, list_top, list_bottom, n, capacity, g_ui.python_panel_scroll, 0);
     }
 }
 
@@ -1314,10 +1620,10 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
 
         float list_top = asset_browser_list_top(a, ab);
         if ((float)y >= list_top - 2.0f) {
-            int visible = asset_browser_visible_row_count(a, ab);
+            int rows = asset_browser_rows_to_draw(a, ab);
             int row = (int)(((float)y - (list_top - 2.0f)) / ASSET_BROWSER_ROW_H);
-            if (row >= 0 && row < visible) {
-                ab->selected = row;
+            if (row >= 0 && row < rows) {
+                ab->selected = row + ab->list_scroll_offset;   /* absolute item index, see draw_panel_asset_browser */
                 return 1;
             }
         }
@@ -1483,6 +1789,56 @@ void ui_on_mouse_move(int x, int y) {
         return;
     }
     g_ui.hover_border = area_tree_find_border_hit(g_ui.root, x, y);
+}
+
+/* Mouse wheel routing -- by HOVER (area_tree_find_leaf_at), not by click-
+ * focus, deliberately: you shouldn't have to click into the Chat panel
+ * just to scroll it, and the Scene panel's own zoom (below) explicitly
+ * must NOT require clicking into the 3D view first, since that's exactly
+ * what a free/fly camera user expects to just work by hovering. delta is
+ * InputState::scroll_delta, drained by main.c the same frame this is
+ * called -- see input.h's own comment for the sign convention (positive =
+ * wheel scrolled up/toward the user).
+ *
+ * Each scrollable panel's own draw_panel_* function re-clamps its offset
+ * to whatever's actually valid EVERY frame (list/log length can change
+ * out from under a stale offset -- a delete, a new reply, a resize), so
+ * this handler just accumulates the raw delta with the right sign for
+ * that panel's own anchor convention (see ui_draw_scrollbar's own
+ * comment: Chat/Console are bottom-anchored logs where positive delta
+ * means "go back into history", Asset Browser/Python Panel are ordinary
+ * top-anchored lists where positive delta means "move toward the top",
+ * the opposite sign) rather than duplicating the clamp math here too. */
+void ui_on_mouse_wheel(int x, int y, int delta, const UIRenderContext *ctx) {
+    if (delta == 0 || !g_ui.root) return;
+    Area *hover = area_tree_find_leaf_at(g_ui.root, x, y);
+    if (!hover) return;
+
+    switch (hover->panel_type) {
+        case PANEL_CHAT:
+            if (ctx->chat) ctx->chat->scroll_offset += delta;
+            break;
+        case PANEL_CONSOLE:
+            if (ctx->console) ctx->console->scroll_offset += delta;
+            break;
+        case PANEL_ASSET_BROWSER:
+            if (ctx->asset_browser) ctx->asset_browser->list_scroll_offset -= delta;
+            break;
+        case PANEL_PYTHON:
+            g_ui.python_panel_scroll -= delta;
+            break;
+        case PANEL_SCENE:
+            /* Camera zoom -- main.c owns the actual camera state (see
+             * phi.md's Phase 1 status on why: no real camera-navigation
+             * system exists yet beyond this), ui.c just routes the
+             * hover-gated wheel event to it via this callback, same
+             * shape draw_scene_content already established for handing
+             * scene-content drawing back to main.c. */
+            if (ctx->on_scene_zoom) ctx->on_scene_zoom(delta);
+            break;
+        default:
+            break;
+    }
 }
 
 void ui_open_scene_context_menu(int x, int y) {

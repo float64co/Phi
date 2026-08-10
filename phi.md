@@ -2288,6 +2288,82 @@ still unverified in this sandbox, same `XOpenDisplay()` limitation as
 everything else this session needing a real window — the server-side
 half and the wire protocol are proven for real either way.
 
+#### Chat panel follow-ups: scrollbars everywhere, word-wrap, @llm addressing, 2026-08-10
+
+Three rounds of real user-reported bugs/asks against the landed Chat
+panel, fixed the same session:
+
+**Bug: scrollback clipped the input box.** The gap between the newest
+scrollback line and the input box was only 8px; real glyph height meant
+its bottom edge bled into the input field. Widened to 20px, matching
+`draw_panel_console`'s own already-correct gap.
+
+**Bug/ask: no scrollbar anywhere.** Real mouse-wheel input had never
+been wired to anything on any of the three platforms (`input.c` had a
+dead callback shell on each, explicitly reserved for "a future
+Scene-panel zoom" that hadn't landed yet) — `InputState::scroll_delta`
+is now real, and `ui_on_mouse_wheel` routes it by HOVER (`area_tree_
+find_leaf_at`, a new area-tree lookup, ASan-verified via `area_tree_
+test`), not click-focus, since you shouldn't have to click into a panel
+to scroll it. Extended to every panel with real overflow risk, not just
+Chat: Console's scrollback, the Asset Browser's item list, and the
+Python Panel's returned rows. Two genuinely different scroll-anchor
+conventions exist (`ui_draw_scrollbar`'s `anchor_bottom` flag) — Chat/
+Console are bottom-anchored logs (offset 0 = pinned to the newest line),
+Asset Browser/Python Panel are ordinary top-anchored lists (offset 0 =
+scrolled to the top) — mirror-image thumb-position formulas, not shared
+math. Each panel's own `draw_panel_*` re-clamps its offset every frame
+(not just on a wheel event), since the underlying count can shrink out
+from under a stale offset for reasons that have nothing to do with
+scrolling (a delete, a new reply, a resize).
+
+**Ask: real word-wrap + bold usernames + @llm addressing.** Chat's
+scrollback storage changed from pre-broken fixed lines to logical
+(unwrapped) `ChatLogLine` entries, each tagged `is_msg_start`; wrapping
+to the panel's actual pixel width happens fresh every frame
+(`chat_build_visual_rows` + a real greedy word-wrapper, `wrap_text`) —
+the only way it can genuinely be responsive to a live resize, since a
+cached pre-wrapped version would go stale the moment the panel or window
+changes size. Margins are symmetric: text starts `UI_PANEL_PAD` in from
+the left, so it wraps that same distance from the right edge. Only a
+`ChatLogLine` marked `is_msg_start` ever has its leading `"Name: "`
+parsed out and drawn in `g_ui.font_bold` (colon and message body stay
+normal weight) — a real body line that happens to contain `": "` (e.g.
+`"Score: 42"`) is never mistaken for a username line, since only the
+first wrapped row of a genuine message-start entry is eligible at all.
+
+The model's own username is now a real display name
+(`anthropic_client.MODEL_DISPLAY_NAMES`, e.g. `"Sonnet 5"` for
+`claude-sonnet-5`) rather than the raw API model id, prefixed onto every
+real reply server-side; error replies get `"System: "` instead so they
+render with the same bold-prefix convention without being mistaken for
+something the model said. The model is now only ever invoked when a
+message contains `@llm` (`server.py`'s `PKT_CHAT_MSG` handler silently
+does not forward anything else to the model at all, matching a
+Slack-bot-style @mention convention, not an always-on chatbot) — told to
+the model via its own system prompt, and told to the human user via
+`chat_init`'s preamble text, which explains the convention and ends with
+two blank scrollback lines before the user's own first message.
+`main.c` only sets `waiting_for_reply` (the "Claude is thinking..."
+indicator) when the outgoing text contains `@llm`, so the indicator
+never spins forever on a reply that server.py was never going to send.
+
+The Chat input box's text is drawn 2px lower than the Asset Browser's
+search/name/tags fields, which share the same `draw_text_field` — a new
+`text_y_offset` parameter lets each caller choose, rather than moving
+the shared default and shifting fields that were never asked to move.
+
+Verified: `area_tree_test` (+6 checks for `area_tree_find_leaf_at`, ASan
+clean), a real live re-run of `server/test_chat_protocol.py` against the
+funded key confirming `@llm` gating (a non-`@llm` message gets truly no
+reply), the `"Sonnet 5: "` prefix, and that tool-calling still works with
+the gate in place — all pass. Native/wasm/win32 all rebuilt clean from a
+forced clean state as the final check (confirmed via source-vs-binary
+mtime comparison, not just a "make said 0" trust). Live GUI verification
+of the actual wrap/scrollbar/bold rendering is still not possible in
+this sandbox, same `XOpenDisplay()` limitation as everything else this
+session needing a real window.
+
 ### Fracturing
 
 Meshes are authored with a fracture pattern at creation time. The editor provides

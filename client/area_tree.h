@@ -29,6 +29,19 @@
  * overlap its parent's own. Returns NULL if (x,y) isn't near any border. */
 Area *area_tree_find_border_hit(Area *a, int x, int y);
 
+/* Finds the LEAF area whose on-screen rect contains (x,y), searching the
+ * tree rooted at `a` -- the "what panel is the mouse hovering right now"
+ * lookup, needed for anything that should route by hover rather than by
+ * click/focus (mouse-wheel scrolling being the first real consumer, see
+ * ui.c's ui_on_mouse_wheel). Split nodes' own x/y/w/h are populated by
+ * ui_layout the same as leaves' are (layout_area sets them on every node,
+ * not just leaves), so this can walk purely off those rects without
+ * needing point_in_rect from ui.c (this module stays GL/ui.c-free, see
+ * this file's own header comment). Returns NULL if (x,y) is outside `a`'s
+ * own bounds entirely (e.g. in the branding/menu chrome strip above the
+ * root, or `a` is NULL). */
+Area *area_tree_find_leaf_at(Area *a, int x, int y);
+
 /* Recomputes a SPLIT area's split fraction from a live mouse position,
  * clamped to [AREA_SPLIT_MIN, AREA_SPLIT_MAX] so neither side ever
  * collapses to nothing. No-op if `a` isn't currently a SPLIT (e.g. it was

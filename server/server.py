@@ -43,7 +43,7 @@ import logging
 import urllib.parse
 
 from assets_db import AssetDB
-from anthropic_client import run_tool_loop, AnthropicError
+from anthropic_client import run_tool_loop, AnthropicError, model_display_name, DEFAULT_MODEL
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 log = logging.getLogger('server')
@@ -390,19 +390,22 @@ class Client:
             "You are Claude, embedded as a first-class participant inside "
             "the Phi game engine's editor (see phi.md's \"Where AI fits\"). "
             "You're talking with a user through the editor's Chat panel. "
-            "You have tools that let you introspect the specific running "
-            "client instance this conversation is attached to -- use them "
-            "when the user asks about the current scene/object state "
-            "rather than guessing or making something up. Keep replies "
-            "concise: this renders in a small in-editor chat box, not a "
-            "document."
+            "You only ever receive a message here when it contains \"@llm\" "
+            "somewhere in it -- that's this chat's addressing convention, "
+            "so every message you see IS one directed at you, even if it "
+            "doesn't look like a question. You have tools that let you "
+            "introspect the specific running client instance this "
+            "conversation is attached to -- use them when the user asks "
+            "about the current scene/object state rather than guessing or "
+            "making something up. Keep replies concise: this renders in a "
+            "small in-editor chat box, not a document."
         )
         try:
-            reply = run_tool_loop(system, user_text, tools, dispatch)
+            reply = model_display_name(DEFAULT_MODEL) + ': ' + run_tool_loop(system, user_text, tools, dispatch)
         except AnthropicError as e:
-            reply = f'[chat error] {e}'
+            reply = f'System: {e}'
         except Exception as e:
-            reply = f'[chat error] unexpected: {e}'
+            reply = f'System: unexpected error: {e}'
         self.send(pack_chat_reply(reply))
 
     def _on_message(self, data: bytes):
@@ -446,6 +449,20 @@ class Client:
             text = _parse_chat_msg(payload)
             if text is None:
                 log.info(f'Client {self.pid}: malformed PKT_CHAT_MSG')
+            elif '@llm' not in text:
+                # Addressing convention: the model is only invoked (and
+                # only ever SEES a message) when "@llm" appears in it --
+                # see _handle_chat's own system prompt, which tells the
+                # model the same thing, and chat.c's chat_init preamble,
+                # which tells the human user. No reply is sent at all here
+                # (not even a "you didn't say @llm" nudge) -- deliberately
+                # silent, matching a Slack-bot-style @mention convention
+                # rather than an always-on chatbot. main.c only sets
+                # waiting_for_reply when it sees "@llm" in the outgoing
+                # text for exactly this reason (so the "thinking..."
+                # indicator never spins forever waiting on a reply that
+                # was never going to come).
+                log.info(f'Client {self.pid} chat (no @llm, not forwarded to the model): {text!r}')
             else:
                 log.info(f'Client {self.pid} chat: {text!r}')
                 threading.Thread(target=self._handle_chat, args=(text,), daemon=True).start()
