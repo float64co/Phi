@@ -302,7 +302,13 @@ int ui_init(void) {
 
     Area *right_col = (Area *)calloc(1, sizeof(Area));
     right_col->kind = AREA_SPLIT_V;
-    right_col->split = UI_INV_PHI;  /* Outliner (top) gets the larger golden fraction */
+    /* Properties (bottom) now gets the larger golden fraction, Outliner
+     * (top) the smaller -- swapped from the original Outliner-larger/
+     * Properties-smaller split per an explicit request, top/bottom order
+     * unchanged. child[0]'s height is h*split (see layout_area), so
+     * giving child[1]/Properties the larger share means split itself is
+     * the SMALLER fraction (1 - UI_INV_PHI), not UI_INV_PHI. */
+    right_col->split = 1.0f - UI_INV_PHI;
     right_col->child[0] = outliner_leaf;
     right_col->child[1] = properties_leaf;
 

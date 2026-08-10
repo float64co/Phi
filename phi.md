@@ -2364,6 +2364,129 @@ of the actual wrap/scrollbar/bold rendering is still not possible in
 this sandbox, same `XOpenDisplay()` limitation as everything else this
 session needing a real window.
 
+#### Scene panel: reference grid + Blender-style MMB orbit/pan, 2026-08-10
+
+**A real ground-aligned reference grid** (`renderer_draw_grid`, new) —
+deliberately built from thin SOLID quads, not `GL_LINES`: this codebase
+already has a real, documented precedent (`renderer_draw_wire_box`'s own
+comment, and `gizmo.c`'s note on why it switched away from wireframe) for
+1-pixel lines genuinely rasterizing in the geometry pass and still
+vanishing from the final composited frame, suppressed by TAA/FXAA. The
+grid doesn't repeat that bug. Centered/sized to match
+`g_ground_phys_body` exactly (top surface y=50), so the one visual
+reference plane in the scene is the plane the test object actually lands
+on, not an arbitrary y=0. Built once and cached in a static VBO (unlike
+`renderer_draw_wire_box`'s per-call dynamic buffer) since it's always the
+same fixed geometry every frame.
+
+**A real orbit camera.** The editor camera was a bare eye-position +
+yaw/pitch fly camera; Blender-style MMB-drag orbit needs a fixed point to
+orbit *around*, which that model has nowhere to keep. Refactored to
+pivot + distance + yaw/pitch, with `g_cam_pos` now a derived value
+(`cam_recompute_pos`, the one place any of zoom/orbit/pan ever actually
+reaches the renderer) rather than an independent source of truth. Wheel-
+zoom (landed earlier this session) now moves `distance` instead of
+freely dollying, so it stays consistent with orbit's fixed pivot instead
+of letting the pivot drift away from what's on screen. `compute_scene_ray`
+(object picking's own ray construction) was quietly duplicating the same
+yaw/pitch-to-basis formula inline; pulled out into a shared `cam_basis`
+so picking, zoom, orbit, and pan all provably use the identical math, not
+four copies that happen to agree today.
+
+**MMB-drag orbits, Ctrl+MMB-drag pans** — mode is decided once, from
+whether Ctrl was held at the exact moment the drag started (matching
+Blender's own "modifier state at click time" behavior, not live-toggled
+mid-drag), and both are computed fresh each frame from the drag's START
+yaw/pitch/pivot + the total pixel delta since then — the same anti-drift
+"recompute from the absolute mouse position, never accumulate
+incrementally" pattern this session's own area-border resize drag and
+the gizmo's drag already established. A drag only STARTS when the press
+lands inside the Scene panel's own rect (`ui_get_scene_rect`), then
+continues regardless of where the cursor goes afterward, same
+click-must-start-inside/continues-anywhere convention as that resize
+drag. Middle mouse button + Ctrl tracking is new to `InputState` across
+all three platforms (`input.c`) — wiring this up caught a real bug in
+`phi_platform_win32.c`: its `WndProc` explicitly whitelists which Win32
+messages get forwarded into `input.c`, and `WM_MBUTTONDOWN`/`WM_MBUTTONUP`
+weren't in that list, so the C-side handling would have silently never
+received a single middle-click event on Windows until this was added.
+
+**Bug: middle-click didn't register in the browser.** Emscripten's own
+`mousedown`/`mouseup` callbacks already return `EM_TRUE` (the
+html5.h convention for "preventDefault this"), which should suppress the
+browser's native middle-click autoscroll cursor on its own — but that's
+been unreliable in practice across browsers, since some fire a separate
+`auxclick` event for the middle button that a plain `mousedown`
+preventDefault doesn't necessarily cover. Added an explicit JS-level
+belt-and-suspenders listener in `www/index.html` (`{passive:false}`,
+since a passive listener can't call `preventDefault` at all) on both
+events, same spot the existing RMB-context-menu suppression already
+lives.
+
+**Bug: the transform gizmo was too big.** `GIZMO_LEN`/`GIZMO_SHAFT_R`/
+`GIZMO_HANDLE_R` (`gizmo.c`) all scaled to exactly 1/4 their previous
+size, kept in the same proportion to each other rather than only
+shrinking the visible arrow — those three constants also define the
+handle's hit-test bounds (`axis_handle_bounds`), so scaling only the
+drawn geometry would have left a click target that no longer matched
+what's on screen.
+
+Verified: native/wasm/win32 all rebuilt clean from a forced clean state.
+Live interactive verification of the grid's appearance, the orbit/pan
+feel (sign conventions were derived from the camera-space math, not
+eyeballed against a real window), and the gizmo's new size are all still
+not possible in this sandbox, same `XOpenDisplay()` limitation as
+everything else this session needing a real window — flagged honestly
+rather than assumed correct.
+
+**Real bug, found from a user report ("MMB still isn't working" in the
+browser after the JS-level autoscroll-suppression fix above): `main.c`'s
+MMB-drag-start block read `g_inp.mmb_click` but never drained it back to
+0.** `lmb_click`/`rmb_click` are cleared immediately inside their own
+`if` blocks a few lines below (`main.c`'s established "rising edge,
+drained and cleared here" convention) — `mmb_click` was the one place
+that convention wasn't followed. Left set, the drag-start block re-ran
+*every single frame* for as long as the flag stayed 1 (i.e. forever after
+the first press, since nothing ever cleared it), resetting
+`g_cam_drag_start_x/y` to the CURRENT mouse position each time —
+meaning `dx`/`dy` in `cam_orbit_from_start`/`cam_pan_from_start` were
+always exactly 0, so the drag could never produce any camera movement at
+all, regardless of how far the mouse actually moved. This is a better,
+more specific explanation than the earlier browser-autoscroll theory
+(which is still a real, worthwhile defensive fix, just not what was
+actually broken here) — fixed by draining `g_inp.mmb_click = 0` the
+moment it's read, matching `lmb_click`/`rmb_click` exactly.
+
+Confirmed working live in the real browser build once fixed. Following
+that, the vertical orbit direction (`cam_orbit_from_start`'s `dy` ->
+`g_cam_pitch` sign) was flipped per an explicit follow-up request — the
+math was correct, the feel just wasn't the one wanted.
+
+#### Default panel heights: Properties now the taller pane, 2026-08-10
+
+The right column's Outliner/Properties split (`ui_init`) originally gave
+Outliner (top) the larger golden-ratio fraction and Properties (bottom)
+the smaller one; swapped per an explicit request, top/bottom order
+unchanged — Properties now gets the larger share. Since a `SPLIT_V`'s
+`child[0]` height is `h * split` (see `layout_area`), giving `child[1]`
+(Properties) the bigger fraction means `split` itself holds the
+*smaller* one now (`1 - UI_INV_PHI`, not `UI_INV_PHI`).
+
+#### Scene panel: grid thinned + light grey, background dark grey, 2026-08-10
+
+Two colour/thickness tweaks per explicit request: the grid's world-space
+quad width dropped from 0.3 to 0.05 (6x thinner) and recoloured to light
+grey (0.65,0.65,0.65); the scene's clear/background colour
+(`renderer.c`'s `s_sky_color`, previously `(0.3,0.5,0.8)` — a literal
+Qek "sky blue" holdover, that project's actual sky colour, never
+revisited since this codebase diverged from it) is now dark, dark grey
+`(0.06,0.06,0.06)`. **The grid stays solid-quad geometry, not real
+`GL_LINES`**, even though "1px thick" was the literal ask — switching to
+actual 1-pixel lines would reintroduce the exact TAA/FXAA-suppression
+bug `renderer_draw_wire_box`/`gizmo.c` already document hitting and
+fixing earlier in this project's history; flagged explicitly rather than
+silently reinterpreted. Verified: native/wasm/win32 all rebuilt clean.
+
 ### Fracturing
 
 Meshes are authored with a fracture pattern at creation time. The editor provides

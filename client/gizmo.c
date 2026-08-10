@@ -2,9 +2,15 @@
 #include <math.h>
 #include <string.h>
 
-#define GIZMO_LEN       24.0f  /* world-space arrow length */
-#define GIZMO_SHAFT_R    1.0f  /* shaft half-thickness on the two non-axis dims */
-#define GIZMO_HANDLE_R   4.0f  /* half-size of the grab-handle cube at the tip */
+/* All three scaled to 1/4 their original size (24/1/4 -> 6/0.25/1) per an
+ * explicit request that the gizmo was too big -- kept in exact 4x
+ * proportion to each other rather than shrinking just the visual length,
+ * since these same three constants ALSO define the handle's hit-test
+ * bounds (axis_handle_bounds below); scaling only the visible arrow
+ * would leave a click target that no longer matches what's drawn. */
+#define GIZMO_LEN        6.0f   /* world-space arrow length */
+#define GIZMO_SHAFT_R    0.25f  /* shaft half-thickness on the two non-axis dims */
+#define GIZMO_HANDLE_R   1.0f   /* half-size of the grab-handle cube at the tip */
 
 typedef struct {
     int       dragging;

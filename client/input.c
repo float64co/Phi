@@ -47,6 +47,7 @@ static EM_BOOL mouse_move(int type, const EmscriptenMouseEvent *e, void *ud) {
     if (!inp) return EM_FALSE;
     inp->mouse_x = e->targetX;
     inp->mouse_y = e->targetY;
+    inp->ctrl_down = e->ctrlKey;
     return EM_TRUE;
 }
 
@@ -56,7 +57,9 @@ static EM_BOOL mouse_down(int type, const EmscriptenMouseEvent *e, void *ud) {
     if (!inp) return EM_FALSE;
     inp->mouse_x = e->targetX;
     inp->mouse_y = e->targetY;
+    inp->ctrl_down = e->ctrlKey;
     if (e->button == 0)      { inp->lmb_down = 1; inp->lmb_click = 1; }
+    else if (e->button == 1) { inp->mmb_down = 1; inp->mmb_click = 1; }
     else if (e->button == 2) { inp->rmb_down = 1; inp->rmb_click = 1; }
     return EM_TRUE;
 }
@@ -66,6 +69,7 @@ static EM_BOOL mouse_up(int type, const EmscriptenMouseEvent *e, void *ud) {
     InputState *inp = s_inp;
     if (!inp) return EM_FALSE;
     if (e->button == 0) inp->lmb_down = 0;
+    if (e->button == 1) inp->mmb_down = 0;
     if (e->button == 2) inp->rmb_down = 0;
     return EM_TRUE;
 }
@@ -89,7 +93,7 @@ static EM_BOOL wheel_move(int type, const EmscriptenWheelEvent *e, void *ud) {
  * button held at that exact moment sticks "on" forever (no matching
  * mouseup ever arrives), e.g. leaving a gizmo drag stuck active. */
 static void reset_held_buttons(InputState *inp) {
-    inp->lmb_down = inp->rmb_down = 0;
+    inp->lmb_down = inp->rmb_down = inp->mmb_down = 0;
 }
 
 static EM_BOOL on_blur(int type, const EmscriptenFocusEvent *e, void *ud) {
@@ -119,7 +123,7 @@ void input_install_callbacks(InputState *inp) {
 static InputState *s_inp  = NULL;
 
 static void reset_held_buttons_win32(InputState *inp) {
-    inp->lmb_down = inp->rmb_down = 0;
+    inp->lmb_down = inp->rmb_down = inp->mmb_down = 0;
 }
 
 void input_install_callbacks(InputState *inp) {
@@ -155,21 +159,31 @@ static void handle_char(WPARAM wparam) {
         inp->typed_chars[inp->typed_count++] = (char)wparam;
 }
 
-static void handle_motion(LPARAM lparam) {
+/* WM_MOUSEMOVE/WM_*BUTTONDOWN's wParam carries the MK_* virtual-key flags
+ * (MK_CONTROL/MK_LBUTTON/MK_MBUTTON/etc.), separate from lParam's packed
+ * cursor position -- this is where ctrl_down comes from on this platform,
+ * no separate WM_KEYDOWN(VK_CONTROL) tracking needed. */
+static void handle_motion(WPARAM wparam, LPARAM lparam) {
     InputState *inp = s_inp;
     if (!inp) return;
     inp->mouse_x = (short)LOWORD(lparam);  /* client-area coords, like X11's ev->xmotion.x/y */
     inp->mouse_y = (short)HIWORD(lparam);
+    inp->ctrl_down = (wparam & MK_CONTROL) != 0;
 }
 
-static void handle_button(int is_right, int down, LPARAM lparam) {
+/* button: 0=left, 1=middle, 2=right. */
+static void handle_button(int button, int down, WPARAM wparam, LPARAM lparam) {
     InputState *inp = s_inp;
     if (!inp) return;
     inp->mouse_x = (short)LOWORD(lparam);
     inp->mouse_y = (short)HIWORD(lparam);
-    if (!is_right) {
+    inp->ctrl_down = (wparam & MK_CONTROL) != 0;
+    if (button == 0) {
         inp->lmb_down = down;
         if (down) inp->lmb_click = 1;
+    } else if (button == 1) {
+        inp->mmb_down = down;
+        if (down) inp->mmb_click = 1;
     } else {
         inp->rmb_down = down;
         if (down) inp->rmb_click = 1;
@@ -195,12 +209,14 @@ void input_native_handle_event(void *msgptr) {
         case WM_KEYDOWN:     handle_key(m->wParam, m->lParam, 1); break;
         case WM_KEYUP:       handle_key(m->wParam, m->lParam, 0); break;
         case WM_CHAR:        handle_char(m->wParam);              break;
-        case WM_MOUSEMOVE:   handle_motion(m->lParam);            break;
-        case WM_LBUTTONDOWN: handle_button(0, 1, m->lParam);      break;
-        case WM_LBUTTONUP:   handle_button(0, 0, m->lParam);      break;
-        case WM_RBUTTONDOWN: handle_button(1, 1, m->lParam);      break;
-        case WM_RBUTTONUP:   handle_button(1, 0, m->lParam);      break;
-        case WM_MOUSEWHEEL:  handle_wheel(m->wParam);              break;
+        case WM_MOUSEMOVE:   handle_motion(m->wParam, m->lParam);         break;
+        case WM_LBUTTONDOWN: handle_button(0, 1, m->wParam, m->lParam);   break;
+        case WM_LBUTTONUP:   handle_button(0, 0, m->wParam, m->lParam);   break;
+        case WM_MBUTTONDOWN: handle_button(1, 1, m->wParam, m->lParam);   break;
+        case WM_MBUTTONUP:   handle_button(1, 0, m->wParam, m->lParam);   break;
+        case WM_RBUTTONDOWN: handle_button(2, 1, m->wParam, m->lParam);   break;
+        case WM_RBUTTONUP:   handle_button(2, 0, m->wParam, m->lParam);   break;
+        case WM_MOUSEWHEEL:  handle_wheel(m->wParam);                     break;
         case WM_KILLFOCUS:   if (s_inp) reset_held_buttons_win32(s_inp); break;
         default: break;
     }
@@ -221,7 +237,7 @@ static InputState *s_inp = NULL;
 static int         s_key_down[256];   /* indexed by raw X11 keycode, for edge detection below */
 
 static void reset_held_buttons_native(InputState *inp) {
-    inp->lmb_down = inp->rmb_down = 0;
+    inp->lmb_down = inp->rmb_down = inp->mmb_down = 0;
 }
 
 void input_install_callbacks(InputState *inp) {
@@ -267,6 +283,7 @@ static void handle_motion(XMotionEvent *e) {
     if (!inp) return;
     inp->mouse_x = e->x;
     inp->mouse_y = e->y;
+    inp->ctrl_down = (e->state & ControlMask) != 0;
 }
 
 static void handle_button(XButtonEvent *e, int down) {
@@ -274,9 +291,13 @@ static void handle_button(XButtonEvent *e, int down) {
     if (!inp) return;
     inp->mouse_x = e->x;
     inp->mouse_y = e->y;
+    inp->ctrl_down = (e->state & ControlMask) != 0;
     if (e->button == Button1) {
         inp->lmb_down = down;
         if (down) inp->lmb_click = 1;
+    } else if (e->button == Button2) {
+        inp->mmb_down = down;
+        if (down) inp->mmb_click = 1;
     } else if (e->button == Button3) {
         inp->rmb_down = down;
         if (down) inp->rmb_click = 1;

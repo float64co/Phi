@@ -302,8 +302,11 @@ static const char *PBR_FRAG_SRC =
  * renderer_set_sky_color — glClearColor itself is opaque GL state with no
  * getter, but gbuffer.c's lighting pass needs the actual current sky color
  * (not a hardcoded guess) to paint background pixels, since the deferred
- * path no longer relies on glClearColor's implicit background-fill. */
-static float s_sky_color[3] = {0.3f, 0.5f, 0.8f};
+ * path no longer relies on glClearColor's implicit background-fill.
+ * Dark, dark grey per an explicit request -- the original (0.3,0.5,0.8)
+ * blue was a literal Qek holdover (that project's actual sky color),
+ * never revisited since. */
+static float s_sky_color[3] = {0.06f, 0.06f, 0.06f};
 
 /* ===========================================================
  * Column-major mat4  (OpenGL convention)
@@ -801,6 +804,94 @@ void renderer_draw_solid_box(Renderer *r, Vec3f bmin, Vec3f bmax,
     glVertexAttrib1f(2, 0.0f);
 
     glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+}
+
+static unsigned int s_grid_vbo = 0;
+static int          s_grid_vert_count = 0;
+
+/* Reference grid on the XZ plane -- built from thin SOLID quads (two
+ * triangles per line), same "full-bright normal == light dir" trick and
+ * the same r->program/u_mvp/u_mat_color/u_object_id shape every helper-
+ * geometry draw in this file uses, deliberately NOT renderer_draw_wire_
+ * box's GL_LINES approach: that function's own comment (and gizmo.c's,
+ * which switched away from it for exactly this reason) documents that a
+ * 1-pixel line can genuinely rasterize in the geometry pass and still
+ * vanish from the final composited frame, suppressed by TAA/FXAA's
+ * temporal/edge-smoothing passes -- a real, previously-hit bug in this
+ * codebase, not a hypothetical one, so the grid doesn't repeat it. */
+void renderer_draw_grid(Renderer *r, Vec3f center, float half_extent,
+                         float spacing, float line_width,
+                         float cr, float cg, float cb) {
+    if (!s_grid_vbo) {
+        glGenBuffers(1, &s_grid_vbo);
+
+        int n = (int)(half_extent / spacing);
+        int line_count = 2 * (2 * n + 1);   /* n lines each side of center, plus the center line, in both directions */
+        int floats_per_line = 6 * 6;        /* 2 triangles * 3 verts * (pos3 + normal3) */
+        float *verts = (float *)malloc((size_t)line_count * (size_t)floats_per_line * sizeof(float));
+        float *vp_ = verts;
+        float hw = line_width * 0.5f;
+        float z0 = center.z - half_extent, z1 = center.z + half_extent;
+        float x0 = center.x - half_extent, x1 = center.x + half_extent;
+
+        for (int i = -n; i <= n; i++) {
+            /* Line running along Z at fixed x */
+            float x = center.x + (float)i * spacing;
+            float qx[4][3] = {
+                {x - hw, center.y, z0}, {x + hw, center.y, z0},
+                {x + hw, center.y, z1}, {x - hw, center.y, z1},
+            };
+            int tri[6] = {0, 1, 2, 0, 2, 3};
+            for (int k = 0; k < 6; k++) {
+                const float *cp = qx[tri[k]];
+                *vp_++ = cp[0]; *vp_++ = cp[1]; *vp_++ = cp[2];
+                *vp_++ = 0.577f; *vp_++ = 0.577f; *vp_++ = 0.577f;
+            }
+            /* Line running along X at fixed z */
+            float z = center.z + (float)i * spacing;
+            float qz[4][3] = {
+                {x0, center.y, z - hw}, {x1, center.y, z - hw},
+                {x1, center.y, z + hw}, {x0, center.y, z + hw},
+            };
+            for (int k = 0; k < 6; k++) {
+                const float *cp = qz[tri[k]];
+                *vp_++ = cp[0]; *vp_++ = cp[1]; *vp_++ = cp[2];
+                *vp_++ = 0.577f; *vp_++ = 0.577f; *vp_++ = 0.577f;
+            }
+        }
+
+        s_grid_vert_count = line_count * 6;
+        glBindBuffer(GL_ARRAY_BUFFER, s_grid_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (long)((size_t)line_count * (size_t)floats_per_line * sizeof(float)), verts, GL_STATIC_DRAW);
+        free(verts);
+    }
+
+    r->cur_object_id = 0;   /* non-pickable world geometry, same convention as renderer.c's own default */
+
+    float vp[16]; build_vp(r, vp);
+    glUseProgram(r->program);
+    bind_renderer_vao(r);
+    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);
+    glUniform3f(r->u_mat_color, cr, cg, cb);
+    float ld[3] = {0.577f, 0.577f, 0.577f};
+    glUniform3fv(r->u_light_dir, 1, ld);
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+
+    glBindBuffer(GL_ARRAY_BUFFER, s_grid_vbo);
+    int stride = 6 * (int)sizeof(float);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+    glDisableVertexAttribArray(2);
+    glVertexAttrib1f(2, 0.0f);
+
+    glDrawArrays(GL_TRIANGLES, 0, s_grid_vert_count);
+    gl_check("draw_grid");
 
     glDisableVertexAttribArray(0);
     glDisableVertexAttribArray(1);

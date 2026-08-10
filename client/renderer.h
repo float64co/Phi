@@ -120,6 +120,18 @@ void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
 void renderer_draw_solid_box(Renderer *r, Vec3f bmin, Vec3f bmax,
                               float cr, float cg, float cb);
 
+/* Editor: a flat reference grid on the XZ plane, built from thin SOLID
+ * quads (not GL_LINES) for the same TAA/FXAA-survival reason
+ * renderer_draw_solid_box exists -- a real ground/spacing reference for
+ * orbit/pan navigation. Built once and cached internally (a real static
+ * VBO, not rebuilt every frame the way renderer_draw_wire_box's dynamic
+ * per-call buffer is) since main.c only ever calls this with one fixed
+ * center/extent/spacing describing the world's own ground plane; the
+ * first call's arguments are the ones that stick. */
+void renderer_draw_grid(Renderer *r, Vec3f center, float half_extent,
+                         float spacing, float line_width,
+                         float cr, float cg, float cb);
+
 /* Math helpers exposed for main.c */
 void mat4_perspective(float *m, float fovy, float aspect, float near, float far);
 void mat4_mul(float *out, const float *a, const float *b);

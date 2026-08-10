@@ -66,16 +66,37 @@ static AssetBrowserState g_ab  = {0};
 static ChatState    g_chat     = {0};
 static double       g_last_t   = 0.0;
 
-/* Editor camera -- a plain eye-position + yaw/pitch fly camera (no real
- * orbit/pan/fly navigation system exists yet, see phi.md's Phase 1
- * status), previously set ONCE at startup and never touched again since
- * nothing needed to change it. Mouse-wheel-over-the-Scene-panel zoom
- * (scene_zoom_cb below) is the first thing that does, hence promoting
- * this from a one-shot renderer_set_camera argument to real persistent
- * state main.c can mutate frame to frame. */
-static Vec3f  g_cam_pos   = {128.0f, 100.0f, 120.0f};
-static float  g_cam_yaw   = 0.0f;
-static float  g_cam_pitch = 0.0f;
+/* Editor camera -- a real orbit camera (pivot + distance + yaw/pitch),
+ * not the plain eye-position+yaw/pitch fly camera this used to be:
+ * Blender-style navigation (MMB-drag orbit, Ctrl+MMB-drag pan, wheel
+ * zoom -- see cam_recompute_pos/scene_zoom_cb/the MMB-drag block in
+ * main_loop) needs a fixed point to orbit AROUND, which a bare eye-
+ * position has nowhere to keep. g_cam_pos is DERIVED from the other
+ * four (see cam_recompute_pos), never written to directly outside it.
+ * Initial values chosen so frame 1's eye position matches exactly what
+ * this used to be hardcoded to -- (128,100,120) looking toward -Z at
+ * yaw=pitch=0 -- so landing this was not a visible camera jump:
+ * pivot = eye + forward*distance with forward=(0,0,-1) at yaw=pitch=0,
+ * distance=40 -> pivot=(128,100,80). */
+static Vec3f  g_cam_pivot    = {128.0f, 100.0f, 80.0f};
+static float  g_cam_distance = 40.0f;
+static float  g_cam_yaw      = 0.0f;
+static float  g_cam_pitch    = 0.0f;
+static Vec3f  g_cam_pos      = {128.0f, 100.0f, 120.0f};
+
+/* Blender-style MMB-drag camera navigation state -- same "recompute from
+ * the absolute mouse position every frame relative to where the drag
+ * STARTED" pattern ui.c's area-border resize drag and the transform
+ * gizmo's own drag already established (not per-frame delta
+ * accumulation, so a missed mouse-move event can't cause drift). Orbit
+ * vs. pan is decided once, from whether Ctrl was held at the exact
+ * moment the drag started -- matches Blender's own "modifier state at
+ * click time, not live-toggled mid-drag" behavior. */
+static int   g_cam_dragging = 0;
+static int   g_cam_drag_is_pan = 0;
+static int   g_cam_drag_start_x = 0, g_cam_drag_start_y = 0;
+static float g_cam_drag_start_yaw = 0.0f, g_cam_drag_start_pitch = 0.0f;
+static Vec3f g_cam_drag_start_pivot = {0.0f, 0.0f, 0.0f};
 
 /* Phase 2 physics (see phi.md's "Bullet Physics via Emscripten") -- one
  * shared world, stepped every frame in main_loop. g_ground_phys_body is a
@@ -195,56 +216,136 @@ static void rebuild_test_mesh_render(const char *op_name, int tris_before) {
  * content that exists right now. */
 static int selected_is_test_mesh(void);  /* defined below, needed here for the gizmo draw */
 
+/* Ground-aligned reference grid -- centered/sized to match
+ * g_ground_phys_body exactly (position (128,40,90), half-extents
+ * (200,10,200), so its top surface -- and this grid -- sit at y=50), so
+ * the one visual reference plane in the scene is the same plane the test
+ * object actually lands on, not an arbitrary unrelated y=0. Always drawn
+ * (no toggle) -- a plain "is there a ground reference" ask, not a
+ * feature that needs to be turned off. */
+static void draw_scene_grid(void) {
+    /* Thin + light grey per an explicit request. Width is a real world-
+     * space quad (see renderer_draw_grid's own comment on why: solid
+     * geometry, not GL_LINES, survives TAA/FXAA where a literal 1px line
+     * doesn't -- a real, previously-hit bug in this codebase, not a
+     * hypothetical one), shrunk to 0.05 (6x thinner than the original
+     * 0.3) rather than switched to an actual 1px GL_LINES draw, which
+     * would reintroduce that exact bug -- a hairline via solid geometry,
+     * not a literal device-pixel line. */
+    renderer_draw_grid(g_renderer, (Vec3f){128.0f, 50.0f, 90.0f},
+                        200.0f, 10.0f, 0.05f, 0.65f, 0.65f, 0.65f);
+}
+
 static void scene_content_cb(void *userdata) {
     (void)userdata;
+    draw_scene_grid();
     if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
     if (selected_is_test_mesh()) gizmo_draw(g_renderer, g_test_mesh_object.position);
 }
 
-/* Mouse-wheel-over-the-Scene-panel zoom (ui.c's UIRenderContext::
- * on_scene_zoom, routed by hover, see ui_on_mouse_wheel) -- dollies the
- * camera forward/backward along its own view direction, the natural
- * "zoom" for a free/fly camera that has no orbit target/distance concept
- * to shrink instead (unlike an orbit camera's usual scroll-to-zoom).
- * Forward-vector formula matched exactly against compute_scene_ray/
- * renderer.c's build_vp (fwd = (-sin(yaw)cos(pitch), sin(pitch),
- * -cos(yaw)cos(pitch))) so zooming always moves toward what's actually
- * on screen, not a re-derived approximation of it. No minimum-distance
- * clamp -- a plain dolly has no "orbit target" to overshoot the way an
- * orbit camera would, so there's nothing to clamp against yet; a real
- * one would need real scene-geometry awareness this pass doesn't add. */
-static void scene_zoom_cb(int delta) {
-    float sy = sinf(g_cam_yaw),   cy = cosf(g_cam_yaw);
-    float sp = sinf(g_cam_pitch), cp = cosf(g_cam_pitch);
-    Vec3f fwd = { -sy*cp, sp, -cy*cp };
-    float step = 8.0f * (float)delta;   /* world units per wheel notch -- tuned against this scene's own scale (see phi.md's Phase 1 status: the test cube is scaled to a 16-unit edge, ground plane is 400x400) */
-    g_cam_pos.x += fwd.x * step;
-    g_cam_pos.y += fwd.y * step;
-    g_cam_pos.z += fwd.z * step;
+/* fwd/right/up basis matched EXACTLY against compute_scene_ray/
+ * renderer.c's build_vp/mat4_look_dir -- every camera-navigation
+ * function below (zoom/orbit/pan) reuses this same one, so none of them
+ * can silently drift from what's actually rendered or from each other. */
+static void cam_basis(float yaw, float pitch, Vec3f *fwd, Vec3f *right, Vec3f *up) {
+    float sy = sinf(yaw),   cy = cosf(yaw);
+    float sp = sinf(pitch), cp = cosf(pitch);
+    if (fwd)   *fwd   = (Vec3f){ -sy*cp, sp, -cy*cp };
+    if (right) *right = (Vec3f){  cy,    0.0f, -sy   };
+    if (up)    *up    = (Vec3f){  sy*sp, cp,   cy*sp };
+}
+
+/* Recomputes g_cam_pos from pivot/distance/yaw/pitch and pushes it to
+ * the renderer -- the ONE place any of those four ever actually reaches
+ * the renderer, so zoom/orbit/pan can each just mutate their own piece
+ * of state and call this rather than duplicating the eye = pivot -
+ * forward*distance math and the renderer_set_camera call three times. */
+static void cam_recompute_pos(void) {
+    Vec3f fwd; cam_basis(g_cam_yaw, g_cam_pitch, &fwd, NULL, NULL);
+    g_cam_pos.x = g_cam_pivot.x - fwd.x * g_cam_distance;
+    g_cam_pos.y = g_cam_pivot.y - fwd.y * g_cam_distance;
+    g_cam_pos.z = g_cam_pivot.z - fwd.z * g_cam_distance;
     renderer_set_camera(g_renderer, g_cam_pos, g_cam_yaw, g_cam_pitch);
 }
 
+/* Mouse-wheel-over-the-Scene-panel zoom (ui.c's UIRenderContext::
+ * on_scene_zoom, routed by hover, see ui_on_mouse_wheel) -- now moves
+ * g_cam_distance (how far the eye sits from the orbit pivot) rather than
+ * freely dollying the eye position itself, so zoom stays consistent with
+ * MMB-orbit's own fixed-pivot model instead of letting the pivot drift
+ * away from what's actually on screen. Clamped to a sane range: never
+ * lets distance collapse to (or cross) zero, never lets it run off to an
+ * unusable extreme either. */
+static void scene_zoom_cb(int delta) {
+    g_cam_distance -= 8.0f * (float)delta;   /* world units per wheel notch -- tuned against this scene's own scale (test cube edge 16, ground plane 400x400) */
+    if (g_cam_distance < 5.0f) g_cam_distance = 5.0f;
+    if (g_cam_distance > 2000.0f) g_cam_distance = 2000.0f;
+    cam_recompute_pos();
+}
+
+/* Blender-style MMB-drag orbit -- yaw/pitch computed fresh from the
+ * drag's START values + total pixel delta since then (never
+ * accumulated incrementally frame to frame, see g_cam_dragging's own
+ * comment on why). Pitch is clamped to +/-~89 degrees to avoid a gimbal
+ * flip through the poles, where yaw becomes ill-defined. */
+static void cam_orbit_from_start(int dx, int dy) {
+    const float SENS = 0.008f;          /* radians per pixel of drag */
+    const float PITCH_LIMIT = 1.55334f; /* ~89 degrees in radians */
+    g_cam_yaw = g_cam_drag_start_yaw + (float)dx * SENS;
+    /* Vertical drag direction flipped per an explicit request (was +dy,
+     * now -dy) -- confirmed working orbit (see the earlier "MMB orbit
+     * works" report), just inverted from the feel that was actually
+     * wanted. */
+    g_cam_pitch = g_cam_drag_start_pitch - (float)dy * SENS;
+    if (g_cam_pitch > PITCH_LIMIT) g_cam_pitch = PITCH_LIMIT;
+    if (g_cam_pitch < -PITCH_LIMIT) g_cam_pitch = -PITCH_LIMIT;
+    cam_recompute_pos();
+}
+
+/* Blender-style Ctrl+MMB-drag pan -- moves the pivot (and so the eye,
+ * via cam_recompute_pos) across the camera's own right/up plane, using
+ * the basis AT DRAG START (yaw/pitch don't change during a pan, so
+ * start == current anyway; using start keeps this consistent with
+ * cam_orbit_from_start's own "everything from the drag's start state"
+ * shape). Screen-right drag moves the pivot along -right and screen-down
+ * drag moves it along +up, so a dragged point visually stays under the
+ * cursor (the standard "grab and drag the world" pan feel every 3D tool
+ * uses) -- not verified live in this sandbox (XOpenDisplay(), same
+ * limitation as every other interactive gesture this session), so this
+ * sign convention is derived from the camera-space math, not eyeballed
+ * against a real window. Pan speed scales with g_cam_distance so it
+ * feels consistent whether zoomed in close or far out, matching
+ * Blender's own zoom-relative pan speed. */
+static void cam_pan_from_start(int dx, int dy) {
+    Vec3f right, up;
+    cam_basis(g_cam_drag_start_yaw, g_cam_drag_start_pitch, NULL, &right, &up);
+    float scale = g_cam_distance * 0.0015f;
+    float rx = -right.x * (float)dx + up.x * (float)dy;
+    float ry = -right.y * (float)dx + up.y * (float)dy;
+    float rz = -right.z * (float)dx + up.z * (float)dy;
+    g_cam_pivot.x = g_cam_drag_start_pivot.x + rx * scale;
+    g_cam_pivot.y = g_cam_drag_start_pivot.y + ry * scale;
+    g_cam_pivot.z = g_cam_drag_start_pivot.z + rz * scale;
+    cam_recompute_pos();
+}
+
 /* Constructs a world-space ray from a screen point inside the Scene
- * panel's own content rect, through the same camera basis renderer.c's
- * build_vp/mat4_look_dir uses (fwd = (-sin(yaw)cos(pitch), sin(pitch),
- * -cos(yaw)cos(pitch)), right = (cos(yaw), 0, -sin(yaw)) — matched
- * exactly, not re-derived, so a constructed ray always agrees with what's
- * actually rendered). Shared by object picking and the gizmo (both
- * hit-testing and per-frame drag updates need "the ray under the current
- * mouse position" using the identical math). Returns 0 (leaving
- * origin/dir untouched) if the Scene rect is degenerate. */
+ * panel's own content rect, through cam_basis (the same camera basis
+ * renderer.c's build_vp/mat4_look_dir uses — shared, not re-derived, so
+ * a constructed ray can never drift from what's actually rendered or
+ * from the camera-navigation functions above). Shared by object picking
+ * and the gizmo (both hit-testing and per-frame drag updates need "the
+ * ray under the current mouse position" using the identical math).
+ * Returns 0 (leaving origin/dir untouched) if the Scene rect is
+ * degenerate. */
 static int compute_scene_ray(float scene_x, float scene_y, float scene_w, float scene_h,
                               int px, int py, Vec3f *origin, Vec3f *dir) {
     if (scene_w < 1.0f || scene_h < 1.0f) return 0;
     float ndc_x = 2.0f * ((float)px - scene_x) / scene_w - 1.0f;
     float ndc_y = 1.0f - 2.0f * ((float)py - scene_y) / scene_h;  /* screen y-down -> NDC y-up */
 
-    float yaw = g_renderer->cam_yaw, pitch = g_renderer->cam_pitch;
-    float sy = sinf(yaw),  cy = cosf(yaw);
-    float sp = sinf(pitch), cp = cosf(pitch);
-    Vec3f fwd   = { -sy*cp, sp, -cy*cp };
-    Vec3f right = {  cy,    0.0f, -sy   };
-    Vec3f up    = {  sy*sp, cp,   cy*sp };
+    Vec3f fwd, right, up;
+    cam_basis(g_renderer->cam_yaw, g_renderer->cam_pitch, &fwd, &right, &up);
 
     float half_h = tanf(g_renderer->fov_y * 0.5f);
     float half_w = half_h * (scene_w / scene_h);
@@ -375,11 +476,47 @@ static void main_loop(void *userdata) {
     ui_ctx.on_scene_zoom = scene_zoom_cb;
 
     /* Mouse wheel — rising-value-drained-here, same convention as every
-     * other one-shot InputState field main.c reads. Currently only the
-     * Chat panel's scrollback consumes this (see ui_on_mouse_wheel). */
+     * other one-shot InputState field main.c reads. Routed by hover (see
+     * ui_on_mouse_wheel) to whichever of Chat/Console/Asset Browser/
+     * Python Panel's scrollback or the Scene panel's camera zoom
+     * (scene_zoom_cb) the cursor is currently over. */
     if (g_inp.scroll_delta != 0) {
         ui_on_mouse_wheel(g_inp.mouse_x, g_inp.mouse_y, g_inp.scroll_delta, &ui_ctx);
         g_inp.scroll_delta = 0;
+    }
+
+    /* Blender-style Scene-panel camera navigation: MMB-drag orbits,
+     * Ctrl+MMB-drag pans (see cam_orbit_from_start/cam_pan_from_start
+     * above). Starts only when the press lands inside the Scene panel's
+     * own rect -- same "must start inside the hit region, then continues
+     * regardless of where the mouse goes" convention as ui.c's
+     * area-border resize drag (ui_update_area_drag) -- so once a drag is
+     * underway, the cursor leaving the Scene panel's bounds doesn't cut
+     * it off mid-gesture. */
+    if (g_inp.mmb_click) {
+        g_inp.mmb_click = 0;   /* rising-edge flag -- MUST be drained here (see lmb_click/rmb_click just below), or this block re-fires and resets the drag's start position to the current mouse position EVERY frame, making every computed delta zero -- a real bug this exact wording caught: the drag could never produce any movement at all. */
+        float sx, sy, sw, sh;
+        if (ui_get_scene_rect(&sx, &sy, &sw, &sh) &&
+            (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
+            (float)g_inp.mouse_y >= sy && (float)g_inp.mouse_y < sy + sh) {
+            g_cam_dragging = 1;
+            g_cam_drag_is_pan = g_inp.ctrl_down;
+            g_cam_drag_start_x = g_inp.mouse_x;
+            g_cam_drag_start_y = g_inp.mouse_y;
+            g_cam_drag_start_yaw = g_cam_yaw;
+            g_cam_drag_start_pitch = g_cam_pitch;
+            g_cam_drag_start_pivot = g_cam_pivot;
+        }
+    }
+    if (g_cam_dragging) {
+        if (g_inp.mmb_down) {
+            int dx = g_inp.mouse_x - g_cam_drag_start_x;
+            int dy = g_inp.mouse_y - g_cam_drag_start_y;
+            if (g_cam_drag_is_pan) cam_pan_from_start(dx, dy);
+            else                    cam_orbit_from_start(dx, dy);
+        } else {
+            g_cam_dragging = 0;
+        }
     }
 
     /* Real clicks (lmb_click/rmb_click) — same "rising edge, drained and
@@ -890,16 +1027,17 @@ int main(void) {
      * context menu's "Add > Mesh Object", see CTX_ACTION_ADD_MESH). */
     spawn_test_mesh_object();
 
-    /* Fixed initial camera vantage point, close enough to the test
-     * object's own spawn position to see it -- there is no real editor
-     * camera navigation (orbit/pan/zoom/fly) yet, this is deliberately
-     * just "look at approximately the right place on startup" rather than
-     * pretending a camera-control feature exists. Previously driven by
-     * Qek's Player position/mouse-look every frame; that's gone along
-     * with the rest of that code (see phi.md's Phase 1 status, "Client/
-     * server model"), so this is set once here and never touched again
-     * unless/until real camera controls land. */
-    renderer_set_camera(g_renderer, g_cam_pos, g_cam_yaw, g_cam_pitch);
+    /* Initial camera vantage point, close enough to the test object's own
+     * spawn position to see it -- real Blender-style orbit/pan/zoom
+     * navigation now exists (MMB-drag/Ctrl+MMB-drag/wheel over the Scene
+     * panel, see cam_orbit_from_start/cam_pan_from_start/scene_zoom_cb
+     * above), so this is just the starting pose, not "never touched
+     * again" the way it used to be. cam_recompute_pos derives g_cam_pos
+     * from g_cam_pivot/g_cam_distance/g_cam_yaw/g_cam_pitch's own initial
+     * values (chosen to match this exact vantage point) rather than
+     * setting g_cam_pos directly, since g_cam_pos is a derived value now,
+     * never an independent source of truth. */
+    cam_recompute_pos();
 
     /* Input */
     input_init(&g_inp);

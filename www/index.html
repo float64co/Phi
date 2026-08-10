@@ -90,6 +90,24 @@ document.getElementById('canvas').addEventListener('contextmenu', function(e) {
   e.preventDefault();
 });
 
+// MMB drives Blender-style Scene-panel orbit/pan (see input.c/main.c).
+// input.c's own mousedown/mouseup handlers already return EM_TRUE
+// (Emscripten's own "return true to preventDefault" convention for
+// html5.h callbacks), which should be enough on its own -- but Chrome/
+// Firefox's middle-click autoscroll mode (the little scroll-icon cursor)
+// has been unreliable to suppress that way alone in practice across
+// browsers, since some fire a separate 'auxclick' event for the middle
+// button that a 'mousedown' preventDefault doesn't necessarily cover.
+// Belt-and-suspenders: an explicit JS-level listener on both events,
+// registered {passive:false} since a passive listener can't call
+// preventDefault at all.
+document.getElementById('canvas').addEventListener('mousedown', function(e) {
+  if (e.button === 1) e.preventDefault();
+}, {passive: false});
+document.getElementById('canvas').addEventListener('auxclick', function(e) {
+  if (e.button === 1) e.preventDefault();
+}, {passive: false});
+
 // Loading bar helpers
 var _loadBar    = null;
 var _loadStatus = null;

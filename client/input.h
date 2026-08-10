@@ -15,17 +15,29 @@
  * and text entry for the panel. */
 typedef struct {
     int   lmb_down, rmb_down;  /* raw mouse button state */
+    /* Middle mouse button -- added for Blender-style Scene-panel camera
+     * navigation (orbit on plain MMB-drag, pan on Ctrl+MMB-drag, see
+     * main.c's scene_camera_drag handling). Same raw-held-state shape as
+     * lmb_down/rmb_down, not a click edge, since a drag needs to know
+     * "still held" every frame, not just the press moment. */
+    int   mmb_down;
+    /* Ctrl key, held state -- only other modifier this codebase tracks
+     * (no Shift/Alt yet), needed to distinguish MMB-orbit from MMB-pan at
+     * the moment a drag STARTS (matching Blender's own "modifier state at
+     * click time, not live-toggled mid-drag" behavior). */
+    int   ctrl_down;
 
     /* Absolute window-local cursor position (y-down), tracked
      * unconditionally on every mouse-move -- UI panel hit-testing
      * (ui_on_mouse_button) and gizmo dragging need a real cursor position
      * every frame, not just on click edges. */
     int   mouse_x, mouse_y;
-    /* Rising edge: left/right mouse button pressed this frame, at
+    /* Rising edge: left/right/middle mouse button pressed this frame, at
      * (mouse_x, mouse_y) when read -- main.c drains and clears these once
      * per frame to route real clicks into ui_on_mouse_button()/scene
-     * picking. Distinct from lmb_down/rmb_down (held state). */
-    int   lmb_click, rmb_click;
+     * picking, or (mmb_click) to start a camera orbit/pan drag. Distinct
+     * from lmb_down/rmb_down/mmb_down (held state). */
+    int   lmb_click, rmb_click, mmb_click;
 
     /* Python-panel text entry — the panel acts as an always-focused text
      * input (see console.c): input.c captures these unconditionally each
