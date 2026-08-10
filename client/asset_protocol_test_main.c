@@ -33,6 +33,14 @@ void pyconsole_append(const char *line) {
     printf("[asset_protocol_test] (console message, ignored by this harness): %s\n", line);
 }
 
+/* Same reasoning as pyconsole_append above, now for net.c's PKT_CHAT_REPLY
+ * handler -- a local stub instead of linking the real chat.c (which would
+ * pull nothing heavy in on its own, but this harness genuinely has no use
+ * for a real ChatState either). */
+void chat_on_reply(const char *text) {
+    printf("[asset_protocol_test] (chat reply, ignored by this harness): %s\n", text);
+}
+
 static int g_fail = 0;
 static void check(int cond, const char *msg) {
     printf("  %s: %s\n", cond ? "PASS" : "FAIL", msg);

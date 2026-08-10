@@ -2191,6 +2191,96 @@ into the real Console, watching the Python Panel render it) is still not
 possible in this sandbox, same `XOpenDisplay()` limitation as everything
 else this session needing a real window.
 
+#### Chat panel: live Anthropic tool-use introspection, 2026-08-10
+
+**Status: real, verified plumbing end to end; the actual tool-call
+CONTENT is currently blocked on the connected Anthropic account's credit
+balance, not on anything this codebase controls** — see the honest
+verification note below rather than a blanket "done". This is the first
+real implementation of "Where AI fits"'s "Claude runs *inside* the
+editor" framing (top of this document), scoped down deliberately: real
+chat + real tool-calling introspection of a live running client, not yet
+Claude *authoring edits* through the client-authored/server-persisted
+loop that section describes as the eventual full reach.
+
+**Client**: the Chat panel (`draw_panel_chat`, `client/chat.h`/`.c`) went
+from a static "Not connected to an LLM yet" placeholder to a real text
+field. Unlike the Python Console's deliberate "always-focused, no
+toggle" design, a chat box is something you click into, the same way a
+real chat app works — `ChatFocus` is a new, third contender for the
+keyboard alongside `AssetBrowserFocus` and the Console, arbitrated by the
+same single per-frame if/else-if/else chain in `main.c` (Asset Browser
+fields first, then Chat, then Console as the unconditional fallback),
+with click-to-focus/click-away-blur mirroring the Asset Browser fields'
+convention exactly (`ui_on_mouse_button`). Sending reuses the
+established "UI raises intent, main.c executes" one-shot-flag shape
+(`send_requested`/`pending_send`) rather than chat.c reaching into net.c
+directly.
+
+**Wire protocol** (`client/net.h`, mirrored in `server.py`): `PKT_CHAT_MSG`
+(C→S) / `PKT_CHAT_REPLY` (S→C) for the message itself, plus
+`PKT_SCENE_STATE_REQUEST` (S→C) / `PKT_SCENE_STATE_REPLY` (C→S,
+`req_id`-tagged) for live introspection — the server asking the
+*specific connected client* that sent a chat message to report its own
+engine state, since per this project's client-authored architecture the
+authoritative live `MeshObject`/physics-world state lives in the client
+process, not the server. `main.c`'s `scene_state_handler` hand-builds a
+small JSON payload (position/orientation/is_static, vertex/face counts,
+physics body presence + velocity, the ray-picked face's PBR material if
+any) from its own real globals — no JSON library anywhere in this C
+codebase, deliberately not needed since every field here is a number/bool
+or one small fixed nested object, never free text requiring escaping.
+
+**Server** (`server/anthropic_client.py`, new): a real Anthropic Messages
+API client and tool-use loop written against plain `urllib.request` —
+**no `anthropic` package**, matching `server.py`'s own hard "no
+third-party dependencies" constraint stated in its module docstring; TLS
+is stdlib (the `ssl` module), nothing extra to install. Reads
+`ANTHROPIC_API_KEY` from the server's own environment only, matching this
+document's Hard Architectural Decision that the key never ships to a
+client — chosen over a gitignored config file when this was scoped
+(`AskUserQuestion` at the time), user's call. `run_tool_loop` drives a
+real multi-round conversation (capped at `MAX_TOOL_ROUNDS = 6` so a
+misbehaving loop can't hang a chat-handling thread forever): two tools
+are registered per chat message, `get_asset_list` (server-local, answers
+immediately from `AssetDB`, no client round trip) and `get_scene_state`
+(the interesting one — blocks on a `threading.Event` until the specific
+client that sent the message answers its `PKT_SCENE_STATE_REQUEST`, or a
+5s timeout). Each `PKT_CHAT_MSG` spawns its own thread
+(`Client._handle_chat`) specifically so a `get_scene_state` round trip
+back to the SAME connection doesn't deadlock against that connection's
+own read loop, which is what would have to deliver the reply.
+
+**Verified for real, live, against the actual running server + actual
+network egress to `api.anthropic.com`** (`server/test_chat_protocol.py`,
+new — reuses `test_asset_protocol.py`'s independent `WsTestClient` rather
+than `client/ws_client_native.c`, same reasoning that file already
+documents, extended here to also play the role a real windowed client
+would for `get_scene_state` by answering `PKT_SCENE_STATE_REQUEST` with a
+scripted JSON payload): the full wire round trip works end to end —
+`PKT_CHAT_MSG` in, server spawns a thread, makes a REAL HTTPS POST to
+`api.anthropic.com/v1/messages`, and `PKT_CHAT_REPLY` comes back with
+real content. **What actually came back each time this was run was a
+real HTTP 400 from Anthropic**: `"Your credit balance is too low to
+access the Anthropic API"` — a real, live-verified account/billing state,
+not a bug in this code. This is honestly informative rather than a
+failure to hide: it proves the entire plumbing (WS framing, threading,
+the `AnthropicError` catch-and-report path landing safely as a
+`[chat error] ...` reply instead of crashing the connection or the
+server) is real and correct, but means the tool-call CONTENT itself —
+does the model actually choose to call `get_scene_state`, does the
+canned value it's handed round-trip correctly into its final answer,
+same for `get_asset_list` against the real DB — has **not yet been
+observed with a real model response**, only exercised as far as the
+first failed API call in each case. `test_chat_protocol.py`'s own first
+draft had a real bug of its own here too, caught immediately rather than
+shipped: it printed "RESULT: PASS" unconditionally regardless of the
+individual `check()` results, fixed to actually gate on
+`test_asset_protocol._fail` before this note was written. Re-running
+`server/test_chat_protocol.py` once the account has credits will confirm
+the remaining, currently-unverified half of this feature — everything
+needed to do that is already in place and unchanged.
+
 ### Fracturing
 
 Meshes are authored with a fracture pattern at creation time. The editor provides

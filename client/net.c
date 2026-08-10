@@ -1,8 +1,15 @@
 #include "net.h"
 #include "console.h"
 #include "asset_browser.h"
+#include "chat.h"
 #include <string.h>
 #include <stdio.h>
+
+static void (*s_scene_state_handler)(uint32_t req_id) = NULL;
+
+void net_set_scene_state_handler(void (*handler)(uint32_t req_id)) {
+    s_scene_state_handler = handler;
+}
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -197,6 +204,37 @@ void net_send_asset_delete(NetState *ns, uint32_t id) {
     ws_send_binary(pkt, (int)(p - pkt));
 }
 
+/* Writes a [len:u16 bytes] field -- the wider-length twin of
+ * w_lenprefixed above, needed because chat text/scene-state JSON can
+ * plausibly exceed 255 bytes where names/tags/queries never do. */
+static uint8_t *w_lenprefixed16(uint8_t *p, const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    if (n > 65535) n = 65535;
+    uint16_t n16 = (uint16_t)n;
+    memcpy(p, &n16, 2); p += 2;
+    if (n) { memcpy(p, s, n); p += n; }
+    return p;
+}
+
+void net_send_chat_msg(NetState *ns, const char *text) {
+    (void)ns;
+    uint8_t pkt[1 + 2 + CHAT_INPUT_LEN];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_CHAT_MSG);
+    p = w_lenprefixed16(p, text);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_scene_state_reply(NetState *ns, uint32_t req_id, const char *json) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 2 + 1024];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_SCENE_STATE_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_lenprefixed16(p, json);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
 void net_on_message(NetState *ns, const uint8_t *data, int len) {
     if (len < 1) return;
     const uint8_t *p = data;
@@ -231,6 +269,25 @@ void net_on_message(NetState *ns, const uint8_t *data, int len) {
 
     case PKT_ASSET_CHANGED: {
         asset_browser_mark_dirty();
+        break;
+    }
+
+    case PKT_CHAT_REPLY: {
+        if (len < 3) break;
+        uint16_t slen; memcpy(&slen, p, 2); p += 2;
+        if (p + slen > data + len) break;
+        char buf[2048];
+        int n = (int)(slen < sizeof(buf) - 1 ? slen : sizeof(buf) - 1);
+        memcpy(buf, p, (size_t)n);
+        buf[n] = 0;
+        chat_on_reply(buf);
+        break;
+    }
+
+    case PKT_SCENE_STATE_REQUEST: {
+        if (len < 5) break;
+        uint32_t req_id; memcpy(&req_id, p, 4);
+        if (s_scene_state_handler) s_scene_state_handler(req_id);
         break;
     }
 

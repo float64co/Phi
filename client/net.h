@@ -28,6 +28,24 @@
 #define PKT_ASSET_DELETE        0x13   /* C->S: [id:u32] */
 #define PKT_ASSET_CHANGED       0x14   /* S->C: no payload -- "the asset list changed, re-request if you care" */
 
+/* Chat + live introspection (see phi.md's "Where AI fits" / the Chat
+ * panel's status note): a chat message goes over this same low-latency
+ * WS channel rather than HTTP, same reasoning as Asset List/Update/Delete
+ * above -- small structured messages, not a fit for the asset-blob HTTP
+ * endpoints. PKT_SCENE_STATE_REQUEST/REPLY is the server asking THIS
+ * client to report its own live engine state (server.py has no access to
+ * it otherwise -- per this project's client-authored architecture, the
+ * authoritative live MeshObject/physics state lives in the client
+ * process, not the server) as one of the Anthropic tool-use loop's real
+ * tools (server/anthropic_client.py's get_scene_state). req_id round-trips
+ * so the server can match a reply to the specific pending tool call that
+ * asked for it (a client could, in principle, receive a second request
+ * before answering the first). */
+#define PKT_CHAT_MSG             0x20   /* C->S: [len:u16 utf8:bytes] -- one chat message from the local user */
+#define PKT_CHAT_REPLY           0x21   /* S->C: [len:u16 utf8:bytes] -- the assistant's final text reply for this client's Chat panel */
+#define PKT_SCENE_STATE_REQUEST  0x22   /* S->C: [req_id:u32] -- "report your live scene/engine state" */
+#define PKT_SCENE_STATE_REPLY    0x23   /* C->S: [req_id:u32 len:u16 utf8-json:bytes] -- reply to a PKT_SCENE_STATE_REQUEST */
+
 typedef struct {
     int  connected;
     int  local_id;
@@ -47,6 +65,17 @@ void net_send_hello(NetState *ns, const char *name);
 void net_send_asset_list_request(NetState *ns, const char *query);
 void net_send_asset_update(NetState *ns, uint32_t id, const char *name, const char *tags_csv);
 void net_send_asset_delete(NetState *ns, uint32_t id);
+
+void net_send_chat_msg(NetState *ns, const char *text);
+void net_send_scene_state_reply(NetState *ns, uint32_t req_id, const char *json);
+
+/* Registers a callback net_on_message invokes on PKT_SCENE_STATE_REQUEST --
+ * net.c has no access to MeshObject/physics-world state itself (that's
+ * main.c's global state, see phi.md's client-authored architecture), so it
+ * hands the req_id off to whoever main_init() registered instead of
+ * building the reply itself, the same division of labor console.c/
+ * asset_browser.c already have for parsing-vs-owning-the-data. */
+void net_set_scene_state_handler(void (*handler)(uint32_t req_id));
 
 #ifndef __EMSCRIPTEN__
 /* Native only: pumps the WebSocket socket (non-blocking) once per frame.

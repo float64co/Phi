@@ -59,6 +59,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/input.c         \
 	$(SRCDIR)/console.c       \
 	$(SRCDIR)/asset_browser.c \
+	$(SRCDIR)/chat.c          \
 	$(SRCDIR)/halfedge.c      \
 	$(SRCDIR)/halfedge_gltf.c \
 	$(SRCDIR)/meshobject.c    \

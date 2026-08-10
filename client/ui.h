@@ -5,6 +5,7 @@
 #include "meshobject.h"
 #include "console.h"
 #include "asset_browser.h"
+#include "chat.h"
 #include "renderer.h"
 #include "gbuffer.h"
 
@@ -135,6 +136,7 @@ typedef struct {
     int         edit_face;       /* main.c's g_edit_face -- last ray-picked hem face, -1 if none. Properties reads this for the per-face material readout. */
     PyConsoleState *console;
     AssetBrowserState *asset_browser;
+    ChatState *chat;
     float       light_dir[3];
     float       sky_color[3];
     /* Called by the Scene panel between gbuffer_begin_geometry_pass() and

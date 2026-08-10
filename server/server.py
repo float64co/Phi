@@ -43,6 +43,7 @@ import logging
 import urllib.parse
 
 from assets_db import AssetDB
+from anthropic_client import run_tool_loop, AnthropicError
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 log = logging.getLogger('server')
@@ -76,6 +77,13 @@ PKT_ASSET_LIST_REPLY   = 0x11   # S->C: [count:u16] then count * {id:u32 name_le
 PKT_ASSET_UPDATE       = 0x12   # C->S: [id:u32 name_len:u8 name tags_len:u8 tags(csv)]
 PKT_ASSET_DELETE       = 0x13   # C->S: [id:u32]
 PKT_ASSET_CHANGED      = 0x14   # S->C: no payload -- "the asset list changed, re-request if you care"
+
+# Chat + live introspection -- see client/net.h's own comment on these four
+# for the full rationale (why WS not HTTP, why req_id round-trips).
+PKT_CHAT_MSG             = 0x20   # C->S: [len:u16 utf8:bytes]
+PKT_CHAT_REPLY           = 0x21   # S->C: [len:u16 utf8:bytes]
+PKT_SCENE_STATE_REQUEST  = 0x22   # S->C: [req_id:u32]
+PKT_SCENE_STATE_REPLY    = 0x23   # C->S: [req_id:u32 len:u16 utf8-json:bytes]
 
 ASSET_NAME_WIRE_MAX = 63
 ASSET_PATH_WIRE_MAX = 127
@@ -123,6 +131,32 @@ def _parse_asset_update(payload: bytes):
 def _parse_asset_delete(payload: bytes):
     if len(payload) < 4: return None
     return struct.unpack_from('<I', payload, 0)[0]
+
+# ---------------------------------------------------------------------------
+# Chat + scene-state packet encode/decode (see PKT_CHAT_*/PKT_SCENE_STATE_*
+# above and client/net.h's matching comment)
+# ---------------------------------------------------------------------------
+def _lenprefixed16(s: str) -> bytes:
+    b = s.encode('utf-8')[:65535]
+    return struct.pack('<H', len(b)) + b
+
+def pack_chat_reply(text: str) -> bytes:
+    return bytes([PKT_CHAT_REPLY]) + _lenprefixed16(text)
+
+def pack_scene_state_request(req_id: int) -> bytes:
+    return bytes([PKT_SCENE_STATE_REQUEST]) + struct.pack('<I', req_id)
+
+def _parse_chat_msg(payload: bytes) -> str | None:
+    if len(payload) < 2: return None
+    slen = struct.unpack_from('<H', payload, 0)[0]
+    return payload[2:2+slen].decode(errors='replace')
+
+def _parse_scene_state_reply(payload: bytes):
+    if len(payload) < 6: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    slen = struct.unpack_from('<H', payload, 4)[0]
+    text = payload[6:6+slen].decode(errors='replace')
+    return req_id, text
 
 def _slugify(name: str) -> str:
     s = re.sub(r'[^a-zA-Z0-9]+', '_', name).strip('_').lower()
@@ -225,6 +259,17 @@ class Client:
         self._buf      = bytearray()
         self._lock     = threading.Lock()
 
+        # Pending get_scene_state tool calls (see PKT_SCENE_STATE_REQUEST/
+        # REPLY): a chat-handling thread blocks on an Event here while this
+        # connection's own read loop (a DIFFERENT thread, see run()) waits
+        # for the matching PKT_SCENE_STATE_REPLY and wakes it. req_id
+        # disambiguates in case a second request goes out before the first
+        # is answered.
+        self._pending_lock    = threading.Lock()
+        self._pending_events  = {}   # req_id -> threading.Event
+        self._pending_results = {}   # req_id -> str | None (None = timed out/never arrived)
+        self._next_req_id     = 1
+
     def send(self, data: bytes):
         try:
             with self._lock:
@@ -270,6 +315,96 @@ class Client:
         except Exception:
             self.alive = False
 
+    def request_scene_state(self, timeout: float = 5.0):
+        """Sends PKT_SCENE_STATE_REQUEST to this client and blocks (this is
+        called from the chat-handling thread, never the read-loop thread)
+        until either the matching PKT_SCENE_STATE_REPLY arrives or timeout
+        elapses. Returns the JSON text, or None on timeout/disconnect."""
+        with self._pending_lock:
+            req_id = self._next_req_id
+            self._next_req_id += 1
+            ev = threading.Event()
+            self._pending_events[req_id] = ev
+        self.send(pack_scene_state_request(req_id))
+        got = ev.wait(timeout)
+        with self._pending_lock:
+            self._pending_events.pop(req_id, None)
+            result = self._pending_results.pop(req_id, None)
+        return result if got else None
+
+    def _handle_chat(self, user_text: str):
+        """Runs on its own thread (spawned by _on_message on PKT_CHAT_MSG)
+        since a real Anthropic round trip -- itself potentially blocking on
+        a get_scene_state round trip back to this same client -- must never
+        stall the connection's read loop (that loop is what would deliver
+        the PKT_SCENE_STATE_REPLY this thread is waiting on in the first
+        place; running inline would deadlock)."""
+
+        def tool_get_asset_list(_input):
+            assets = self.assets_db.list_assets(None)
+            if not assets:
+                return '(no assets uploaded yet)'
+            return '\n'.join(
+                f"#{a['id']} {a['name']} tags={','.join(a['tags']) or '(none)'}"
+                for a in assets
+            )
+
+        def tool_get_scene_state(_input):
+            result = self.request_scene_state()
+            if result is None:
+                return '(the client did not respond to the scene-state request in time -- it may be disconnected or busy)'
+            return result
+
+        tools = [
+            {
+                'name': 'get_asset_list',
+                'description': (
+                    "List every asset currently in this project's asset "
+                    "library (id, name, tags). Server-side data -- answers "
+                    "immediately, doesn't need the live client to respond."
+                ),
+                'input_schema': {'type': 'object', 'properties': {}},
+            },
+            {
+                'name': 'get_scene_state',
+                'description': (
+                    "Query the LIVE state of the specific running editor "
+                    "client that sent this chat message: the current test "
+                    "MeshObject's position/orientation/is_static, whether "
+                    "it has a physics body and its velocity if so, the "
+                    "loaded mesh's vertex/face counts, the currently "
+                    "ray-picked face's PBR material (if any face is "
+                    "selected), and the physics world's gravity. This is "
+                    "real introspection of a running process, not a cached "
+                    "snapshot -- use it whenever the user asks about the "
+                    "current state of their scene rather than guessing."
+                ),
+                'input_schema': {'type': 'object', 'properties': {}},
+            },
+        ]
+        dispatch = {
+            'get_asset_list': tool_get_asset_list,
+            'get_scene_state': tool_get_scene_state,
+        }
+        system = (
+            "You are Claude, embedded as a first-class participant inside "
+            "the Phi game engine's editor (see phi.md's \"Where AI fits\"). "
+            "You're talking with a user through the editor's Chat panel. "
+            "You have tools that let you introspect the specific running "
+            "client instance this conversation is attached to -- use them "
+            "when the user asks about the current scene/object state "
+            "rather than guessing or making something up. Keep replies "
+            "concise: this renders in a small in-editor chat box, not a "
+            "document."
+        )
+        try:
+            reply = run_tool_loop(system, user_text, tools, dispatch)
+        except AnthropicError as e:
+            reply = f'[chat error] {e}'
+        except Exception as e:
+            reply = f'[chat error] unexpected: {e}'
+        self.send(pack_chat_reply(reply))
+
     def _on_message(self, data: bytes):
         if not data: return
         t = data[0]
@@ -306,6 +441,26 @@ class Client:
                 self.broadcast(bytes([PKT_ASSET_CHANGED]))
             else:
                 log.info(f'Client {self.pid}: delete for unknown asset id {parsed}')
+
+        elif t == PKT_CHAT_MSG:
+            text = _parse_chat_msg(payload)
+            if text is None:
+                log.info(f'Client {self.pid}: malformed PKT_CHAT_MSG')
+            else:
+                log.info(f'Client {self.pid} chat: {text!r}')
+                threading.Thread(target=self._handle_chat, args=(text,), daemon=True).start()
+
+        elif t == PKT_SCENE_STATE_REPLY:
+            parsed = _parse_scene_state_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_SCENE_STATE_REPLY')
+            else:
+                req_id, text = parsed
+                with self._pending_lock:
+                    ev = self._pending_events.get(req_id)
+                    if ev:
+                        self._pending_results[req_id] = text
+                        ev.set()
 
         else:
             log.info(f'Client {self.pid}: unknown packet type 0x{t:02x} ({len(data)} bytes)')

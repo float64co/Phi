@@ -985,24 +985,44 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
     ui_text_draw(dx + 8.0f, dy + 4.0f, "Delete", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, dim);
 }
 
-static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
-    (void)ctx;
-    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
-    float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
-    ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Chat", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
-    y += 26.0f;
-    /* Explicitly not connected to a real LLM yet -- that needs a
-     * server-side proxy per phi.md's Hard Architectural Decision that the
-     * API key never ships to the client. This is the panel shell only. */
-    ui_text_draw(x, y, "Not connected to an LLM yet.", g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-    y += 20.0f;
-    ui_text_draw(x, y, "Needs a server-side API proxy (see phi.md).", g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+/* Input row pinned to the bottom, same geometry shape asset_browser's
+ * field rects use (a dedicated function shared between drawing and
+ * hit-testing, see hit_test_area/ui_on_mouse_button below, so the two can
+ * never disagree about where the box actually is). */
+static void chat_input_rect(Area *a, float *x, float *y, float *w, float *h) {
+    *h = 24.0f;
+    *w = a->w - UI_PANEL_PAD * 2.0f;
+    *x = a->x + UI_PANEL_PAD;
+    *y = a->y + a->h - UI_PANEL_PAD - *h;
+}
 
-    float input_h = 28.0f;
-    float input_y = a->y + a->h - UI_PANEL_PAD - input_h;
-    ui_rect(x, input_y, a->w - UI_PANEL_PAD * 2.0f, input_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
-    ui_rect(x, input_y, a->w - UI_PANEL_PAD * 2.0f, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
-    ui_text_draw(x + 8.0f, input_y + 6.0f, "Type a message...", g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+/* Chat panel -- a real text field wired to a real server-side Anthropic
+ * tool-use loop (see chat.h / server/anthropic_client.py / phi.md's
+ * "Where AI fits"), not the placeholder shell this used to be. Click the
+ * input box to focus it (see ui_on_mouse_button's click-to-focus/
+ * click-away-blur handling below, mirroring the Asset Browser's fields
+ * exactly), type, Enter to send. reuses draw_text_field, the same
+ * focus-accent/placeholder/caret widget the Asset Browser's search/name/
+ * tags fields already use, rather than a bespoke input box. */
+static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
+    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
+    float x = a->x + UI_PANEL_PAD;
+    ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Chat", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    if (!ctx->chat) return;
+
+    float ix, iy, iw, ih;
+    chat_input_rect(a, &ix, &iy, &iw, &ih);
+    draw_text_field(ix, iy, iw, ih, ctx->chat->input, "Type a message...", ctx->chat->focus == CHAT_FOCUS_INPUT);
+
+    float y = iy - 8.0f;
+    if (ctx->chat->waiting_for_reply) {
+        ui_text_draw(x, y, "Claude is thinking...", g_ui.font_body, 12.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
+        y -= 18.0f;
+    }
+    for (int i = ctx->chat->log_count - 1; i >= 0 && y > a->y + 30.0f; i--) {
+        ui_text_draw(x, y, ctx->chat->log[i], g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        y -= 18.0f;
+    }
 }
 
 static void draw_panel_stub(Area *a, const char *name) {
@@ -1322,6 +1342,15 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
         }
         return 1;
     }
+    if (a->panel_type == PANEL_CHAT && button == 0 && pressed && ctx->chat &&
+        point_in_rect((float)x, (float)y, a->x, a->y, a->w, a->h)) {
+        float ix, iy, iw, ih;
+        chat_input_rect(a, &ix, &iy, &iw, &ih);
+        if (point_in_rect((float)x, (float)y, ix, iy, iw, ih)) {
+            ctx->chat->focus = CHAT_FOCUS_INPUT;
+        }
+        return 1;
+    }
     return 0;
 }
 
@@ -1406,6 +1435,19 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
             }
         }
         if (!inside) ab->focus = AB_FOCUS_NONE;
+    }
+
+    /* Chat input blur: same click-away-dismisses convention as the Asset
+     * Browser block just above, single field so no switch needed. */
+    if (button == 0 && pressed && ctx->chat && ctx->chat->focus == CHAT_FOCUS_INPUT) {
+        Area *chat_area = g_ui.root ? find_area_by_type_r(g_ui.root, PANEL_CHAT) : NULL;
+        int inside = 0;
+        if (chat_area) {
+            float fx, fy, fw, fh;
+            chat_input_rect(chat_area, &fx, &fy, &fw, &fh);
+            inside = point_in_rect((float)x, (float)y, fx, fy, fw, fh);
+        }
+        if (!inside) ctx->chat->focus = CHAT_FOCUS_NONE;
     }
 
     /* Border drag-to-resize starts here (checked before the top-chrome-

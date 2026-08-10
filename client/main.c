@@ -14,6 +14,7 @@
 #include "font.h"
 #include "svg_icon.h"
 #include "asset_browser.h"
+#include "chat.h"
 #if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 /* Asset Browser Create flow (HTTP POST) -- native-Linux-only for now, see
  * http_client_native.h's own comment: no win32 (Winsock) twin or wasm
@@ -62,6 +63,7 @@ static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
 static PyConsoleState g_cs     = {0};
 static AssetBrowserState g_ab  = {0};
+static ChatState    g_chat     = {0};
 static double       g_last_t   = 0.0;
 
 /* Phase 2 physics (see phi.md's "Bullet Physics via Emscripten") -- one
@@ -332,6 +334,7 @@ static void main_loop(void *userdata) {
     ui_ctx.edit_face = g_edit_face;
     ui_ctx.console = &g_cs;
     ui_ctx.asset_browser = &g_ab;
+    ui_ctx.chat = &g_chat;
     memcpy(ui_ctx.light_dir, light_dir, sizeof(light_dir));
     memcpy(ui_ctx.sky_color, sky, sizeof(sky));
     ui_ctx.draw_scene_content = scene_content_cb;
@@ -559,17 +562,33 @@ static void main_loop(void *userdata) {
 
     /* Exactly one text field gets this frame's keystrokes: whichever of
      * the Asset Browser's search/edit_name/edit_tags fields is focused
-     * (a click inside it, see ui.c's hit_test_area), otherwise the Python
-     * console -- which is back to being the unconditional default the
-     * moment nothing else is focused, same as before this panel's text
-     * fields existed. asset_browser_update_focused_text is a no-op that
-     * leaves InputState untouched when focus is AB_FOCUS_NONE, so falling
-     * through to pyconsole_update in that case is always correct, not
-     * just "usually". */
+     * (a click inside it, see ui.c's hit_test_area), else the Chat input
+     * if IT is focused (a click inside it, same convention), else the
+     * Python console -- which is back to being the unconditional default
+     * the moment nothing else is focused, same as before this panel's
+     * text fields existed. Both asset_browser_update_focused_text and
+     * chat_update_focused_text are no-ops that leave InputState untouched
+     * when their own focus is NONE, so falling all the way through to
+     * pyconsole_update is always correct, not just "usually". */
     if (g_ab.focus != AB_FOCUS_NONE) {
         asset_browser_update_focused_text(&g_ab, &g_inp);
+    } else if (g_chat.focus != CHAT_FOCUS_NONE) {
+        chat_update_focused_text(&g_chat, &g_inp);
     } else {
         pyconsole_update(&g_cs, &g_inp);
+    }
+
+    /* Chat one-shot send, same "UI raises intent, main.c executes"
+     * pattern as the Asset Browser flags right below -- echoes the
+     * outgoing message locally (a real server round trip is not
+     * instant), then hands it to net.c. */
+    if (g_chat.send_requested) {
+        g_chat.send_requested = 0;
+        char echo[CHAT_LINE_LEN];
+        snprintf(echo, sizeof(echo), "You: %s", g_chat.pending_send);
+        chat_append_multiline(echo);
+        g_chat.waiting_for_reply = 1;
+        net_send_chat_msg(&g_ns, g_chat.pending_send);
     }
 
     /* Asset Browser one-shot request flags, drained once per frame -- same
@@ -730,6 +749,66 @@ static void main_loop(void *userdata) {
     phi_platform_swap();
 }
 
+/* Answers PKT_SCENE_STATE_REQUEST (see net.h's own comment on why this
+ * lives in main.c and not net.c: the live MeshObject/physics-world state
+ * being asked about is main.c's global state, per this project's client-
+ * authored architecture) -- the get_scene_state tool server/
+ * anthropic_client.py's chat loop can call. Hand-built JSON (no JSON
+ * library anywhere in this C codebase) rather than a bespoke text format,
+ * since every value here is either a bool/number or a small fixed nested
+ * object -- no free text, so no escaping to get right. */
+static void scene_state_handler(uint32_t req_id) {
+    Vec3f vel = {0.0f, 0.0f, 0.0f};
+    int has_physics = (g_test_mesh_loaded && g_test_mesh_object.phys_body != NULL);
+    if (has_physics) vel = phi_physics_get_linear_velocity(g_test_mesh_object.phys_body);
+
+    int vert_count = 0, face_count = 0;
+    if (g_test_mesh_loaded && g_test_mesh_object.hem) {
+        vert_count = g_test_mesh_object.hem->vert_count;
+        face_count = g_test_mesh_object.hem->face_count;
+    }
+
+    int has_edit_face = (g_edit_face >= 0 && g_test_mesh_loaded && g_test_mesh_object.hem &&
+                          g_edit_face < g_test_mesh_object.hem->face_count);
+    char face_json[256];
+    if (has_edit_face) {
+        HEFace *ef = &g_test_mesh_object.hem->faces[g_edit_face];
+        snprintf(face_json, sizeof(face_json),
+                 "{\"index\":%d,\"base_color\":[%.3f,%.3f,%.3f],\"metallic\":%.3f,"
+                 "\"roughness\":%.3f,\"emission\":[%.3f,%.3f,%.3f]}",
+                 g_edit_face, ef->base_color[0], ef->base_color[1], ef->base_color[2],
+                 ef->metallic, ef->roughness, ef->emission[0], ef->emission[1], ef->emission[2]);
+    } else {
+        snprintf(face_json, sizeof(face_json), "null");
+    }
+
+    char json[1024];
+    snprintf(json, sizeof(json),
+        "{"
+        "\"mesh_loaded\":%s,"
+        "\"position\":[%.3f,%.3f,%.3f],"
+        "\"orientation\":[%.3f,%.3f,%.3f,%.3f],"
+        "\"is_static\":%s,"
+        "\"vert_count\":%d,"
+        "\"face_count\":%d,"
+        "\"has_physics\":%s,"
+        "\"velocity\":[%.3f,%.3f,%.3f],"
+        "\"physics_gravity\":[0.0,-9.81,0.0],"
+        "\"selected_face\":%s"
+        "}",
+        g_test_mesh_loaded ? "true" : "false",
+        g_test_mesh_object.position.x, g_test_mesh_object.position.y, g_test_mesh_object.position.z,
+        g_test_mesh_object.orientation.x, g_test_mesh_object.orientation.y,
+        g_test_mesh_object.orientation.z, g_test_mesh_object.orientation.w,
+        g_test_mesh_object.is_static ? "true" : "false",
+        vert_count, face_count,
+        has_physics ? "true" : "false",
+        vel.x, vel.y, vel.z,
+        face_json);
+
+    net_send_scene_state_reply(&g_ns, req_id, json);
+}
+
 /* ---- Entry point ---- */
 int main(void) {
     /* Declared here, at main()'s own top level, and never touched again --
@@ -778,6 +857,9 @@ int main(void) {
 
     /* Console / Python panel */
     pyconsole_init(&g_cs);
+
+    /* Chat panel (see phi.md's "Where AI fits") */
+    chat_init(&g_chat);
     phi_mp_init(&mp_stack_top);
 
     /* Phase 2 physics -- see phi.md's "Bullet Physics via Emscripten". A
@@ -816,6 +898,7 @@ int main(void) {
      * yet on the first frame). */
     asset_browser_init(&g_ab);
     asset_browser_set_target(&g_ab);
+    net_set_scene_state_handler(scene_state_handler);
 
     /* Network -- see phi.md's Phase 1 status, "Client/server model": this
      * is Qek's connection/transport machinery, repurposed rather than
