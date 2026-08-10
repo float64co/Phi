@@ -2193,14 +2193,14 @@ else this session needing a real window.
 
 #### Chat panel: live Anthropic tool-use introspection, 2026-08-10
 
-**Status: real, verified plumbing end to end; the actual tool-call
-CONTENT is currently blocked on the connected Anthropic account's credit
-balance, not on anything this codebase controls** — see the honest
-verification note below rather than a blanket "done". This is the first
-real implementation of "Where AI fits"'s "Claude runs *inside* the
-editor" framing (top of this document), scoped down deliberately: real
-chat + real tool-calling introspection of a live running client, not yet
-Claude *authoring edits* through the client-authored/server-persisted
+**Status: real, verified end to end, including real tool-call CONTENT
+against a real model response** (confirmed 2026-08-10 once a funded
+account key was swapped in — see the verification note below for the
+exact run). This is the first real implementation of "Where AI fits"'s
+"Claude runs *inside* the editor" framing (top of this document), scoped
+down deliberately: real chat + real tool-calling introspection of a live
+running client, not yet Claude *authoring edits* through the
+client-authored/server-persisted
 loop that section describes as the eventual full reach.
 
 **Client**: the Chat panel (`draw_panel_chat`, `client/chat.h`/`.c`) went
@@ -2260,26 +2260,33 @@ would for `get_scene_state` by answering `PKT_SCENE_STATE_REQUEST` with a
 scripted JSON payload): the full wire round trip works end to end —
 `PKT_CHAT_MSG` in, server spawns a thread, makes a REAL HTTPS POST to
 `api.anthropic.com/v1/messages`, and `PKT_CHAT_REPLY` comes back with
-real content. **What actually came back each time this was run was a
-real HTTP 400 from Anthropic**: `"Your credit balance is too low to
-access the Anthropic API"` — a real, live-verified account/billing state,
-not a bug in this code. This is honestly informative rather than a
-failure to hide: it proves the entire plumbing (WS framing, threading,
+real content. **The first key this ran against had no API credits** —
+every call came back a real HTTP 400, `"Your credit balance is too low
+to access the Anthropic API"` — a real, live-verified account/billing
+state, not a bug in this code, and honestly informative rather than a
+failure to hide: it proved the entire plumbing (WS framing, threading,
 the `AnthropicError` catch-and-report path landing safely as a
 `[chat error] ...` reply instead of crashing the connection or the
-server) is real and correct, but means the tool-call CONTENT itself —
-does the model actually choose to call `get_scene_state`, does the
-canned value it's handed round-trip correctly into its final answer,
-same for `get_asset_list` against the real DB — has **not yet been
-observed with a real model response**, only exercised as far as the
-first failed API call in each case. `test_chat_protocol.py`'s own first
-draft had a real bug of its own here too, caught immediately rather than
-shipped: it printed "RESULT: PASS" unconditionally regardless of the
-individual `check()` results, fixed to actually gate on
-`test_asset_protocol._fail` before this note was written. Re-running
-`server/test_chat_protocol.py` once the account has credits will confirm
-the remaining, currently-unverified half of this feature — everything
-needed to do that is already in place and unchanged.
+server) was real and correct, before the tool-call CONTENT itself had
+been observed at all. `test_chat_protocol.py`'s own first draft also had
+a real bug, caught and fixed in the same pass: it printed "RESULT: PASS"
+unconditionally regardless of the individual `check()` results, fixed to
+actually gate on `test_asset_protocol._fail`.
+
+**Re-run against a funded key (2026-08-10, server restarted with the new
+key in its environment, never written to any file or logged) — all
+three checks now pass for real**: a plain "reply with exactly PONG" got
+back `'PONG'` with no tool call; asked to call `get_scene_state` and
+report only the `vert_count` it got back, the model actually issued the
+tool call (a real `PKT_SCENE_STATE_REQUEST` round-tripped to the test
+harness playing the client's role) and answered `'4242'` — the exact
+canned value the harness sent back, not a guess; asked to call
+`get_asset_list` and report the count, it answered `'3'`, matching the
+real asset DB's actual row count at the time. `get_scene_state` against
+a real windowed client (not the test harness standing in for one) is
+still unverified in this sandbox, same `XOpenDisplay()` limitation as
+everything else this session needing a real window — the server-side
+half and the wire protocol are proven for real either way.
 
 ### Fracturing
 
