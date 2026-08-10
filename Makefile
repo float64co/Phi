@@ -67,6 +67,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/fracture.c      \
 	$(SRCDIR)/armature.c      \
 	$(SRCDIR)/animation.c     \
+	$(SRCDIR)/skinned_mesh.c  \
 	$(SRCDIR)/gizmo.c         \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
@@ -317,7 +318,7 @@ $(OUT_FRACTURE_TEST): $(FRACTURE_TEST_SRCS) | $(BUILDDIR)
 # into phi_physics.h's functions itself).
 ANIMATION_TEST_SRCS := $(SRCDIR)/animation_test_main.c $(SRCDIR)/halfedge.c \
                         $(SRCDIR)/halfedge_gltf.c $(SRCDIR)/meshobject.c \
-                        $(SRCDIR)/armature.c $(SRCDIR)/animation.c
+                        $(SRCDIR)/armature.c $(SRCDIR)/animation.c $(SRCDIR)/skinned_mesh.c
 OUT_ANIMATION_TEST   := $(BUILDDIR)/animation_test
 
 animation_test: $(OUT_ANIMATION_TEST)

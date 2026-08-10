@@ -1,17 +1,21 @@
 /* Standalone, no-GL test harness for Phase 4's foundation data layer
- * (armature.c/animation.c -- see phi.md's "Animation Editor"): real
- * glTF skin/animation parsing (via cgltf, the same parser halfedge_gltf.c
- * already uses for meshes), a real topological sort of a DELIBERATELY
- * out-of-order joints array (see tools/gen_test_armature.py), real
- * keyframe interpolation (LINEAR quaternion slerp, checked against a
- * hand-derived expected half-angle rotation, not just "it ran"), and a
- * full pose->world-transform pipeline checked against a hand-derived
- * expected world position after a 90-degree bone rotation propagates to
- * a child bone. Same "prove the subsystem works in isolation" precedent
- * as mesh_edit_test_main.c/area_tree_test_main.c, applied to the new
- * animation system instead. */
+ * (armature.c/animation.c/skinned_mesh.c -- see phi.md's "Animation
+ * Editor"): real glTF skin/animation/mesh parsing (via cgltf, the same
+ * parser halfedge_gltf.c already uses for meshes), a real topological
+ * sort of a DELIBERATELY out-of-order joints array (see
+ * tools/gen_test_armature.py), real keyframe interpolation (LINEAR
+ * quaternion slerp, checked against a hand-derived expected half-angle
+ * rotation, not just "it ran"), a full pose->world-transform pipeline
+ * checked against a hand-derived expected world position after a
+ * 90-degree bone rotation propagates to a child bone, and skin-weight
+ * loading (JOINTS_0/WEIGHTS_0, including the file's own JOINTS_0-index-
+ * remapping subtlety -- see skinned_mesh.h's own comment on why a raw
+ * accessor value can't be used as a bone index directly). Same "prove
+ * the subsystem works in isolation" precedent as mesh_edit_test_main.c/
+ * area_tree_test_main.c, applied to the new animation system instead. */
 #include "armature.h"
 #include "animation.h"
+#include "skinned_mesh.h"
 #include "cgltf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,6 +137,42 @@ int main(void) {
     anim_playback_advance(&pb, 1.5f);
     check(!pb.playing, "non-looping playback stops itself once past duration");
     check(approx(pb.time, 1.0f, 1e-4f), "non-looping playback clamps time to the clip's own duration, not left at 1.5");
+
+    printf("[animation_test] === 8: skinned_mesh_load_gltf -- real JOINTS_0/WEIGHTS_0 loading, including index remapping ===\n");
+    Armature mesh_arm;
+    SkinnedMesh smesh;
+    int mesh_ok = skinned_mesh_load_gltf(path, &mesh_arm, &smesh);
+    check(mesh_ok, "skinned_mesh_load_gltf succeeded");
+    check(smesh.vert_count == 6, "6 vertices loaded");
+    check(smesh.index_count == 12, "12 indices (4 triangles) loaded");
+
+    int mesh_root_i = armature_find_bone(&mesh_arm, "root");
+    int mesh_mid_i  = armature_find_bone(&mesh_arm, "mid");
+    int mesh_tip_i  = armature_find_bone(&mesh_arm, "tip");
+
+    /* v0 (index 0): single-bone weight to root, weight 1.0 -- the
+     * trivial case, but still a real read through the accessor +
+     * remapping path, not skipped. */
+    check(smesh.vert_count > 0 && smesh.verts[0].bone_idx[0] == (uint8_t)mesh_root_i,
+          "v0's primary bone index remaps to 'root', despite the file's JOINTS_0 value being an index into the SCRAMBLED skin.joints order, not a bone index directly");
+    check(smesh.vert_count > 0 && approx(smesh.verts[0].bone_wgt[0], 1.0f, 1e-5f), "v0's primary weight is 1.0");
+    check(smesh.vert_count > 0 && approx(smesh.verts[0].pos[1], 0.0f, 1e-5f), "v0's position.y == 0.0 (root height)");
+
+    /* v3 (index 3): the deliberately-blended vertex, 60% mid / 40% tip. */
+    check(smesh.vert_count > 3 && smesh.verts[3].bone_idx[0] == (uint8_t)mesh_mid_i, "v3's PRIMARY bone remaps to 'mid'");
+    check(smesh.vert_count > 3 && smesh.verts[3].bone_idx[1] == (uint8_t)mesh_tip_i, "v3's SECONDARY bone remaps to 'tip'");
+    check(smesh.vert_count > 3 && approx(smesh.verts[3].bone_wgt[0], 0.6f, 1e-5f), "v3's primary weight == 0.6");
+    check(smesh.vert_count > 3 && approx(smesh.verts[3].bone_wgt[1], 0.4f, 1e-5f), "v3's secondary weight == 0.4 -- a real multi-bone blend, not just a trivial (1,0,0,0) case");
+    check(smesh.vert_count > 3 && approx(smesh.verts[3].pos[1], 2.0f, 1e-5f), "v3's position.y == 2.0 (mid height)");
+
+    /* v5 (index 5): single-bone weight to tip. */
+    check(smesh.vert_count > 5 && smesh.verts[5].bone_idx[0] == (uint8_t)mesh_tip_i, "v5's primary bone remaps to 'tip'");
+    check(smesh.vert_count > 5 && approx(smesh.verts[5].pos[1], 4.0f, 1e-5f), "v5's position.y == 4.0 (tip height)");
+
+    check(smesh.index_count >= 3 && smesh.indices[0] == 0 && smesh.indices[1] == 1 && smesh.indices[2] == 2,
+          "first triangle's indices match the fixture (0,1,2)");
+
+    skinned_mesh_free(&smesh);
 
     for (int i = 0; i < clip_count; i++) animation_clip_free(&clips[i]);
     cgltf_free(data);

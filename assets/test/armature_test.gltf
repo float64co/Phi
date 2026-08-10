@@ -6,7 +6,7 @@
   "buffers": [
     {
       "uri": "armature_test.bin",
-      "byteLength": 232
+      "byteLength": 520
     }
   ],
   "bufferViews": [
@@ -24,6 +24,36 @@
       "buffer": 0,
       "byteOffset": 200,
       "byteLength": 32
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 232,
+      "byteLength": 72,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 304,
+      "byteLength": 72,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 376,
+      "byteLength": 24,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 400,
+      "byteLength": 96,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 496,
+      "byteLength": 24,
+      "target": 34963
     }
   ],
   "accessors": [
@@ -50,6 +80,46 @@
       "componentType": 5126,
       "count": 2,
       "type": "VEC4"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5126,
+      "count": 6,
+      "type": "VEC3",
+      "min": [
+        -0.5,
+        0.0,
+        0.0
+      ],
+      "max": [
+        0.5,
+        4.0,
+        0.0
+      ]
+    },
+    {
+      "bufferView": 4,
+      "componentType": 5126,
+      "count": 6,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 5,
+      "componentType": 5121,
+      "count": 6,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 6,
+      "componentType": 5126,
+      "count": 6,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 7,
+      "componentType": 5123,
+      "count": 12,
+      "type": "SCALAR"
     }
   ],
   "nodes": [
@@ -82,6 +152,11 @@
         2.0,
         0.0
       ]
+    },
+    {
+      "name": "arm_mesh",
+      "mesh": 0,
+      "skin": 0
     }
   ],
   "skins": [
@@ -93,6 +168,22 @@
         1
       ],
       "inverseBindMatrices": 0
+    }
+  ],
+  "meshes": [
+    {
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 3,
+            "NORMAL": 4,
+            "JOINTS_0": 5,
+            "WEIGHTS_0": 6
+          },
+          "indices": 7,
+          "mode": 4
+        }
+      ]
     }
   ],
   "animations": [
@@ -119,7 +210,8 @@
   "scenes": [
     {
       "nodes": [
-        0
+        0,
+        3
       ]
     }
   ],

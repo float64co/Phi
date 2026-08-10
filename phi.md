@@ -2848,15 +2848,58 @@ the same transform `inverse_bind[i]` was computed to undo). Deliberately
 a plain CPU data function with no GL/UBO upload — that's the renderer's
 job once a real skinned-mesh render path exists.
 
+#### Skin-weight loading (`client/skinned_mesh.h`/`.c`), 2026-08-10
+
+The vertex-format + `JOINTS_0`/`WEIGHTS_0` loading path phi.md flagged as
+the next step above now exists — `SkinnedVertex` (pos/normal/`bone_idx[4]`/
+`bone_wgt[4]`, matching this phase's own original sketch) and
+`skinned_mesh_load_gltf`, a self-contained loader (own `cgltf_parse_file`/
+`cgltf_load_buffers` call, same "just a path in" convention
+`halfedge_load_gltf` already established) pulling a skin (via
+`armature_load_from_skin`) and a mesh primitive's POSITION/NORMAL/
+JOINTS_0/WEIGHTS_0 out of the same glTF file together.
+
+**The one real subtlety, gotten right rather than assumed:** a
+`JOINTS_0` value in a glTF file is an index into that skin's OWN
+`joints` array, in whatever order the file happens to store it — NOT a
+bone index into the `Armature` `armature_load_from_skin` produces, since
+that function topologically re-sorts bones into parent-before-child
+order (see its own status note above). Using a raw `JOINTS_0` value as a
+bone index directly would silently skin vertices to the WRONG bones
+whenever the file's `joints` array isn't already sorted — a real,
+easy-to-miss bug class for exactly the kind of file this project's own
+fixture deliberately exercises. `skinned_mesh_load_gltf` remaps each
+joint index through the original joint node's NAME
+(`skin->joints[raw_index]->name`) looked up in the already-sorted
+`Armature` (`armature_find_bone`) — correct regardless of the file's own
+ordering, not just for the specific scrambled order this project's test
+fixture happens to use.
+
+`tools/gen_test_armature.py` extended (not a new fixture) with a real
+6-vertex/4-triangle mesh spanning the arm — most vertices are trivially
+single-bone-weighted, but one (`v3`) is a genuine 60/40 blend between
+the mid and tip joints, specifically so the loader's multi-bone
+`WEIGHTS_0` handling is exercised against a real blend, not just the
+trivial `(1,0,0,0)` case. Weights are copied through as-is, never
+renormalized, even if a source file's don't sum to 1.0 — an intentional
+"don't silently correct a possible authoring bug" choice, not an
+oversight.
+
+Verified (`animation_test`'s own new section 8): loaded vertex/index
+counts match the fixture; `v0`'s and `v5`'s single-bone weights resolve
+to the correct `root`/`tip` bone indices DESPITE the file's scrambled
+`joints` order (proving the remap, not just that loading didn't crash);
+`v3`'s real 60/40 blend across `mid`/`tip` reads back exactly. ASan-clean.
+Native/wasm/win32 all rebuilt clean.
+
 Next real steps for this phase, in the order the "Architecture"/"Editor
-operations" sections below already imply: the vertex-format extension +
-skin-weight loading path (glTF `JOINTS_0`/`WEIGHTS_0`) needed before GPU
-vertex skinning can happen at all, then a real skinning shader, then the
-timeline/curve-editor UI, then the Bullet ragdoll handoff. The shader
-itself is real code this environment cannot verify beyond "it compiles/
-links" (no live GL context is possible here, same `XOpenDisplay()`
-limitation as everything else this session touching rendering) — flagged
-now, before it's written, not discovered as a surprise gap later.
+operations" sections above already imply: a real GPU skinning shader
+(bone matrices in a UBO, per this phase's own original sketch) — real
+code this environment cannot verify beyond "it compiles/links" (no live
+GL context is possible here, same `XOpenDisplay()` limitation as
+everything else this session touching rendering, flagged now rather
+than discovered as a surprise gap later) — then the timeline/curve-editor
+UI, then the Bullet ragdoll handoff.
 
 ### What it is
 
