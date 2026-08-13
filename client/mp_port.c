@@ -168,9 +168,21 @@ static mp_obj_t native_enable_physics(mp_obj_t mass_obj, mp_obj_t restitution_ob
     if (s_target_obj->phys_body) {
         mp_raise_ValueError(MP_ERROR_TEXT("phi.enable_physics: already has a physics body"));
     }
-    Vec3f half_extents;
-    if (!meshobject_local_aabb_half_extents(s_target_obj->hem, &half_extents)) {
-        mp_raise_ValueError(MP_ERROR_TEXT("phi.enable_physics: couldn't compute an AABB (empty mesh?)"));
+    /* Convex hull from the mesh's own real vertices -- same shape choice
+     * as main.c's Enable Physics context-menu action now makes (see its
+     * own comment for why, and Blender's rigidbody.cc default for
+     * dynamic bodies), kept consistent here so triggering physics from a
+     * script produces the identical physical result as triggering it
+     * from the menu. */
+    if (!s_target_obj->hem || s_target_obj->hem->vert_count < 4) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.enable_physics: not enough vertices for a hull (need a real 3D mesh)"));
+    }
+    HalfEdgeMesh *hem = s_target_obj->hem;
+    float *flat = (float *)malloc((size_t)hem->vert_count * 3 * sizeof(float));
+    for (int i = 0; i < hem->vert_count; i++) {
+        flat[i*3+0] = hem->verts[i].pos[0];
+        flat[i*3+1] = hem->verts[i].pos[1];
+        flat[i*3+2] = hem->verts[i].pos[2];
     }
     float orientation[4] = {
         s_target_obj->orientation.x, s_target_obj->orientation.y,
@@ -178,8 +190,10 @@ static mp_obj_t native_enable_physics(mp_obj_t mass_obj, mp_obj_t restitution_ob
     };
     float mass = (float)mp_obj_get_float(mass_obj);
     float restitution = (float)mp_obj_get_float(restitution_obj);
-    s_target_obj->phys_body = phi_physics_add_box_body(s_phys_world, half_extents, s_target_obj->position,
-                                                         orientation, mass, restitution);
+    s_target_obj->phys_body = phi_physics_add_convex_hull_body(s_phys_world, flat, hem->vert_count,
+                                                                 s_target_obj->position, orientation,
+                                                                 mass, restitution);
+    free(flat);
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(native_enable_physics_obj, native_enable_physics);

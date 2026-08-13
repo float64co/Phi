@@ -427,3 +427,35 @@ int fracture_save_glb(const FractureFragment *frags, int n, const char *gltf_pat
     free(bin_path); free(live); free(pos_off); free(idx_off);
     return 1;
 }
+
+/* True if fragments a and b share at least one vertex position (within
+ * EPS) -- see fracture_compute_adjacency's own comment for why that's
+ * exactly the right test. */
+static int fragments_share_a_vertex(const FractureFragment *a, const FractureFragment *b) {
+    const float EPS2 = 1e-4f * 1e-4f;
+    for (int i = 0; i < a->pos_count; i++) {
+        float ax = a->positions[i*3+0], ay = a->positions[i*3+1], az = a->positions[i*3+2];
+        for (int j = 0; j < b->pos_count; j++) {
+            float dx = ax - b->positions[j*3+0];
+            float dy = ay - b->positions[j*3+1];
+            float dz = az - b->positions[j*3+2];
+            if (dx*dx + dy*dy + dz*dz < EPS2) return 1;
+        }
+    }
+    return 0;
+}
+
+void fracture_compute_adjacency(const FractureFragment *frags, int n, unsigned char *out_adjacent) {
+    if (n < 1) return;
+    memset(out_adjacent, 0, (size_t)n * (size_t)n);
+    for (int i = 0; i < n; i++) {
+        if (frags[i].pos_count == 0) continue;
+        for (int j = i + 1; j < n; j++) {
+            if (frags[j].pos_count == 0) continue;
+            if (fragments_share_a_vertex(&frags[i], &frags[j])) {
+                out_adjacent[i*n + j] = 1;
+                out_adjacent[j*n + i] = 1;
+            }
+        }
+    }
+}

@@ -19,6 +19,7 @@
 #include "halfedge_gltf.h"
 #include "fracture.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 #include <string.h>
 
@@ -166,6 +167,49 @@ int main(void) {
                   "saved .gltf actually contains the PHI_fracture_fragments extension");
             CHECK(file_contains("/tmp/phi_fracture_test.gltf", "\"mode\": 4"),
                   "saved .gltf uses ordinary triangle-list mesh primitives");
+
+            /* ---- fracture_compute_adjacency, Phase 2's runtime-fracture
+             * building block (see phi_physics.h's fixed-constraint
+             * comment) -- checked against an INDEPENDENTLY re-derived
+             * shared-vertex test here, not by re-calling the function
+             * under test on itself. */
+            printf("[fracture_test] fragment adjacency (n=%d)...\n", n);
+            unsigned char *adj = (unsigned char *)malloc((size_t)n * (size_t)n);
+            fracture_compute_adjacency(frags, n, adj);
+
+            int symmetric = 1, zero_diagonal = 1;
+            for (int i = 0; i < n; i++) {
+                if (adj[i*n + i] != 0) zero_diagonal = 0;
+                for (int j = 0; j < n; j++)
+                    if (adj[i*n + j] != adj[j*n + i]) symmetric = 0;
+            }
+            CHECK(zero_diagonal, "a fragment is never adjacent to itself");
+            CHECK(symmetric, "adjacency is symmetric (i adjacent to j implies j adjacent to i)");
+
+            int any_adjacent = 0, matches_independent_check = 1;
+            const float EPS2 = 1e-4f * 1e-4f;
+            for (int i = 0; i < n; i++) {
+                if (frags[i].pos_count == 0) continue;
+                for (int j = i + 1; j < n; j++) {
+                    if (frags[j].pos_count == 0) continue;
+                    int shares_vertex = 0;
+                    for (int vi = 0; vi < frags[i].pos_count && !shares_vertex; vi++) {
+                        float ax = frags[i].positions[vi*3+0], ay = frags[i].positions[vi*3+1], az = frags[i].positions[vi*3+2];
+                        for (int vj = 0; vj < frags[j].pos_count; vj++) {
+                            float dx = ax - frags[j].positions[vj*3+0];
+                            float dy = ay - frags[j].positions[vj*3+1];
+                            float dz = az - frags[j].positions[vj*3+2];
+                            if (dx*dx + dy*dy + dz*dz < EPS2) { shares_vertex = 1; break; }
+                        }
+                    }
+                    if (adj[i*n + j] != (shares_vertex ? 1 : 0)) matches_independent_check = 0;
+                    if (adj[i*n + j]) any_adjacent = 1;
+                }
+            }
+            printf("[fracture_test] at least one adjacent pair found: %s\n", any_adjacent ? "yes" : "no");
+            CHECK(any_adjacent, "at least one adjacent fragment pair exists (a real Voronoi split of one solid must produce touching pieces)");
+            CHECK(matches_independent_check, "fracture_compute_adjacency's output matches an independently re-derived shared-vertex check, pair by pair");
+            free(adj);
         }
 
         fracture_free_fragments(frags, n);

@@ -2681,7 +2681,7 @@ by Phase 4 no longer needing to stand up its own glTF pipeline)*
 
 ## Phase 2 — Physics
 
-### Status: a real, verified first slice landed, 2026-08-10
+### Status: real first slice landed 2026-08-10; convex hulls + breaking-threshold constraints landed 2026-08-14 (see dated note below) — remaining gap is wiring runtime fracture-activation into a live scene, blocked on multi-object scene support this engine doesn't have yet
 
 **Correction to this section's original claim, below**: Bullet has **no
 official C API** for its core engine — verified by cloning the `bullet3`
@@ -2776,6 +2776,92 @@ verification (right-clicking an object, choosing Enable Physics, watching
 it fall on screen) is still not possible in this sandbox, same
 `XOpenDisplay()` limitation as everything else this session needing a
 real window.
+
+#### Convex hull collision shapes + breaking-threshold constraints, 2026-08-14
+
+Closes most of this phase's remaining gap, per explicit request ("finish
+Phase 2"). Researched against Blender's own real rigid-body code first
+(now vendored at `blender/`, added this session specifically as
+reference material to check "how does Blender do this" against before
+inventing a technique) rather than guessed — `blenkernel/intern/
+rigidbody.cc` and `intern/rigidbody/rb_bullet_api.cpp` were read
+directly, not the addon/UI layer.
+
+- **Convex hull bodies** (`phi_physics_add_convex_hull_body`, new in
+  `phi_physics.h`/`.cpp`): builds a shape from `btConvexHullComputer`
+  (already vendored, previously unused) run over the object's own real
+  vertex positions, then wraps the reduced hull in a `btConvexHullShape`
+  — the exact same two-step technique Blender's `RB_shape_new_convex_hull`
+  uses, including its margin-embedding-with-fallback behavior (try to
+  shrink the hull inward by Bullet's usual 0.04 margin; if that fails for
+  a thin/degenerate shape, fall back to an exact zero-margin hull). The
+  Scene context menu's "Enable Physics" action and `phi.enable_physics()`
+  (`mp_port.c`) both switched from a box-from-AABB to this — Blender's
+  own default collision shape for dynamic ("Active") rigid bodies too
+  (confirmed by reading `rigidbody.cc`'s own body-creation defaults: box
+  was only ever this project's placeholder because hulls weren't
+  implemented yet). The static ground body at startup stays a box, which
+  is both correct for a flat plane and matches Blender's own box/trimesh-
+  for-passive-objects default.
+- **Breaking-threshold fixed constraints** (`phi_physics_add_fixed_
+  constraint`/`_remove_constraint`/`_constraint_is_broken`): wraps
+  `btFixedConstraint` (already vendored) + `btTypedConstraint::
+  setBreakingImpulseThreshold` — verified this is exactly what Blender's
+  own Rigid Body Constraint "Fixed" type + "Breaking" option is built on
+  (`RB_constraint_new_fixed` wraps the identical class;
+  `RB_constraint_set_breaking_threshold` calls the identical setter).
+  Bullet's own constraint solver checks the applied impulse against the
+  threshold every solved frame and disables the constraint internally
+  the moment it's exceeded (confirmed by reading vendored
+  `btSequentialImpulseConstraintSolver.cpp` directly) — callers only need
+  `phi_physics_constraint_is_broken` to read that flag back, no hand-
+  rolled polling logic. `disableCollisionsBetweenLinkedBodies` is hard-
+  coded true when adding a constraint, matching Blender's own default so
+  two glued bodies don't jitter against each other's collision shapes
+  while intact.
+- **Fragment adjacency** (`fracture_compute_adjacency`, new in
+  `fracture.h`/`.c`): given a set of Voronoi fragments (`fracture_
+  voronoi`'s existing output), finds which pairs share a cut face by
+  checking for coincident vertex positions — since every fragment is
+  clipped from the same source mesh, the only way two fragments can share
+  any geometry at all is along the exact bisector plane clipped between
+  them, so a shared-vertex test is a correct, practical adjacency check
+  without threading full Voronoi-cell neighbor bookkeeping through the
+  clipping algorithm itself. This is the missing piece needed to connect
+  adjacent fragments with breaking-threshold constraints at runtime, so a
+  fractured object reads as one solid piece until an impact separates it
+  — Blender's own real "shatter on impact" technique (there is no
+  single-body-auto-splits-on-impact primitive in Blender core either,
+  confirmed while reading the same source — fragments are simulated
+  separately from frame one, connected by constraints, which is the
+  model this now supports).
+- **Honest scope boundary, not silently punted**: wiring all of the above
+  into a live, on-screen "shoot the wall, watch it shatter" demo needs
+  spawning N fragment `MeshObject`s into the scene and removing the
+  original — this engine has exactly ONE object slot right now
+  (`g_test_mesh_object`, see its own comment in `main.c`), not a real
+  object list/scene graph. Building that is a genuinely separate,
+  substantially larger undertaking (touches picking, the Outliner,
+  Properties, the Python bindings, Asset Browser save — everywhere
+  `ui_get_selected_object()`'s 4000+id convention is assumed to mean "the
+  one object") than this pass's actual scope, so it wasn't attempted here
+  rather than half-built. What Phase 2 needed — real convex hulls, real
+  breaking constraints, real fragment adjacency, all verified — is done
+  and sitting ready for whenever multi-object scene support lands.
+
+Verified: `phi_physics_test` gained two new sections (convex hull body
+settles at the same height an equal-size box would, proving real hull
+reduction rather than a degenerate/leaking shape; a fixed constraint
+stays intact under a gentle impulse and genuinely breaks under a hard
+one — with the exact expected momentum-shared magnitudes worked out and
+checked, not just "did the flag flip"). `fracture_test` gained an
+adjacency section checked against an independently re-derived shared-
+vertex test, not by calling the function under test on itself. Every
+other physics/prop-touching standalone harness (`phi_physics_meshobject_
+test`, `mp_physics_test`, `mp_prop_panel_test`, `mp_console_test`,
+`area_tree_test`, `phi_prop_test`) re-verified passing. Native and wasm
+both rebuilt clean. Win32 remains the user's own `build.bat`
+responsibility, not built from this sandbox.
 
 ### Bullet Physics via Emscripten
 

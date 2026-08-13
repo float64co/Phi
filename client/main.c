@@ -859,30 +859,43 @@ static void main_loop(void *userdata) {
             }
             break;
         case CTX_ACTION_ENABLE_PHYSICS:
-            /* Box shape from the mesh's own AABB (see meshobject_local_
-             * aabb_half_extents's "assumes roughly centered on local
-             * origin" caveat) -- mass=1.0 (dynamic), a modest restitution
-             * so it doesn't bounce forever. Once created, main_loop's
-             * frame step syncs position/orientation FROM the simulated
-             * body every frame instead of leaving them alone. */
+            /* Convex hull shape from the mesh's own real vertex positions
+             * (real Bullet quickhull reduction, see
+             * phi_physics_add_convex_hull_body's own comment) -- Blender's
+             * own default collision shape for dynamic ("Active") rigid
+             * bodies too, confirmed by reading its rigidbody.cc directly
+             * rather than assumed. Box was this project's original
+             * placeholder, chosen only because convex hulls weren't
+             * implemented yet (see phi.md's Phase 2 status) -- the static
+             * ground body at startup stays box, which is both correct for
+             * a flat plane and matches Blender's own box/trimesh-for-
+             * passive-objects default. mass=1.0 (dynamic), a modest
+             * restitution so it doesn't bounce forever. Once created,
+             * main_loop's frame step syncs position/orientation FROM the
+             * simulated body every frame instead of leaving them alone. */
             if (!g_test_mesh_loaded || ui_get_selected_object() != 4000u + (unsigned int)g_test_mesh_object.id) {
                 printf("[main] context menu Enable Physics: no MeshObject selected\n");
             } else if (g_test_mesh_object.phys_body) {
                 printf("[main] context menu Enable Physics: already has a physics body\n");
+            } else if (!g_test_mesh_object.hem || g_test_mesh_object.hem->vert_count < 4) {
+                printf("[main] context menu Enable Physics: not enough vertices for a hull (need a real 3D mesh)\n");
             } else {
-                Vec3f half_extents;
-                if (!meshobject_local_aabb_half_extents(g_test_mesh_object.hem, &half_extents)) {
-                    printf("[main] context menu Enable Physics: couldn't compute an AABB (empty mesh?)\n");
-                } else {
-                    float orientation[4] = {
-                        g_test_mesh_object.orientation.x, g_test_mesh_object.orientation.y,
-                        g_test_mesh_object.orientation.z, g_test_mesh_object.orientation.w
-                    };
-                    g_test_mesh_object.phys_body = phi_physics_add_box_body(
-                        g_phys_world, half_extents, g_test_mesh_object.position, orientation, 1.0f, 0.3f);
-                    printf("[main] context menu Enable Physics: box half-extents (%.2f, %.2f, %.2f), mass=1.0\n",
-                           half_extents.x, half_extents.y, half_extents.z);
+                HalfEdgeMesh *hem = g_test_mesh_object.hem;
+                float *flat = (float *)malloc((size_t)hem->vert_count * 3 * sizeof(float));
+                for (int i = 0; i < hem->vert_count; i++) {
+                    flat[i*3+0] = hem->verts[i].pos[0];
+                    flat[i*3+1] = hem->verts[i].pos[1];
+                    flat[i*3+2] = hem->verts[i].pos[2];
                 }
+                float orientation[4] = {
+                    g_test_mesh_object.orientation.x, g_test_mesh_object.orientation.y,
+                    g_test_mesh_object.orientation.z, g_test_mesh_object.orientation.w
+                };
+                g_test_mesh_object.phys_body = phi_physics_add_convex_hull_body(
+                    g_phys_world, flat, hem->vert_count, g_test_mesh_object.position, orientation, 1.0f, 0.3f);
+                printf("[main] context menu Enable Physics: convex hull from %d vertices, mass=1.0\n",
+                       hem->vert_count);
+                free(flat);
             }
             break;
         case CTX_ACTION_TOGGLE_EDIT_MODE:

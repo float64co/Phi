@@ -88,11 +88,87 @@ int main(void) {
     check(fabsf(p_after_set.x - 20.0f) < 0.001f && fabsf(p_after_set.y - 5.0f) < 0.001f && fabsf(p_after_set.z - 3.0f) < 0.001f,
           "a direct transform override actually moves the body, not just the render-side idea of where it is");
 
-    printf("[phi_physics_test] === 4: cleanup doesn't crash ===\n");
+    printf("[phi_physics_test] === 4: convex hull body -- a real quickhull-reduced shape, not a box ===\n");
+    /* 8 explicit corner vertices of a unit-half-extent cube, PLUS its own
+     * center point repeated as a degenerate/redundant 9th vertex --
+     * btConvexHullComputer must reduce this down to the same 8-corner
+     * hull (the center point lies strictly inside, contributes nothing),
+     * proving this is genuine hull REDUCTION, not just "wrap whatever
+     * points you're given". Dropped onto the same ground as test 1 and
+     * expected to settle at the identical height a box with the same
+     * half-extent would -- the hull really is a solid cube-shaped
+     * collider, not degenerate/inside-out/leaking through the floor. */
+    float hull_pts[9*3] = {
+        -0.5f,-0.5f,-0.5f,   0.5f,-0.5f,-0.5f,  -0.5f, 0.5f,-0.5f,   0.5f, 0.5f,-0.5f,
+        -0.5f,-0.5f, 0.5f,   0.5f,-0.5f, 0.5f,  -0.5f, 0.5f, 0.5f,   0.5f, 0.5f, 0.5f,
+         0.0f, 0.0f, 0.0f,
+    };
+    Vec3f hull_start = {3.0f, 10.0f, 0.0f};
+    PhiRigidBody *hull_box = phi_physics_add_convex_hull_body(world, hull_pts, 9, hull_start, identity_quat, 1.0f, 0.1f);
+    check(hull_box != NULL, "convex hull body created from a raw point cloud");
+    for (int i = 0; i < 360; i++) phi_physics_world_step(world, 1.0f / 60.0f);
+    Vec3f hull_pos;
+    phi_physics_get_transform(hull_box, &hull_pos, NULL);
+    printf("  hull settled at y = %.4f (expected ~0.5, same as the equal-size box in test 1)\n", hull_pos.y);
+    check(fabsf(hull_pos.y - 0.5f) < 0.1f, "the reduced hull behaves as a real solid cube collider, settling at the same height a box would");
+
+    printf("[phi_physics_test] === 5: fixed constraint with a real breaking threshold ===\n");
+    /* Two boxes side by side, glued at the midpoint between them with a
+     * breaking threshold. A gentle impulse shouldn't exceed it (stays
+     * glued); a hard impulse should (Bullet's own solver disables the
+     * constraint internally -- see phi_physics.h's own comment on
+     * btSequentialImpulseConstraintSolver). Both boxes are kinematically
+     * irrelevant to gravity here (checked mid-air, away from the ground)
+     * so the ONLY force acting is the impulse itself -- an unambiguous
+     * signal for whether the threshold logic is really working. */
+    Vec3f cbox_half = {0.5f, 0.5f, 0.5f};
+    Vec3f pos_a = {-10.0f, 20.0f, 0.0f};
+    Vec3f pos_b = {-9.0f, 20.0f, 0.0f};
+    PhiRigidBody *cbox_a = phi_physics_add_box_body(world, cbox_half, pos_a, identity_quat, 1.0f, 0.0f);
+    PhiRigidBody *cbox_b = phi_physics_add_box_body(world, cbox_half, pos_b, identity_quat, 1.0f, 0.0f);
+    Vec3f pivot = {-9.5f, 20.0f, 0.0f};
+    PhiConstraint *glue = phi_physics_add_fixed_constraint(world, cbox_a, cbox_b, pivot, 50.0f);
+    check(glue != NULL, "fixed constraint created");
+    check(!phi_physics_constraint_is_broken(glue), "starts intact");
+
+    /* Gentle nudge: well under the 50.0 breaking threshold. Note the
+     * constraint solver has to SHARE an applied impulse P between the two
+     * equal-mass glued bodies to equalize their velocities (conservation
+     * of momentum: the row's own internal impulse works out to ~P/2, not
+     * P) -- accounted for in both magnitudes below, not just guessed. */
+    phi_physics_apply_impulse(cbox_a, (Vec3f){-2.0f, 0.0f, 0.0f}, zero);
+    for (int i = 0; i < 30; i++) phi_physics_world_step(world, 1.0f / 60.0f);
+    check(!phi_physics_constraint_is_broken(glue), "a gentle impulse well under the threshold leaves the constraint intact");
+    Vec3f pos_a_after_gentle, pos_b_after_gentle;
+    phi_physics_get_transform(cbox_a, &pos_a_after_gentle, NULL);
+    phi_physics_get_transform(cbox_b, &pos_b_after_gentle, NULL);
+    float gap_after_gentle = pos_b_after_gentle.x - pos_a_after_gentle.x;
+    printf("  gap after gentle nudge: %.3f (started at 1.0 -- still glued means it stayed close to that)\n", gap_after_gentle);
+    check(fabsf(gap_after_gentle - 1.0f) < 0.3f, "still glued: the two boxes moved together, gap didn't open up");
+
+    /* Hard impulse: ~400, so the shared row impulse (~200) comfortably
+     * clears the 50.0 threshold. */
+    phi_physics_apply_impulse(cbox_a, (Vec3f){-400.0f, 0.0f, 0.0f}, zero);
+    for (int i = 0; i < 30; i++) phi_physics_world_step(world, 1.0f / 60.0f);
+    check(phi_physics_constraint_is_broken(glue), "a hard impulse over the threshold breaks the constraint (Bullet's own solver, not hand-rolled logic)");
+    Vec3f pos_a_after_hard, pos_b_after_hard;
+    phi_physics_get_transform(cbox_a, &pos_a_after_hard, NULL);
+    phi_physics_get_transform(cbox_b, &pos_b_after_hard, NULL);
+    float gap_after_hard = pos_b_after_hard.x - pos_a_after_hard.x;
+    printf("  gap after hard impulse: %.3f (should have opened up well past the original 1.0)\n", gap_after_hard);
+    check(gap_after_hard > 2.0f, "broken: box A actually flew away from box B instead of staying rigidly attached");
+
+    phi_physics_remove_constraint(world, glue);
+    check(1, "constraint removal doesn't crash");
+
+    printf("[phi_physics_test] === 6: cleanup doesn't crash ===\n");
     phi_physics_remove_body(world, box);
     phi_physics_remove_body(world, ground);
+    phi_physics_remove_body(world, hull_box);
+    phi_physics_remove_body(world, cbox_a);
+    phi_physics_remove_body(world, cbox_b);
     phi_physics_world_destroy(world);
-    check(1, "world + both bodies torn down without crashing (this line running proves it)");
+    check(1, "world + every body torn down without crashing (this line running proves it)");
 
     if (g_fail) printf("\n[phi_physics_test] RESULT: FAIL\n");
     else printf("\n[phi_physics_test] RESULT: PASS (all checks passed)\n");

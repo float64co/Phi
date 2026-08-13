@@ -62,3 +62,25 @@ void fracture_free_fragments(FractureFragment *frags, int n);
  * vertex meshes. Returns 1 on success, 0 on failure (e.g. couldn't open
  * either output file). */
 int fracture_save_glb(const FractureFragment *frags, int n, const char *gltf_path);
+
+/* Computes which fragment pairs are adjacent -- i.e. share a Voronoi
+ * bisector-plane cut face -- into a caller-owned n*n row-major matrix
+ * (out_adjacent[i*n+j], symmetric, diagonal always 0). Detected by
+ * checking whether two fragments have any vertex position in common
+ * (within a small epsilon): since every fragment is clipped from the
+ * SAME source mesh, the only way two fragments can share any geometry at
+ * all is along the exact bisector plane that was clipped between them --
+ * that cut face is the identical physical surface on both sides, so its
+ * vertices coincide exactly (up to floating-point clip error) in both
+ * fragments' own local space. A practical, geometry-based adjacency test
+ * rather than threading full Voronoi-cell neighbor bookkeeping through
+ * fracture_voronoi's clipping loop -- O(pos_count_i * pos_count_j) per
+ * pair, fine at this phase's fragment counts (single digits to low
+ * tens), not attempted at a scale where that matters, same "real but
+ * scoped" bar this file's other comments already hold themselves to.
+ * Intended consumer: connecting adjacent fragments with a real Bullet
+ * breaking-threshold constraint at runtime (see phi_physics.h's
+ * phi_physics_add_fixed_constraint) so a fractured object still reads as
+ * one solid piece until an impact separates it. No-op (out_adjacent left
+ * untouched) if n < 1. */
+void fracture_compute_adjacency(const FractureFragment *frags, int n, unsigned char *out_adjacent);
