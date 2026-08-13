@@ -43,6 +43,7 @@ int main(void) {
     obj.id = 1;
     obj.position = (Vec3f){128.0f, 100.0f, 90.0f};
     obj.orientation = quat_identity();
+    obj.scale = (Vec3f){1.0f, 1.0f, 1.0f};
     obj.hem = hem;
     check(obj.phys_body == NULL, "starts with no physics body (the common-case default)");
 

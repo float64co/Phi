@@ -13,6 +13,13 @@ typedef struct {
     int        id;
     Vec3f      position;
     Quat       orientation;
+    /* Non-uniform scale, {1,1,1} = untouched -- driven by main.c's S
+     * transform tool (see transform_op.h), applied in
+     * renderer_draw_mesh_object's model matrix. Every existing spawn site
+     * must set this explicitly (no implicit zero-init default the way
+     * position/orientation get away with, since a zeroed scale would
+     * collapse the object to nothing rather than leaving it unchanged). */
+    Vec3f      scale;
     RenderMesh *render_mesh;
     int        is_static;
     /* NULL = no physics simulation for this object (the common case --

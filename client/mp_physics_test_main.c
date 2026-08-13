@@ -33,6 +33,7 @@ int main(void) {
     obj.id = 1;
     obj.position = (Vec3f){128.0f, 100.0f, 90.0f};
     obj.orientation = quat_identity();
+    obj.scale = (Vec3f){1.0f, 1.0f, 1.0f};
     obj.hem = hem;
     int loaded = 1;
     int edit_face = -1;

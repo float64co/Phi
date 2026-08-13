@@ -69,6 +69,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/animation.c     \
 	$(SRCDIR)/skinned_mesh.c  \
 	$(SRCDIR)/gizmo.c         \
+	$(SRCDIR)/transform_op.c  \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c            \

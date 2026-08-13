@@ -28,6 +28,7 @@ int main(void) {
     check(hem != NULL, "loaded assets/cube.gltf");
     obj.id = 1;
     obj.position = (Vec3f){1.0f, 2.0f, 3.0f};
+    obj.scale = (Vec3f){1.0f, 1.0f, 1.0f};
     obj.is_static = 1;
     obj.hem = hem;
     int loaded = 1;

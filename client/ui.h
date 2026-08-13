@@ -153,6 +153,12 @@ typedef struct {
     int         test_obj_loaded;
     int         edit_face;       /* main.c's g_edit_face -- last ray-picked hem face, -1 if none. Properties reads this for the per-face material readout. */
     EditorMode  editor_mode;     /* main.c's g_editor_mode -- see EditorMode's own comment. Read by the Scene panel's mode label and the right-click context menu's row set. */
+    /* Modal G/S/R transform tool's HUD readout (see transform_op.h's
+     * transform_op_hud_text) -- NULL or empty when no operation is
+     * active. main.c formats the string, ui.c just draws it (same split
+     * as editor_mode's own label above), next to the Object/Edit Mode
+     * label in the Scene panel. */
+    const char *xform_hud;
     PyConsoleState *console;
     AssetBrowserState *asset_browser;
     ChatState *chat;

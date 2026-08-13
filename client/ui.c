@@ -615,18 +615,42 @@ static void draw_panel_scene(Area *a, const UIRenderContext *ctx) {
      * pipeline needs its own state, not whatever the 3D pass left behind. */
     glDisable(GL_DEPTH_TEST);
 
+    /* Every 2D draw below this point is the first ui_* draw call this
+     * function itself has ever issued -- gbuffer_set_viewport_offset just
+     * above left the real GL viewport pinned to this panel's own on-
+     * screen sub-rectangle, not the full window, so a 2D quad computed
+     * from ui_text_draw's full-window NDC math (u_screen_size == the
+     * window, not this sub-rect) would land mis-scaled and mis-
+     * positioned, not just visually "off by a few pixels" -- the exact
+     * bug draw_leaf's own post-switch glViewport reset exists to prevent
+     * for every OTHER panel (see its comment). That reset happens AFTER
+     * this function returns, too late for anything drawn here, hence a
+     * second, earlier reset needed right here. */
+    glViewport(0, 0, g_ui.screen_w, g_ui.screen_h);
+
     /* Blender-style mode label -- top-left corner, past the type-switcher
      * icon (same offset the Outliner/Properties panel titles already use,
      * see draw_panel_outliner), drawn in the accent color while in Edit
      * Mode so the mode is legible at a glance, not just readable on close
      * inspection. */
     const char *mode_label = (ctx->editor_mode == EDITOR_MODE_EDIT) ? "Edit Mode" : "Object Mode";
+    float label_x = a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f;
     if (ctx->editor_mode == EDITOR_MODE_EDIT) {
-        ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, mode_label,
+        ui_text_draw(label_x, a->y + 4.0f, mode_label,
                      g_ui.font_bold, 15.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
     } else {
-        ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, mode_label,
+        ui_text_draw(label_x, a->y + 4.0f, mode_label,
                      g_ui.font_bold, 15.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+    }
+
+    /* Modal G/S/R transform tool's live readout (see transform_op.h's
+     * transform_op_hud_text via main.c) -- right after the mode label,
+     * in the accent color so an in-progress Grab/Scale/Rotate is as
+     * legible as Edit Mode itself. */
+    if (ctx->xform_hud && ctx->xform_hud[0]) {
+        float hud_x = label_x + font_text_width(g_ui.font_bold, mode_label, 15.0f) + 14.0f;
+        ui_text_draw(hud_x, a->y + 4.0f, ctx->xform_hud,
+                     g_ui.font_bold, 15.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
     }
 }
 

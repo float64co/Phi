@@ -11,6 +11,7 @@
 #include "fracture.h"
 #include "mp_port.h"
 #include "gizmo.h"
+#include "transform_op.h"
 #include "font.h"
 #include "svg_icon.h"
 #include "asset_browser.h"
@@ -148,6 +149,7 @@ static int load_mesh_object_from_path(const char *path, float scale) {
     g_test_mesh_object.id = 1;
     g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
     g_test_mesh_object.orientation = quat_identity();
+    g_test_mesh_object.scale = (Vec3f){1.0f, 1.0f, 1.0f};
     g_test_mesh_object.is_static = 1;
     g_test_mesh_object.render_mesh = mesh_create();
     if (scale != 1.0f) {
@@ -299,7 +301,11 @@ static void scene_zoom_cb(int delta) {
 static void cam_orbit_from_start(int dx, int dy) {
     const float SENS = 0.008f;          /* radians per pixel of drag */
     const float PITCH_LIMIT = 1.55334f; /* ~89 degrees in radians */
-    g_cam_yaw = g_cam_drag_start_yaw + (float)dx * SENS;
+    /* Horizontal drag direction flipped per an explicit request (was
+     * +dx, now -dx) -- same "confirmed working, just inverted from the
+     * feel that was actually wanted" situation as the vertical flip
+     * just below. */
+    g_cam_yaw = g_cam_drag_start_yaw - (float)dx * SENS;
     /* Vertical drag direction flipped per an explicit request (was +dy,
      * now -dy) -- confirmed working orbit (see the earlier "MMB orbit
      * works" report), just inverted from the feel that was actually
@@ -503,6 +509,102 @@ static void main_loop(void *userdata) {
         toggle_editor_mode();
     }
 
+    /* Blender-style modal G/S/R transform tool (client/transform_op.h) --
+     * Grab/Scale/Rotate the selected MeshObject, available in BOTH Object
+     * and Edit mode per explicit request (Edit mode still just has the
+     * one object selected -- there's no per-vertex editing surface yet,
+     * see g_edit_face's own comment, so "move the selected thing" means
+     * the same object either way). Escape is drained unconditionally
+     * here regardless of whether an op happens to be active this frame --
+     * same "producer sets, consumer clears" requirement every other
+     * one-shot InputState field in this codebase follows (see input.h),
+     * even though right now the only thing that ever reads it is
+     * transform_op_cancel below. */
+    int xform_escape_pressed = g_inp.escape_edge;
+    g_inp.escape_edge = 0;
+    char xform_hud[64] = {0};
+    {
+        float sx, sy, sw, sh;
+        int have_scene_rect = ui_get_scene_rect(&sx, &sy, &sw, &sh);
+
+        if (!transform_op_active() && !gizmo_is_dragging() && have_scene_rect) {
+            /* Entry: only starts when hovering the Scene panel's own
+             * content (same hover-gated convention MMB-drag/scroll-wheel
+             * routing already use elsewhere in this file), with a mesh
+             * object selected. Only the FIRST matching character this
+             * frame is consumed and removed from the queue -- any other
+             * character typed the same frame still reaches the console/
+             * chat below undisturbed. */
+            int hovering_scene =
+                (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
+                (float)g_inp.mouse_y >= sy && (float)g_inp.mouse_y < sy + sh;
+            if (hovering_scene && selected_is_test_mesh()) {
+                for (int i = 0; i < g_inp.typed_count; i++) {
+                    char c = g_inp.typed_chars[i];
+                    TransformOpKind kind = XFORM_NONE;
+                    if (c == 'g' || c == 'G') kind = XFORM_GRAB;
+                    else if (c == 's' || c == 'S') kind = XFORM_SCALE;
+                    else if (c == 'r' || c == 'R') kind = XFORM_ROTATE;
+                    if (kind != XFORM_NONE) {
+                        for (int j = i; j < g_inp.typed_count - 1; j++)
+                            g_inp.typed_chars[j] = g_inp.typed_chars[j + 1];
+                        g_inp.typed_count--;
+
+                        Vec3f ro, rd;
+                        compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &ro, &rd);
+                        TransformCamCtx cam;
+                        cam.ray_origin = ro; cam.ray_dir = rd;
+                        cam_basis(g_cam_yaw, g_cam_pitch, &cam.fwd, &cam.right, &cam.up);
+                        cam.distance = g_cam_distance;
+                        transform_op_begin(kind, &g_test_mesh_object, &cam, g_inp.mouse_x, g_inp.mouse_y);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (transform_op_active() && have_scene_rect) {
+            Vec3f ro, rd;
+            compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &ro, &rd);
+            TransformCamCtx cam;
+            cam.ray_origin = ro; cam.ray_dir = rd;
+            cam_basis(g_cam_yaw, g_cam_pitch, &cam.fwd, &cam.right, &cam.up);
+            cam.distance = g_cam_distance;
+            transform_op_update(&g_test_mesh_object, &g_inp, &cam, g_inp.mouse_x, g_inp.mouse_y);
+
+            /* Confirm: Enter or a plain LMB click. Cancel: Escape or a
+             * plain RMB click. Draining lmb_click/rmb_click/enter_edge
+             * here means the normal picking/context-menu blocks further
+             * down this function naturally see them already cleared --
+             * no separate transform_op_active() guard needed there. */
+            if (g_inp.enter_edge) {
+                g_inp.enter_edge = 0;
+                transform_op_confirm();
+            } else if (xform_escape_pressed) {
+                transform_op_cancel(&g_test_mesh_object);
+            } else if (g_inp.lmb_click) {
+                g_inp.lmb_click = 0;
+                transform_op_confirm();
+            } else if (g_inp.rmb_click) {
+                g_inp.rmb_click = 0;
+                transform_op_cancel(&g_test_mesh_object);
+            }
+        } else if (transform_op_active()) {
+            /* The Scene panel got swapped away mid-drag (the type-
+             * switcher lets the user do this) -- no ray to update from;
+             * still allow Escape/Enter to end the op cleanly rather than
+             * leaving it stuck forever. */
+            if (g_inp.enter_edge) {
+                g_inp.enter_edge = 0;
+                transform_op_confirm();
+            } else if (xform_escape_pressed) {
+                transform_op_cancel(&g_test_mesh_object);
+            }
+        }
+
+        transform_op_hud_text(xform_hud, (int)sizeof(xform_hud));
+    }
+
     static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
     float sky[3];
     renderer_get_sky_color(sky);
@@ -513,6 +615,7 @@ static void main_loop(void *userdata) {
     ui_ctx.test_obj_loaded = g_test_mesh_loaded;
     ui_ctx.edit_face = g_edit_face;
     ui_ctx.editor_mode = g_editor_mode;
+    ui_ctx.xform_hud = xform_hud;
     ui_ctx.console = &g_cs;
     ui_ctx.asset_browser = &g_ab;
     ui_ctx.chat = &g_chat;
@@ -798,13 +901,20 @@ static void main_loop(void *userdata) {
      * text fields existed. Both asset_browser_update_focused_text and
      * chat_update_focused_text are no-ops that leave InputState untouched
      * when their own focus is NONE, so falling all the way through to
-     * pyconsole_update is always correct, not just "usually". */
-    if (g_ab.focus != AB_FOCUS_NONE) {
-        asset_browser_update_focused_text(&g_ab, &g_inp);
-    } else if (g_chat.focus != CHAT_FOCUS_NONE) {
-        chat_update_focused_text(&g_chat, &g_inp);
-    } else {
-        pyconsole_update(&g_cs, &g_inp);
+     * pyconsole_update is always correct, not just "usually". Skipped
+     * entirely while a modal G/S/R transform op is active -- it already
+     * drains typed_chars/backspace_edge itself (see transform_op_update),
+     * so this would see an empty queue anyway, but skipping outright
+     * keeps "a modal op owns all keyboard input while active" true
+     * without relying on that as an implementation detail. */
+    if (!transform_op_active()) {
+        if (g_ab.focus != AB_FOCUS_NONE) {
+            asset_browser_update_focused_text(&g_ab, &g_inp);
+        } else if (g_chat.focus != CHAT_FOCUS_NONE) {
+            chat_update_focused_text(&g_chat, &g_inp);
+        } else {
+            pyconsole_update(&g_cs, &g_inp);
+        }
     }
 
     /* Chat one-shot send, same "UI raises intent, main.c executes"

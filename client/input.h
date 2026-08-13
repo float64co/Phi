@@ -55,6 +55,14 @@ typedef struct {
      * once per frame by main.c rather than by the always-focused Python
      * panel. */
     int   tab_edge;
+    /* Escape key, rising edge -- reserved for the modal G/S/R transform
+     * tool's cancel action (see transform_op.h), NOT a resurrection of the
+     * old console open/close modality's escape_edge (that field was
+     * deliberately removed along with backquote-toggled console focus,
+     * see phi.md's "Python panel is now an always-focused text input").
+     * Same "never queued into typed_chars" exclusion as Tab/Enter/
+     * Backspace on all three platforms. */
+    int   escape_edge;
 
     /* Mouse wheel, accumulated (there can be more than one wheel event per
      * frame) since the last time a consumer drained it to 0 -- same

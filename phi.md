@@ -2548,6 +2548,118 @@ limitation) — this is compile-clean-and-reviewed, not click-tested. Win32
 is no longer built from this sandbox at all now that `build.bat` lets the
 user cross-check it themselves on real Windows with real MSVC.
 
+#### Camera polish + modal Grab/Scale/Rotate transform tool, 2026-08-14
+
+Two small camera fixes plus a real Blender-style modal transform tool,
+all per explicit request.
+
+- **MMB-orbit horizontal direction flipped** (`main.c`'s
+  `cam_orbit_from_start`, `g_cam_yaw`'s `dx` term) — same "confirmed
+  working, just inverted from the feel that was actually wanted"
+  situation as the earlier vertical-orbit flip right above it.
+- **Real bug found and fixed while leveling the Object/Edit Mode label
+  with the panel type-switcher icon**: `draw_panel_scene` (`ui.c`) issues
+  its mode-label `ui_text_draw` call — and, as of this pass, the new
+  transform-tool HUD readout next to it — while the real GL viewport is
+  still pinned to the Scene panel's own on-screen sub-rectangle (left
+  that way by `gbuffer_set_viewport_offset` a few lines above), not the
+  full window. Every other panel's 2D chrome runs from `draw_leaf`'s
+  post-switch `glViewport(0, 0, screen_w, screen_h)` reset, which happens
+  AFTER `draw_panel_scene` returns — too late for anything drawn inside
+  it. The symptom was exactly what got reported: since text position/
+  size is computed in full-window pixel space but was being rasterized
+  through the smaller Scene-panel viewport instead, the label's on-screen
+  size scaled with the Scene panel's own on-screen dimensions as the user
+  dragged area borders, rather than staying a fixed pixel size — not a
+  wrong offset constant (the x/y math already matched Outliner/
+  Properties exactly). Fixed with a second, earlier `glViewport` reset
+  right before the first 2D draw call this function issues.
+- **Modal Grab/Scale/Rotate transform tool** (new `client/transform_op.h/
+  .c`, ~250 lines, a self-contained mechanism module in the same role
+  gizmo.c already plays for handle-click dragging): `G`/`S`/`R` start a
+  modal operation on the selected MeshObject, available in BOTH Object
+  and Edit mode (Edit mode still just has the one object selected --
+  there's no per-vertex editing surface yet, see `g_edit_face`'s own
+  comment, so "move the selected thing" means the same object either
+  way). `X`/`Y`/`Z` lock the operation to a single world axis (pressing
+  the already-locked axis again unlocks it, Blender's own convention);
+  Escape restores the object's pre-operation position/orientation/scale
+  exactly; Enter or a plain LMB click confirms; a plain RMB click also
+  cancels. Rotate additionally accepts digit keys to type an exact
+  degree value, overriding mouse control until Backspace clears the
+  buffer back to empty.
+  - **Entry is hover-gated**, the same "determined by what the mouse is
+    hovering over" convention this codebase's MMB-camera-nav/scroll-
+    routing already established: `G`/`S`/`R` only start a modal op while
+    the cursor is over the Scene panel's own content AND a mesh object
+    is selected, consuming just that one typed character out of the
+    frame's queue so anything else typed the same frame (e.g. into the
+    console) is undisturbed. While a modal op IS active, it owns ALL
+    keyboard input -- fully drains `typed_chars`/`backspace_edge` every
+    frame (even characters it doesn't itself recognize) so nothing leaks
+    to the console/chat text fields underneath, and the console/chat/
+    asset-browser text-routing block in `main_loop` is skipped outright
+    while one is active.
+  - **New `InputState::escape_edge`** (`input.h`/`.c`, wired across wasm/
+    win32/X11 the same way `tab_edge` was in the previous pass) --
+    resurrects the KEY, not the old console-modality behavior removed
+    earlier in this project's history (see that section's own note): this
+    is scoped solely to the transform tool's cancel action.
+  - **Axis-locked Grab** reuses gizmo.c's own drag-plane technique
+    (construct a plane containing the axis and facing the camera, then
+    ray-plane-intersect every frame) reimplemented locally in
+    `transform_op.c` rather than calling into gizmo.c directly, so the
+    modal op owns its own independent lifecycle instead of sharing
+    gizmo.c's module-level dragging state (which is specifically about
+    handle-click drags and would conflict with a keyboard-driven one).
+    Free-move Grab uses the same screen-to-world-via-camera-basis
+    technique `cam_pan_from_start` already uses for camera panning.
+  - **Scale** is a new capability end to end -- `MeshObject` had no scale
+    field at all before this pass (`meshobject.h`'s `Vec3f scale`, `{1,1,
+    1}` = untouched, set explicitly at every existing spawn/test-harness
+    site). `renderer.c` gained `mat4_scale` and now builds the mesh-
+    object model matrix as `T*R*S` (previously just `T*R`). An
+    exponential-in-pixels multiplicative factor drives both free
+    (uniform) and axis-locked scale, chosen over Blender's own screen-
+    space-distance-from-center ratio specifically so scale can never
+    cross zero/go negative regardless of drag distance -- a deliberate
+    simplification, same "real but not Blender-grade polish" bar as the
+    fixed-distance extrude offset. **Known pre-existing gap, not
+    introduced by this pass**: the PBR vertex shader passes `a_normal`
+    straight through untransformed (`v_normal = a_normal;`, object-space,
+    not even rotated) -- lighting on a rotated OR now non-uniformly-
+    scaled object is not physically correct. This already applied to
+    Bullet-tumbled physics objects before Scale ever existed; flagged
+    honestly rather than fixed here, since fixing it (a real normal-
+    matrix, inverse-transpose for correctness under non-uniform scale) is
+    out of scope for what was actually asked.
+  - **Rotate** composes world-space rotations via new file-static
+    `quat_mul`/`quat_from_axis_angle` helpers in `transform_op.c`
+    (verified against `meshobject.h`'s `quat_to_mat4` convention: a
+    90-degree rotation composed with itself via `quat_mul` gives the
+    expected 180-degree result, before use). No axis lock defaults to
+    rotating around the camera's forward vector (an approximation of
+    Blender's real trackball-around-view-axis rotation, simpler than a
+    true screen-space-angle-around-center computation but directionally
+    correct). Typed-degree entry has no negative-sign support in this
+    pass (would need a new dash-key edge across three platforms plus more
+    parsing) -- a real, scoped-out gap, not an oversight.
+  - **HUD readout**: `transform_op_hud_text` formats a short string
+    ("Grab X", "Rotate Z: 45 (deg)") that `main.c` hands to `ui.c` via a
+    new `UIRenderContext::xform_hud` field, drawn next to the Object/Edit
+    Mode label -- same "main.c formats, ui.c just draws" split the mode
+    label itself already established.
+
+Verified: native and wasm both rebuilt clean (only pre-existing vendored-
+Bullet warnings, nothing from any touched file); `area_tree_test`,
+`phi_prop_test`, `phi_physics_meshobject_test`, `mp_physics_test`, and
+`mp_prop_panel_test` all still pass in full (the last four exercise
+`MeshObject` directly, the ones most likely to notice a bad `scale`
+default). No live GL/input verification was possible in this sandbox
+(no real X display) -- compile-clean-and-reviewed plus this test suite,
+not click-tested. Win32 remains the user's own `build.bat` responsibility,
+not built from this sandbox.
+
 ### Fracturing
 
 Meshes are authored with a fracture pattern at creation time. The editor provides

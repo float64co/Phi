@@ -23,6 +23,7 @@ int main(void) {
     printf("[phi_prop_test] === 2: MeshObject.position (VEC3) get/set through the real struct ===\n");
     MeshObject obj = {0};
     obj.position = (Vec3f){1.0f, 2.0f, 3.0f};
+    obj.scale = (Vec3f){1.0f, 1.0f, 1.0f};
     float v[3];
     check(phi_prop_get_vec3(&obj, pos, v) == 1, "get_vec3 succeeds on a real VEC3 prop");
     check(v[0] == 1.0f && v[1] == 2.0f && v[2] == 3.0f, "reads the actual struct field, not a stale copy");

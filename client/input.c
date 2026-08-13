@@ -30,6 +30,7 @@ static EM_BOOL key_down(int type, const EmscriptenKeyboardEvent *e, void *ud) {
         if (strcmp(e->code,"ArrowUp")==0)    inp->histup_edge   = 1;
         if (strcmp(e->code,"ArrowDown")==0)  inp->histdown_edge = 1;
         if (strcmp(e->code,"Tab")==0)        inp->tab_edge      = 1;
+        if (strcmp(e->code,"Escape")==0)     inp->escape_edge   = 1;
     }
     if (strcmp(e->code,"Backspace")==0) inp->backspace_edge = 1;  /* natural OS repeat-delete */
     return EM_TRUE;
@@ -146,6 +147,7 @@ static void handle_key(WPARAM vk, LPARAM lparam, int down) {
         if (vk == VK_UP)     inp->histup_edge    = 1;
         if (vk == VK_DOWN)   inp->histdown_edge  = 1;
         if (vk == VK_TAB)    inp->tab_edge       = 1;
+        if (vk == VK_ESCAPE) inp->escape_edge    = 1;
     }
     if (down && vk == VK_BACK) inp->backspace_edge = 1;  /* natural OS repeat-delete */
 }
@@ -276,6 +278,7 @@ static void handle_key(XKeyEvent *e, int down) {
             if (ks == XK_Up)                            inp->histup_edge   = 1;
             if (ks == XK_Down)                          inp->histdown_edge = 1;
             if (ks == XK_Tab)                           inp->tab_edge      = 1;
+            if (ks == XK_Escape)                        inp->escape_edge   = 1;
         }
         if (ks == XK_BackSpace) inp->backspace_edge = 1;  /* natural OS repeat-delete */
     }

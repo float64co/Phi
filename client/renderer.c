@@ -366,6 +366,15 @@ static void mat4_translate(float *m, float tx, float ty, float tz) {
     m[12] = tx; m[13] = ty; m[14] = tz;
 }
 
+/* Non-uniform scale -- MeshObject::scale (see meshobject.h), driven by
+ * main.c's S transform tool. Applied first in the model matrix (T*R*S,
+ * the standard TRS order: scale in local space, then rotate, then
+ * translate into world space) via renderer_draw_mesh_object below. */
+static void mat4_scale(float *m, float sx, float sy, float sz) {
+    mat4_identity(m);
+    m[0] = sx; m[5] = sy; m[10] = sz;
+}
+
 /* ---- GL error helper ---- */
 static void gl_check(const char *where) {
     /* Drains every pending error, not just one — glGetError only returns
@@ -630,10 +639,12 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     if (!obj->render_mesh->vbo) return;
 
     float vp[16]; build_vp(r, vp);
-    float rot[16], t[16], model[16], mvp[16], prev_mvp[16];
+    float rot[16], t[16], s[16], rs[16], model[16], mvp[16], prev_mvp[16];
     quat_to_mat4(&obj->orientation, rot);
     mat4_translate(t, obj->position.x, obj->position.y, obj->position.z);
-    mat4_mul(model, t, rot);
+    mat4_scale(s, obj->scale.x, obj->scale.y, obj->scale.z);
+    mat4_mul(rs, rot, s);
+    mat4_mul(model, t, rs);
     mat4_mul(mvp, vp, model);
     /* Camera-motion-only velocity scope, same reasoning as draw_box/
      * draw_box_oriented — a static MeshObject's own transform doesn't
