@@ -2487,6 +2487,67 @@ bug `renderer_draw_wire_box`/`gizmo.c` already document hitting and
 fixing earlier in this project's history; flagged explicitly rather than
 silently reinterpreted. Verified: native/wasm/win32 all rebuilt clean.
 
+#### Object Mode / Edit Mode, 2026-08-13
+
+Blender-style mode split, per explicit request ("We kinda need to mimic
+blender's ux here. I need object mode and edit mode."). Previously there
+was no mode concept at all — `try_pick_object` did whole-object select
+AND face-level picking unconditionally on every click, and the Scene
+right-click context menu showed every row (object-level AND mesh-editing)
+at once regardless of what was selected.
+
+- **`EditorMode` enum** (`ui.h`): `EDITOR_MODE_OBJECT` / `EDITOR_MODE_EDIT`.
+  `main.c` owns the actual state (`g_editor_mode`); `ui.c` only reads it
+  via a new `UIRenderContext::editor_mode` field to decide what to draw/
+  hit-test, the same division of labor `edit_face` already established.
+- **Tab key** (new `InputState::tab_edge`, wired across wasm/win32/X11
+  the same way `enter_edge`/`histup_edge` already are — none of the three
+  platforms ever queue Tab into `typed_chars` in the first place, so no
+  extra exclusion was needed there) toggles the mode via a shared
+  `toggle_editor_mode()` helper in `main.c`. Entering Edit mode is a
+  no-op (reported, not silently ignored) unless a mesh object is already
+  selected, matching Blender's own rule. `g_edit_face` is Edit-mode-only
+  state now — cleared on every mode transition and on every Object-mode
+  pick, so it can never carry a stale face selection across a mode
+  switch.
+- **Picking is now mode-gated** (`main.c`'s `try_pick_object`): Object
+  mode keeps the old gizmo-handle-then-whole-object-select/deselect
+  behavior, minus face-level state. Edit mode restricts picking to
+  face-selection within the already-selected object only — no gizmo, no
+  switching which object is selected; a miss just clears the face
+  selection (same as clicking empty space in Blender's Edit Mode, which
+  doesn't kick you back to Object mode or deselect the object).
+- **Context menu row set is now mode-dependent, and a real pre-existing
+  bug got fixed along the way**: the menu's `items[]` (and, in the
+  hit-test copy, a parallel `actions[]`) array was hand-duplicated
+  verbatim between the draw pass (`ui_render`) and the hit-test pass
+  (`ui_on_mouse_button`) — two independently-maintained copies of the
+  same 11-row list that could silently drift apart. Factored into one
+  `build_ctx_menu_rows(ctx, items, actions)` used by both passes. Object
+  mode shows the whole-object rows plus a new "Enter Edit Mode" row (only
+  when a mesh is actually selected — omitted entirely rather than
+  shown-then-rejected, the same convention the Area menu's "Join with
+  Sibling" `can_join` check already uses); Edit mode shows Extrude/Inset/
+  Loop Cut plus "Exit Edit Mode". Both rows dispatch through the same
+  `toggle_editor_mode()` the Tab key uses, via a new
+  `CTX_ACTION_TOGGLE_EDIT_MODE`.
+- **Mode label**: the Scene panel now draws "Object Mode"/"Edit Mode"
+  top-left (same offset the Outliner/Properties panel titles already use
+  past the type-switcher icon), dimmed in Object mode and accent-colored
+  in Edit mode so the current mode is legible at a glance.
+- Also, unrelated one-line fix bundled into this same pass: the Python
+  console's opening banner no longer says "Type Python" — the panel
+  already reads "Phi Python console" and has no other language it could
+  possibly be, so the instruction was pure noise.
+
+Verified: native and wasm both rebuilt clean (only pre-existing vendored-
+Bullet warnings, nothing from any touched file); `area_tree_test` still
+passes in full. No live GL/input verification was possible in this
+sandbox (no real X display, see this doc's standing note on that
+limitation) — this is compile-clean-and-reviewed, not click-tested. Win32
+is no longer built from this sandbox at all now that `build.bat` lets the
+user cross-check it themselves on real Windows with real MSVC.
+
 ### Fracturing
 
 Meshes are authored with a fracture pattern at creation time. The editor provides

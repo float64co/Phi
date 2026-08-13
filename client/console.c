@@ -59,8 +59,8 @@ void pyconsole_init(PyConsoleState *cs) {
     memset(cs, 0, sizeof(*cs));
     cs->history_pos = -1;
     s_cs = cs;
-    log_push(cs, "Phi Python console. Type Python; it runs through a real embedded");
-    log_push(cs, "interpreter (no special sandboxing beyond MicroPython's own build).");
+    log_push(cs, "Phi Python console -- a real embedded interpreter (no special");
+    log_push(cs, "sandboxing beyond MicroPython's own build).");
 }
 
 void pyconsole_append(const char *line) {

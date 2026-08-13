@@ -94,7 +94,25 @@ typedef enum {
      * falling/colliding from then on. No-op (reported, not silently
      * ignored) if it already has one. */
     CTX_ACTION_ENABLE_PHYSICS,
+    /* Blender-style Object/Edit mode toggle -- Object mode row reads "Enter
+     * Edit Mode" (only shown when a MeshObject is selected), Edit mode row
+     * reads "Exit Edit Mode" (always shown while in Edit mode). Mirrors the
+     * Tab-key shortcut (see main.c's g_editor_mode) rather than duplicating
+     * its logic -- both paths funnel through the same toggle_editor_mode()
+     * helper in main.c. */
+    CTX_ACTION_TOGGLE_EDIT_MODE,
 } CtxMenuAction;
+
+/* Blender-style Object/Edit mode -- see main.c's g_editor_mode (owns the
+ * actual state; ui.c only reads it via UIRenderContext::editor_mode to
+ * decide which context-menu rows to show/hit-test). Edit mode restricts
+ * picking to face-selection within the already-selected MeshObject (see
+ * main.c's try_pick_object); Object mode is everything this engine already
+ * did before this enum existed (gizmo-handle drag, whole-object select). */
+typedef enum {
+    EDITOR_MODE_OBJECT = 0,
+    EDITOR_MODE_EDIT,
+} EditorMode;
 
 typedef struct Area {
     AreaKind kind;
@@ -134,6 +152,7 @@ typedef struct {
     MeshObject *test_obj;        /* Phase 1's assets/cube.gltf test object, see main.c */
     int         test_obj_loaded;
     int         edit_face;       /* main.c's g_edit_face -- last ray-picked hem face, -1 if none. Properties reads this for the per-face material readout. */
+    EditorMode  editor_mode;     /* main.c's g_editor_mode -- see EditorMode's own comment. Read by the Scene panel's mode label and the right-click context menu's row set. */
     PyConsoleState *console;
     AssetBrowserState *asset_browser;
     ChatState *chat;

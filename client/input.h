@@ -47,6 +47,14 @@ typedef struct {
     int   typed_count;
     int   enter_edge, backspace_edge;
     int   histup_edge, histdown_edge;   /* Up / Down arrows: input history */
+    /* Tab key, rising edge -- reserved globally for the Object/Edit mode
+     * toggle (see main.c's g_editor_mode), same "reserved function key"
+     * carve-out console.c's own comment already describes for Enter/
+     * Backspace/arrows: never queued into typed_chars (all three platforms
+     * already exclude it there the same way they exclude Enter), consumed
+     * once per frame by main.c rather than by the always-focused Python
+     * panel. */
+    int   tab_edge;
 
     /* Mouse wheel, accumulated (there can be more than one wheel event per
      * frame) since the last time a consumer drained it to 0 -- same

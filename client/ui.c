@@ -614,6 +614,20 @@ static void draw_panel_scene(Area *a, const UIRenderContext *ctx) {
      * state is bound and cleared the depth test back on -- the 2D UI
      * pipeline needs its own state, not whatever the 3D pass left behind. */
     glDisable(GL_DEPTH_TEST);
+
+    /* Blender-style mode label -- top-left corner, past the type-switcher
+     * icon (same offset the Outliner/Properties panel titles already use,
+     * see draw_panel_outliner), drawn in the accent color while in Edit
+     * Mode so the mode is legible at a glance, not just readable on close
+     * inspection. */
+    const char *mode_label = (ctx->editor_mode == EDITOR_MODE_EDIT) ? "Edit Mode" : "Object Mode";
+    if (ctx->editor_mode == EDITOR_MODE_EDIT) {
+        ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, mode_label,
+                     g_ui.font_bold, 15.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
+    } else {
+        ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, mode_label,
+                     g_ui.font_bold, 15.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+    }
 }
 
 /* Zebra-striped, full-panel-width row backgrounds — Blender's own list-row
@@ -1431,6 +1445,45 @@ static void draw_leaf(Area *a, const UIRenderContext *ctx) {
     draw_area_chrome(a);
 }
 
+#define CTX_MENU_MAX_ROWS 9
+
+/* Builds this frame's Scene right-click context-menu row set -- single
+ * source of truth for both the draw pass (ui_render) and the hit-test pass
+ * (ui_on_mouse_button), which previously hand-duplicated an identical
+ * items[] (and, in the hit-test copy only, actions[]) array that could
+ * silently drift out of sync. Row set depends on ctx->editor_mode (see
+ * EditorMode's own comment): Object mode shows whole-object operations
+ * plus "Enter Edit Mode" (only when a mesh is actually selected -- omitted
+ * entirely rather than shown-then-rejected, same convention the Area
+ * menu's can_join check above already uses for "Join with Sibling"); Edit
+ * mode shows the mesh-editing ops plus "Exit Edit Mode". Returns the row
+ * count; fills items/actions up to CTX_MENU_MAX_ROWS. */
+static int build_ctx_menu_rows(const UIRenderContext *ctx, const char *items[CTX_MENU_MAX_ROWS],
+                                CtxMenuAction actions[CTX_MENU_MAX_ROWS]) {
+    int n = 0;
+    if (ctx->editor_mode == EDITOR_MODE_EDIT) {
+        items[n] = "Extrude Face";    actions[n++] = CTX_ACTION_EXTRUDE_FACE;
+        items[n] = "Inset Face";      actions[n++] = CTX_ACTION_INSET_FACE;
+        items[n] = "Loop Cut";        actions[n++] = CTX_ACTION_LOOP_CUT;
+        items[n] = "Exit Edit Mode";  actions[n++] = CTX_ACTION_TOGGLE_EDIT_MODE;
+    } else {
+        items[n] = "Add > Mesh Object";  actions[n++] = CTX_ACTION_ADD_MESH;
+        items[n] = "Delete";             actions[n++] = CTX_ACTION_DELETE;
+        items[n] = "Frame Selected";     actions[n++] = CTX_ACTION_FRAME_SELECTED;
+        items[n] = "Frame All";          actions[n++] = CTX_ACTION_FRAME_ALL;
+        items[n] = "Deselect All";       actions[n++] = CTX_ACTION_DESELECT_ALL;
+        items[n] = "Fracture (Voronoi)"; actions[n++] = CTX_ACTION_FRACTURE;
+        items[n] = "Save as Asset";      actions[n++] = CTX_ACTION_SAVE_AS_ASSET;
+        items[n] = "Enable Physics";     actions[n++] = CTX_ACTION_ENABLE_PHYSICS;
+        int mesh_selected = ctx->test_obj_loaded && ctx->test_obj &&
+            ui_get_selected_object() == 4000u + (unsigned int)ctx->test_obj->id;
+        if (mesh_selected) {
+            items[n] = "Enter Edit Mode"; actions[n++] = CTX_ACTION_TOGGLE_EDIT_MODE;
+        }
+    }
+    return n;
+}
+
 static void walk_and_draw(Area *a, const UIRenderContext *ctx) {
     if (a->kind == AREA_LEAF) { draw_leaf(a, ctx); return; }
     walk_and_draw(a->child[0], ctx);
@@ -1487,10 +1540,9 @@ void ui_render(const UIRenderContext *ctx) {
 
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
-        static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
-                                        "Extrude Face", "Inset Face", "Loop Cut", "Fracture (Voronoi)",
-                                        "Save as Asset", "Enable Physics" };
-        int n = (int)(sizeof(items) / sizeof(items[0]));
+        const char *items[CTX_MENU_MAX_ROWS];
+        CtxMenuAction actions[CTX_MENU_MAX_ROWS];
+        int n = build_ctx_menu_rows(ctx, items, actions);
         float menu_h = row_h * n;
         ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
         ui_rect(g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
@@ -1669,19 +1721,9 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
 int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderContext *ctx) {
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
-        static const char *items[] = { "Add > Mesh Object", "Delete", "Frame Selected", "Frame All", "Deselect All",
-                                        "Extrude Face", "Inset Face", "Loop Cut", "Fracture (Voronoi)",
-                                        "Save as Asset", "Enable Physics" };
-        /* Order matches items[] above -- row index maps straight across.
-         * Frame Selected/Frame All/Deselect All still just get reported
-         * via the printf below; everything else is acted on by main.c. */
-        static const CtxMenuAction actions[] = {
-            CTX_ACTION_ADD_MESH, CTX_ACTION_DELETE, CTX_ACTION_FRAME_SELECTED,
-            CTX_ACTION_FRAME_ALL, CTX_ACTION_DESELECT_ALL,
-            CTX_ACTION_EXTRUDE_FACE, CTX_ACTION_INSET_FACE, CTX_ACTION_LOOP_CUT,
-            CTX_ACTION_FRACTURE, CTX_ACTION_SAVE_AS_ASSET, CTX_ACTION_ENABLE_PHYSICS
-        };
-        int n = (int)(sizeof(items) / sizeof(items[0]));
+        const char *items[CTX_MENU_MAX_ROWS];
+        CtxMenuAction actions[CTX_MENU_MAX_ROWS];
+        int n = build_ctx_menu_rows(ctx, items, actions);
         float menu_h = row_h * n;
         if (button == 0 && pressed) {
             if (point_in_rect((float)x, (float)y, g_ui.ctx_menu_x, g_ui.ctx_menu_y, menu_w, menu_h)) {

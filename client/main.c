@@ -59,6 +59,14 @@ static int          g_test_mesh_loaded = 0;
  * when you right-clicked", not "what's under the cursor now". */
 static int          g_edit_face = -1;
 static Vec3f        g_edit_hit_local = {0, 0, 0};  /* local-space hit point paired with g_edit_face, see below */
+/* Blender-style Object/Edit mode (see ui.h's EditorMode) -- Tab toggles it
+ * (see main_loop's g_inp.tab_edge handling) and the Scene context menu's
+ * "Enter/Exit Edit Mode" row does the same thing via toggle_editor_mode(),
+ * one shared place rather than duplicating the entry/exit rules. g_edit_face
+ * is meaningful ONLY while in Edit mode -- every Object-mode pick clears it
+ * (see try_pick_object), and toggle_editor_mode() clears it on every
+ * transition too, so it can never carry a stale face across a mode switch. */
+static EditorMode   g_editor_mode = EDITOR_MODE_OBJECT;
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
 static PyConsoleState g_cs     = {0};
@@ -373,6 +381,24 @@ static int selected_is_test_mesh(void) {
            ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id;
 }
 
+/* Shared by both the Tab-key shortcut and the Scene context menu's Enter/
+ * Exit Edit Mode row -- Blender only allows entering Edit mode with a mesh
+ * object selected (a no-op, not silently ignored -- see the printf), and
+ * exiting always succeeds. g_edit_face is Edit-mode-only state (see its own
+ * comment) so it's cleared on every transition, not just Object-mode picks. */
+static void toggle_editor_mode(void) {
+    if (g_editor_mode == EDITOR_MODE_OBJECT) {
+        if (!selected_is_test_mesh()) {
+            printf("[main] Enter Edit Mode: no mesh object selected\n");
+            return;
+        }
+        g_editor_mode = EDITOR_MODE_EDIT;
+    } else {
+        g_editor_mode = EDITOR_MODE_OBJECT;
+    }
+    g_edit_face = -1;
+}
+
 /* Ray-vs-mesh picking, plus gizmo handle priority: if the selected
  * object's translate gizmo is showing, a click on one of its handles
  * begins a drag instead of re-picking — grabbing the gizmo must win over
@@ -386,6 +412,25 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
     Vec3f origin, dir;
     if (!compute_scene_ray(scene_x, scene_y, scene_w, scene_h, click_x, click_y, &origin, &dir)) return;
 
+    if (g_editor_mode == EDITOR_MODE_EDIT) {
+        /* Edit mode: restricted to face-selection within the already-
+         * selected MeshObject -- no gizmo handles, no switching which
+         * object is selected, matching Blender's own "Edit Mode edits one
+         * object" invariant. A miss just clears the face selection, same
+         * as clicking empty space in Blender's edit mode (does NOT kick
+         * back to Object mode or deselect the object). */
+        float t; int face;
+        if (g_test_mesh_loaded && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
+            g_edit_face = face;
+        } else {
+            g_edit_face = -1;
+        }
+        return;
+    }
+
+    /* Object mode: gizmo handle priority, then whole-object select/
+     * deselect -- no face-level state (g_edit_face is Edit-mode-only from
+     * here on, see its own comment). */
     if (selected_is_test_mesh()) {
         GizmoAxis axis = gizmo_pick_handle(g_test_mesh_object.position, origin, dir);
         if (axis != GIZMO_AXIS_NONE) {
@@ -394,21 +439,12 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
         }
     }
 
-    /* Face-level pick (not just whole-object) so g_edit_face -- and
-     * therefore the Properties panel's material readout -- stays in sync
-     * with plain left-clicks too, not only the right-click-to-open-the-
-     * context-menu path (see g_edit_face's own comment). Uses hem directly
-     * via meshobject_ray_pick_face rather than the coarser render_mesh-
-     * only meshobject_ray_pick, since the test object always has a hem
-     * once loaded (see spawn_test_mesh_object) and this gives a face index
-     * for free from the same ray cast. */
     float t; int face;
+    g_edit_face = -1;
     if (g_test_mesh_loaded && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
         ui_set_selected_object(4000u + (unsigned int)g_test_mesh_object.id);
-        g_edit_face = face;
     } else {
         ui_set_selected_object(0xFFFFFFFFu);
-        g_edit_face = -1;
     }
 }
 
@@ -458,6 +494,15 @@ static void main_loop(void *userdata) {
      * x/y/w/h. */
     ui_on_mouse_move(g_inp.mouse_x, g_inp.mouse_y);
 
+    /* Blender-style Object/Edit mode toggle -- reserved key, drained here
+     * (same one-shot convention as every other *_edge field) before
+     * UIRenderContext is built below so ui_ctx.editor_mode reflects any
+     * toggle that happened this very frame, not last frame's mode. */
+    if (g_inp.tab_edge) {
+        g_inp.tab_edge = 0;
+        toggle_editor_mode();
+    }
+
     static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
     float sky[3];
     renderer_get_sky_color(sky);
@@ -467,6 +512,7 @@ static void main_loop(void *userdata) {
     ui_ctx.test_obj = &g_test_mesh_object;
     ui_ctx.test_obj_loaded = g_test_mesh_loaded;
     ui_ctx.edit_face = g_edit_face;
+    ui_ctx.editor_mode = g_editor_mode;
     ui_ctx.console = &g_cs;
     ui_ctx.asset_browser = &g_ab;
     ui_ctx.chat = &g_chat;
@@ -560,7 +606,7 @@ static void main_loop(void *userdata) {
                  * show -- see g_edit_face's own comment on why this is
                  * captured here rather than re-picked at click-a-row time. */
                 g_edit_face = -1;
-                if (selected_is_test_mesh()) {
+                if (g_editor_mode == EDITOR_MODE_EDIT && selected_is_test_mesh()) {
                     Vec3f origin, dir;
                     if (compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &origin, &dir)) {
                         float t; int face;
@@ -735,6 +781,9 @@ static void main_loop(void *userdata) {
                            half_extents.x, half_extents.y, half_extents.z);
                 }
             }
+            break;
+        case CTX_ACTION_TOGGLE_EDIT_MODE:
+            toggle_editor_mode();
             break;
         default:
             break;
