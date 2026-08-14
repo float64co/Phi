@@ -14,6 +14,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/* scene_target_register now takes a resolver CALLBACK (Phase 5's real
+ * multi-object scene graph, see scene_objects.h/scene_target.h) rather
+ * than a fixed MeshObject*+loaded-bool pair -- this test's own stand-in
+ * for main.c's selected_mesh_object(), toggled directly by the test
+ * below (NULL = "nothing selected", same as an empty scene). */
+static MeshObject *s_test_selected_obj = NULL;
+static MeshObject *test_get_selected_object(void) { return s_test_selected_obj; }
+
 static int g_fail = 0;
 static void check(int cond, const char *msg) {
     printf("  %s: %s\n", cond ? "PASS" : "FAIL", msg);
@@ -83,19 +91,19 @@ int main(void) {
     obj.id = 1;
     obj.hem = hem;
     obj.scale = (Vec3f){1.0f, 1.0f, 1.0f};
-    int loaded = 1;
+    s_test_selected_obj = &obj;
     int edit_face = 0;
     RenderSettings rs = {128};
-    scene_target_register(&obj, &loaded, &edit_face, &rs);
+    scene_target_register(test_get_selected_object, &edit_face, &rs);
 
     const PhiPropGroup *group; void *owner;
     check(scene_resolve_target("object", &group, &owner) == 1 && owner == &obj, "'object' resolves to the registered MeshObject");
     check(scene_resolve_target("face", &group, &owner) == 1 && owner == &obj.hem->faces[0], "'face' resolves to the currently-selected face");
     check(scene_resolve_target("render", &group, &owner) == 1 && owner == &rs, "'render' resolves to the registered RenderSettings, unconditionally available");
 
-    loaded = 0;
-    check(scene_resolve_target("object", &group, &owner) == 0, "'object' fails once test_obj_loaded is false, not stale-true");
-    loaded = 1;
+    s_test_selected_obj = NULL;
+    check(scene_resolve_target("object", &group, &owner) == 0, "'object' fails once nothing is selected, not stale-true");
+    s_test_selected_obj = &obj;
 
     edit_face = -1;
     check(scene_resolve_target("face", &group, &owner) == 0, "'face' fails when no face is selected (-1)");

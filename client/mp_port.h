@@ -50,20 +50,23 @@ char *phi_mp_exec(const char *code);
  * mp_test_main.c step 4 -- this reuses that proven pattern rather than
  * inventing a new one). */
 
-/* Registers the live pointers phi.prop_get/set read/write through --
- * call once from main(), mirrors console_set_target/
- * asset_browser_set_target's "single instance, registered once"
- * pattern. `test_obj_loaded`/`edit_face` are read fresh on every call
- * (not snapshotted at registration time), since main.c's g_test_mesh_
- * loaded/g_edit_face change every frame -- pass their addresses, not
- * their values. `target="object"` in Python resolves to `test_obj`
- * (once loaded); `target="face"` resolves to
- * `test_obj->hem->faces[*edit_face]` (once a face is actually selected).
+/* Registers the live state phi.prop_get/set and phi.enable_physics/
+ * apply_impulse/get_velocity/set_velocity read/write through -- call
+ * once from main(), mirrors console_set_target/asset_browser_set_
+ * target's "single instance, registered once" pattern. `get_selected_
+ * object` is main.c's own selected_mesh_object (Phase 5's real multi-
+ * object scene graph, see scene_objects.h) -- called FRESH every time
+ * (not snapshotted), since which object is selected changes constantly;
+ * `target="object"` in Python resolves to whatever it returns right now
+ * (NULL = nothing selected/a Light is selected instead). `edit_face` is
+ * still read fresh via its own address (main.c's g_edit_face changes
+ * every frame too) -- `target="face"` resolves to `get_selected_
+ * object()->hem->faces[*edit_face]` once a face is actually selected.
  * `phys_world` (see phi.md's "Bullet Physics via Emscripten") is what
  * phi.enable_physics/apply_impulse/get_velocity/set_velocity operate
  * against -- the same shared world main.c's own CTX_ACTION_ENABLE_
  * PHYSICS handler and main_loop's step/sync use, not a separate one. */
-void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face,
+void phi_mp_register_targets(MeshObject *(*get_selected_object)(void), const int *edit_face,
                               PhiPhysicsWorld *phys_world);
 
 /* Registers the real render-a-still-frame callback phi.render() calls

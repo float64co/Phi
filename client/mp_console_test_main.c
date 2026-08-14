@@ -21,6 +21,15 @@ static int g_fail = 0;
     else      { printf("  FAIL: %s\n", msg); g_fail = 1; } \
 } while (0)
 
+/* Stub -- see mp_test_main.c's own identical stub for why this is needed
+ * (mp_port.c now links scene_objects.c, whose scene_object_delete
+ * references mesh_destroy, octree_render.c's real GL-touching home). */
+void mesh_destroy(RenderMesh *m) {
+    if (!m) return;
+    free(m->data);
+    free(m);
+}
+
 int main(void) {
     int stack_top;
     phi_mp_init(&stack_top);

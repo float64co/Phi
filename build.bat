@@ -110,7 +110,7 @@ for %%f in (
     main.c octree_render.c renderer.c net.c input.c console.c
     asset_browser.c chat.c halfedge.c halfedge_gltf.c meshobject.c
     mesh_edit.c fracture.c armature.c animation.c skinned_mesh.c
-    gizmo.c transform_op.c light.c scene_target.c fracture_body.c path_tracer.c skinned_mesh_object.c ragdoll.c font.c svg_icon.c ui.c area_tree.c phi_prop.c
+    gizmo.c transform_op.c light.c scene_target.c scene_objects.c fracture_body.c path_tracer.c skinned_mesh_object.c ragdoll.c font.c svg_icon.c ui.c area_tree.c phi_prop.c
     phi_prop_registry.c mp_port.c phi_physics.cpp
     phi_platform_win32.c gl_native.c gbuffer.c ws_client_win32.c
 ) do echo "%SRCDIR%\%%f">> %RSPFILE%

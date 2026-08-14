@@ -64,6 +64,29 @@
 #define PKT_DELETE_LIGHT_REQUEST 0x28   /* S->C: [req_id:u32 light_id:u32] */
 #define PKT_DELETE_LIGHT_REPLY   0x29   /* C->S: [req_id:u32 ok:u8] */
 
+/* Phase 5's real geometry-creation/vertex-editing tools (see phi.md --
+ * "make it so Claude can create geometry and redefine the verts of
+ * existing scene geometry"), same "server asks THIS client to act"
+ * shape as PKT_ADD_LIGHT_REQUEST/PKT_PROP_SET_REQUEST above -- wired to
+ * three more of the Anthropic tool-use loop's real tools (server/
+ * anthropic_client.py's create_mesh_object/set_mesh_vertices/delete_
+ * mesh_object). vert_count/tri_count are each capped at PKT_MESH_MAX_
+ * VERTS/PKT_MESH_MAX_TRIS -- a real, deliberately modest wire-protocol
+ * bound (distinct from the LOCAL Python console's phi.create_mesh/
+ * set_vertices, which have no such extra cap beyond the uint16_t index
+ * width this codebase's other index arrays already use) matched to what
+ * a chat-driven request would realistically ask for, not an arbitrary
+ * dense mesh import (that's what the Asset Browser/glTF path is for). */
+#define PKT_MESH_MAX_VERTS 2048
+#define PKT_MESH_MAX_TRIS  4096
+
+#define PKT_CREATE_MESH_REQUEST        0x2A   /* S->C: [req_id:u32 x:f32 y:f32 z:f32 vert_count:u16 (vert_count*3)*f32 positions tri_count:u16 (tri_count*3)*u16 indices] */
+#define PKT_CREATE_MESH_REPLY          0x2B   /* C->S: [req_id:u32 ok:u8 object_id:u32] -- object_id is 0 (never a real id) on failure */
+#define PKT_SET_VERTICES_REQUEST       0x2C   /* S->C: [req_id:u32 object_id:u32 vert_count:u16 (vert_count*3)*f32 positions] -- vert_count MUST match the target object's existing vertex count */
+#define PKT_SET_VERTICES_REPLY         0x2D   /* C->S: [req_id:u32 ok:u8] */
+#define PKT_DELETE_MESH_OBJECT_REQUEST 0x2E   /* S->C: [req_id:u32 object_id:u32] */
+#define PKT_DELETE_MESH_OBJECT_REPLY   0x2F   /* C->S: [req_id:u32 ok:u8] */
+
 typedef struct {
     int  connected;
     int  local_id;
@@ -89,6 +112,9 @@ void net_send_scene_state_reply(NetState *ns, uint32_t req_id, const char *json)
 void net_send_prop_set_reply(NetState *ns, uint32_t req_id, int ok);
 void net_send_add_light_reply(NetState *ns, uint32_t req_id, int ok, uint32_t light_id);
 void net_send_delete_light_reply(NetState *ns, uint32_t req_id, int ok);
+void net_send_create_mesh_reply(NetState *ns, uint32_t req_id, int ok, uint32_t object_id);
+void net_send_set_vertices_reply(NetState *ns, uint32_t req_id, int ok);
+void net_send_delete_mesh_object_reply(NetState *ns, uint32_t req_id, int ok);
 
 /* Registers a callback net_on_message invokes on PKT_SCENE_STATE_REQUEST --
  * net.c has no access to MeshObject/physics-world state itself (that's
@@ -106,6 +132,19 @@ void net_set_prop_set_handler(void (*handler)(uint32_t req_id, const char *targe
                                                int is_vec3, float v0, float v1, float v2));
 void net_set_add_light_handler(void (*handler)(uint32_t req_id, int type, float x, float y, float z));
 void net_set_delete_light_handler(void (*handler)(uint32_t req_id, uint32_t light_id));
+
+/* Phase 5's geometry tools -- same division of labor (net.c parses, main.c
+ * owns/mutates the real scene_objects.c registry). positions/indices are
+ * borrowed pointers into net.c's own parse buffer, valid only for the
+ * duration of the handler call (main.c must copy anything it needs to
+ * keep, though in practice these handlers consume them immediately via
+ * scene_objects.c/halfedge.c calls that copy the data themselves). */
+void net_set_create_mesh_handler(void (*handler)(uint32_t req_id, float x, float y, float z,
+                                                   const float *positions, int vert_count,
+                                                   const unsigned short *indices, int index_count));
+void net_set_set_vertices_handler(void (*handler)(uint32_t req_id, uint32_t object_id,
+                                                     const float *positions, int vert_count));
+void net_set_delete_mesh_object_handler(void (*handler)(uint32_t req_id, uint32_t object_id));
 
 #ifndef __EMSCRIPTEN__
 /* Native only: pumps the WebSocket socket (non-blocking) once per frame.

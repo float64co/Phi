@@ -21,6 +21,24 @@ static void check(int cond, const char *msg) {
     if (!cond) g_fail = 1;
 }
 
+/* Stub -- mp_port.c now links scene_objects.c (Phase 5's phi.delete_
+ * object etc.), whose scene_object_delete references mesh_destroy
+ * (octree_render.c's real GL-touching home) -- same technique fracture_
+ * body_test_main.c already established. Real free(), not a no-op. */
+void mesh_destroy(RenderMesh *m) {
+    if (!m) return;
+    free(m->data);
+    free(m);
+}
+
+/* phi_mp_register_targets/scene_target_register now take a resolver
+ * CALLBACK (Phase 5's real multi-object scene graph, see scene_
+ * objects.h) rather than a fixed MeshObject*+loaded-bool pair -- this
+ * test's own stand-in for main.c's selected_mesh_object(), always
+ * returning the one test object (this test never toggles selection). */
+static MeshObject *s_obj = NULL;
+static MeshObject *test_get_selected_object(void) { return s_obj; }
+
 int main(void) {
     int stack_top;
 
@@ -33,7 +51,7 @@ int main(void) {
     obj.scale = (Vec3f){1.0f, 1.0f, 1.0f};
     obj.is_static = 1;
     obj.hem = hem;
-    int loaded = 1;
+    s_obj = &obj;
     int edit_face = 0;
     RenderSettings rs = {128};
 
@@ -42,11 +60,11 @@ int main(void) {
      * (see mp_physics_test_main.c for that) -- NULL is safe here since
      * mp_port.c only ever reads phys_world from inside those functions,
      * never during init/bootstrap. */
-    phi_mp_register_targets(&obj, &loaded, &edit_face, NULL);
+    phi_mp_register_targets(test_get_selected_object, &edit_face, NULL);
     /* phi.prop_get/set now resolve through scene_target.c's shared
      * resolver (see its own comment), not mp_port.c's old private one --
-     * needs its own registration call too, same pointers. */
-    scene_target_register(&obj, &loaded, &edit_face, &rs);
+     * needs its own registration call too, same resolver. */
+    scene_target_register(test_get_selected_object, &edit_face, &rs);
 
     printf("[mp_prop_panel_test] === 1: phi.prop_get('object', 'position') reads the REAL C struct via Python ===\n");
     char *out = phi_mp_exec("print(phi.prop_get('object', 'position'))");

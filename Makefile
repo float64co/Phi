@@ -72,6 +72,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/transform_op.c  \
 	$(SRCDIR)/light.c         \
 	$(SRCDIR)/scene_target.c  \
+	$(SRCDIR)/scene_objects.c \
 	$(SRCDIR)/fracture_body.c \
 	$(SRCDIR)/path_tracer.c   \
 	$(SRCDIR)/skinned_mesh_object.c \
@@ -87,7 +88,7 @@ COMMON_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test
 
 all: wasm native
 
@@ -336,6 +337,22 @@ $(OUT_RAGDOLL_TEST): $(RAGDOLL_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(BULLET_INCLUDES) $(RAGDOLL_TEST_SRCS) -o $(OUT_RAGDOLL_TEST) -lstdc++ -lm
 	@echo "ragdoll_test build complete -> $(OUT_RAGDOLL_TEST)"
 
+# scene_objects.c (Phase 5's real multi-object scene graph, see scene_
+# objects.h) self-test -- no GL dependency (scene_object_add/find/
+# get_all/count never touch GL; scene_object_delete's own mesh_destroy
+# reference is stubbed in the test main itself, same technique fracture_
+# body_test above already established).
+SCENE_OBJECTS_TEST_SRCS := $(SRCDIR)/scene_objects_test_main.c $(SRCDIR)/scene_objects.c \
+                            $(SRCDIR)/halfedge.c
+OUT_SCENE_OBJECTS_TEST   := $(BUILDDIR)/scene_objects_test
+
+scene_objects_test: $(OUT_SCENE_OBJECTS_TEST)
+	./$(OUT_SCENE_OBJECTS_TEST)
+
+$(OUT_SCENE_OBJECTS_TEST): $(SCENE_OBJECTS_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(SCENE_OBJECTS_TEST_SRCS) -o $(OUT_SCENE_OBJECTS_TEST) -lm
+	@echo "scene_objects_test build complete -> $(OUT_SCENE_OBJECTS_TEST)"
+
 # Same, but exercising the actual MeshObject integration (AABB-from-mesh,
 # the exact create/step/sync sequence main.c's CTX_ACTION_ENABLE_PHYSICS
 # and main_loop use) rather than the raw phi_physics.h wrapper directly.
@@ -357,6 +374,7 @@ $(OUT_PHI_PHYSICS_MESHOBJ_TEST): $(PHI_PHYSICS_MESHOBJ_TEST_SRCS) | $(BUILDDIR)
 # that actually proves the two subsystems this pass added work together,
 # not just each in isolation.
 MP_PHYSICS_TEST_SRCS := $(SRCDIR)/mp_physics_test_main.c $(SRCDIR)/mp_port.c \
+                         $(SRCDIR)/scene_objects.c \
                          $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                          $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                          $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c \
@@ -435,6 +453,7 @@ $(OUT_ANIMATION_TEST): $(ANIMATION_TEST_SRCS) | $(BUILDDIR)
 # too.
 # ---------------------------------------------------------------
 MP_TEST_SRCS  := $(SRCDIR)/mp_test_main.c $(SRCDIR)/mp_port.c \
+                         $(SRCDIR)/scene_objects.c \
                   $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                   $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                   $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c \
@@ -454,6 +473,7 @@ $(OUT_MP_TEST): $(MP_TEST_SRCS) | $(BUILDDIR)
 # same no-GL-dependency rationale as mp_test above, against a real embedded
 # interpreter (not a mock).
 MP_PROP_PANEL_TEST_SRCS := $(SRCDIR)/mp_prop_panel_test_main.c $(SRCDIR)/mp_port.c \
+                         $(SRCDIR)/scene_objects.c \
                             $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                             $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                             $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(BULLET_SRCS) \
@@ -467,12 +487,35 @@ $(OUT_MP_PROP_PANEL_TEST): $(MP_PROP_PANEL_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_PROP_PANEL_TEST_SRCS) -o $(OUT_MP_PROP_PANEL_TEST) -lstdc++ -lm
 	@echo "mp_prop_panel_test build complete -> $(OUT_MP_PROP_PANEL_TEST)"
 
+# Phase 5's real geometry-creation/vertex-editing Python API (phi.
+# create_mesh/set_vertices/set_vertex/mesh_object/list_objects/delete_
+# object, see mp_port.c) end-to-end against a real embedded interpreter
+# driving real scene_objects.c/halfedge.c calls -- same shape as mp_prop_
+# panel_test above, same real phi_physics.cpp/Bullet link (mp_port.c's
+# OTHER physics bindings need real definitions regardless of whether
+# this specific test calls them).
+MP_GEOMETRY_TEST_SRCS := $(SRCDIR)/mp_geometry_test_main.c $(SRCDIR)/mp_port.c \
+                          $(SRCDIR)/scene_objects.c \
+                          $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                          $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
+                          $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(BULLET_SRCS) \
+                          $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c $(MP_EMBED_SRCS)
+OUT_MP_GEOMETRY_TEST := $(BUILDDIR)/mp_geometry_test
+
+mp_geometry_test: $(OUT_MP_GEOMETRY_TEST)
+	./$(OUT_MP_GEOMETRY_TEST)
+
+$(OUT_MP_GEOMETRY_TEST): $(MP_GEOMETRY_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) $(MP_TEST_CFLAGS) $(MP_GEOMETRY_TEST_SRCS) -o $(OUT_MP_GEOMETRY_TEST) -lstdc++ -lm
+	@echo "mp_geometry_test build complete -> $(OUT_MP_GEOMETRY_TEST)"
+
 # Console-facing glue self-test (phi_mp_init/phi_mp_exec/output capture,
 # see mp_port.h) -- distinct from mp_test above (Phase 5 decorator
 # patterns, out of scope here): this is what Phase 1's Console-as-real-
 # Python-REPL piece actually depends on. No GL dependency, same rationale
 # as mesh_edit_test/fracture_test.
 MP_CONSOLE_TEST_SRCS := $(SRCDIR)/mp_console_test_main.c $(SRCDIR)/mp_port.c \
+                         $(SRCDIR)/scene_objects.c \
                          $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                          $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                          $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(BULLET_SRCS) \
@@ -515,6 +558,7 @@ $(OUT_MP_TEST_WIN32): $(MP_TEST_SRCS) | $(BUILDDIR)
 	@echo "mp_test_win32 build complete -> $(OUT_MP_TEST_WIN32)"
 
 MP_STRESS_SRCS := $(SRCDIR)/mp_stress_test_main.c $(SRCDIR)/mp_port.c \
+                         $(SRCDIR)/scene_objects.c \
                    $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                    $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                    $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(BULLET_SRCS) \

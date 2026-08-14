@@ -24,7 +24,9 @@
  *      node function itself callable from C during evaluation.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include "octree_render.h"
 #include "port/micropython_embed.h"
 #include "py/obj.h"
 #include "py/objlist.h"
@@ -67,6 +69,21 @@ static int call_py_add(mp_obj_t fn, int a, int b, int *out, int *raised) {
 
 static mp_obj_t lookup_global(const char *name) {
     return mp_obj_dict_get(MP_OBJ_FROM_PTR(mp_globals_get()), MP_OBJ_NEW_QSTR(qstr_from_str(name)));
+}
+
+/* Stub -- mp_port.c now links scene_objects.c (Phase 5's phi.delete_
+ * object etc., see mp_port.c's own comment), whose scene_object_delete
+ * references mesh_destroy (octree_render.c's real home, a GL-touching
+ * file this no-GL test has no reason to link -- same "stub the one
+ * referenced symbol rather than pull in the whole GL-touching
+ * translation unit" technique fracture_body_test_main.c already
+ * established). This test never actually calls phi.delete_object, but
+ * the linker still needs a real definition for the symbol scene_
+ * objects.c's translation unit references. Real free(), not a no-op. */
+void mesh_destroy(RenderMesh *m) {
+    if (!m) return;
+    free(m->data);
+    free(m);
 }
 
 int main(void) {

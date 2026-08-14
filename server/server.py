@@ -96,6 +96,25 @@ PKT_ADD_LIGHT_REPLY      = 0x27   # C->S: [req_id:u32 ok:u8 light_id:u32]
 PKT_DELETE_LIGHT_REQUEST = 0x28   # S->C: [req_id:u32 light_id:u32]
 PKT_DELETE_LIGHT_REPLY   = 0x29   # C->S: [req_id:u32 ok:u8]
 
+# Phase 5's real geometry-creation/vertex-editing tools (see client/net.h's
+# matching comment) -- Claude's access here is deliberately read-WRITE too,
+# same explicit project decision as the light/render-settings tools above,
+# extended per later explicit request ("make it so Claude can create
+# geometry and redefine the verts of existing scene geometry").
+PKT_CREATE_MESH_REQUEST        = 0x2A   # S->C: [req_id:u32 x:f32 y:f32 z:f32 vert_count:u16 (vert_count*3)*f32 tri_count:u16 (tri_count*3)*u16]
+PKT_CREATE_MESH_REPLY          = 0x2B   # C->S: [req_id:u32 ok:u8 object_id:u32]
+PKT_SET_VERTICES_REQUEST       = 0x2C   # S->C: [req_id:u32 object_id:u32 vert_count:u16 (vert_count*3)*f32]
+PKT_SET_VERTICES_REPLY         = 0x2D   # C->S: [req_id:u32 ok:u8]
+PKT_DELETE_MESH_OBJECT_REQUEST = 0x2E   # S->C: [req_id:u32 object_id:u32]
+PKT_DELETE_MESH_OBJECT_REPLY   = 0x2F   # C->S: [req_id:u32 ok:u8]
+
+# Same wire-protocol bounds as client/net.h's own PKT_MESH_MAX_VERTS/
+# PKT_MESH_MAX_TRIS -- must match exactly, or a request this server
+# considers valid could get silently refused (or worse, misparsed) by the
+# client's own bounds check.
+PKT_MESH_MAX_VERTS = 2048
+PKT_MESH_MAX_TRIS  = 4096
+
 ASSET_NAME_WIRE_MAX = 63
 ASSET_PATH_WIRE_MAX = 127
 ASSET_TAGS_WIRE_MAX = 95
@@ -203,6 +222,64 @@ def pack_delete_light_request(req_id: int, light_id: int) -> bytes:
     return bytes([PKT_DELETE_LIGHT_REQUEST]) + struct.pack('<II', req_id, light_id)
 
 def _parse_delete_light_reply(payload: bytes):
+    if len(payload) < 5: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    return req_id, payload[4] != 0
+
+# ---------------------------------------------------------------------------
+# Phase 5's geometry-creation/vertex-editing packet encode/decode (see
+# PKT_CREATE_MESH_*/PKT_SET_VERTICES_*/PKT_DELETE_MESH_OBJECT_* above and
+# client/net.h's matching comment) -- same shared req_id/Event pending-
+# reply machinery as the light/render-settings packets just above.
+# ---------------------------------------------------------------------------
+def pack_create_mesh_request(req_id: int, x: float, y: float, z: float,
+                              positions: list[float], indices: list[int]) -> bytes:
+    if len(positions) % 3 != 0:
+        raise ValueError('positions must be a flat x,y,z sequence (length a multiple of 3)')
+    if len(indices) % 3 != 0:
+        raise ValueError('indices must be a flat triangle-triple sequence (length a multiple of 3)')
+    vert_count = len(positions) // 3
+    tri_count = len(indices) // 3
+    if vert_count > PKT_MESH_MAX_VERTS:
+        raise ValueError(f'too many vertices ({vert_count} > {PKT_MESH_MAX_VERTS})')
+    if tri_count > PKT_MESH_MAX_TRIS:
+        raise ValueError(f'too many triangles ({tri_count} > {PKT_MESH_MAX_TRIS})')
+    out = bytearray([PKT_CREATE_MESH_REQUEST])
+    out += struct.pack('<Ifff', req_id, x, y, z)
+    out += struct.pack('<H', vert_count)
+    out += struct.pack(f'<{len(positions)}f', *positions)
+    out += struct.pack('<H', tri_count)
+    out += struct.pack(f'<{len(indices)}H', *indices)
+    return bytes(out)
+
+def _parse_create_mesh_reply(payload: bytes):
+    if len(payload) < 9: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    ok = payload[4] != 0
+    object_id = struct.unpack_from('<I', payload, 5)[0]
+    return req_id, ok, object_id
+
+def pack_set_vertices_request(req_id: int, object_id: int, positions: list[float]) -> bytes:
+    if len(positions) % 3 != 0:
+        raise ValueError('positions must be a flat x,y,z sequence (length a multiple of 3)')
+    vert_count = len(positions) // 3
+    if vert_count > PKT_MESH_MAX_VERTS:
+        raise ValueError(f'too many vertices ({vert_count} > {PKT_MESH_MAX_VERTS})')
+    out = bytearray([PKT_SET_VERTICES_REQUEST])
+    out += struct.pack('<II', req_id, object_id)
+    out += struct.pack('<H', vert_count)
+    out += struct.pack(f'<{len(positions)}f', *positions)
+    return bytes(out)
+
+def _parse_set_vertices_reply(payload: bytes):
+    if len(payload) < 5: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    return req_id, payload[4] != 0
+
+def pack_delete_mesh_object_request(req_id: int, object_id: int) -> bytes:
+    return bytes([PKT_DELETE_MESH_OBJECT_REQUEST]) + struct.pack('<II', req_id, object_id)
+
+def _parse_delete_mesh_object_reply(payload: bytes):
     if len(payload) < 5: return None
     req_id = struct.unpack_from('<I', payload, 0)[0]
     return req_id, payload[4] != 0
@@ -440,6 +517,37 @@ class Client:
         packet = pack_delete_light_request(req_id, light_id)
         return self._send_and_wait(req_id, packet, timeout)
 
+    def create_mesh_object(self, x: float, y: float, z: float,
+                            positions: list[float], indices: list[int], timeout: float = 5.0):
+        """Builds a real MeshObject from scratch in the running client's
+        live scene, from a flat (x,y,z,...) position list and a flat
+        triangle-index list -- no file, no pre-authored asset. Returns
+        (ok, object_id) -- object_id is 0 on failure (bad topology, or
+        the scene is full), or None on timeout/disconnect. Raises
+        ValueError itself (before even talking to the client) if
+        positions/indices are malformed or exceed PKT_MESH_MAX_VERTS/
+        PKT_MESH_MAX_TRIS."""
+        req_id = self._alloc_req_id()
+        packet = pack_create_mesh_request(req_id, x, y, z, positions, indices)
+        return self._send_and_wait(req_id, packet, timeout)
+
+    def set_mesh_vertices(self, object_id: int, positions: list[float], timeout: float = 5.0):
+        """Redefines EVERY vertex position of an existing object's live
+        geometry -- same vertex COUNT as whatever's already there (this
+        rewrites positions, not topology). Returns True/False (False if
+        no such object exists, it has no editable geometry, or the count
+        doesn't match), or None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        packet = pack_set_vertices_request(req_id, object_id, positions)
+        return self._send_and_wait(req_id, packet, timeout)
+
+    def delete_mesh_object(self, object_id: int, timeout: float = 5.0):
+        """Returns True/False (False if no object with that id exists), or
+        None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        packet = pack_delete_mesh_object_request(req_id, object_id)
+        return self._send_and_wait(req_id, packet, timeout)
+
     def _handle_chat(self, user_text: str):
         """Runs on its own thread (spawned by _on_message on PKT_CHAT_MSG)
         since a real Anthropic round trip -- itself potentially blocking on
@@ -463,16 +571,17 @@ class Client:
                 return '(the client did not respond to the scene-state request in time -- it may be disconnected or busy)'
             return result
 
-        # Read-write light/render-settings tools (Phase 3, see phi.md) --
-        # unlike the two read-only tools above, these actually mutate the
-        # live client's scene. Explicit project decision: Claude's access
-        # to lights/render settings is read-write; it still can never post
+        # Read-write light/render-settings/mesh-geometry tools (Phase 3
+        # and Phase 5, see phi.md) -- unlike the two read-only tools
+        # above, these actually mutate the live client's scene. Explicit
+        # project decision: Claude's access to lights/render settings/
+        # mesh geometry is read-write (mesh geometry per later explicit
+        # request -- "make it so Claude can create geometry and redefine
+        # the verts of existing scene geometry"); it still can never post
         # a chat message AS the user (PKT_CHAT_MSG only ever originates
         # from the real human client-side, see chat.c) and has no access
-        # to anything beyond lights/render settings/assets/scene-state --
-        # no object/mesh mutation tool is defined here even though the
-        # underlying wire protocol (scene_target.c's resolver) could
-        # technically carry one.
+        # to the Asset Browser's library beyond the read-only get_asset_
+        # list.
         def tool_add_light(input_):
             light_type = input_.get('type', 'point')
             if light_type not in ('point', 'sun', 'spot', 'area'):
@@ -510,6 +619,46 @@ class Client:
                 return '(the client did not respond in time -- it may be disconnected or busy)'
             return 'ok' if result else 'failed to set the sample count'
 
+        # Phase 5's real geometry-creation/vertex-editing tools (see
+        # phi.md) -- per later explicit request, mesh objects are no
+        # longer read-only from chat either. create_mesh_object/
+        # set_mesh_vertices/delete_mesh_object mutate the running
+        # client's live scene the same real way add_light/set_light_
+        # property/delete_light already do.
+        def tool_create_mesh_object(input_):
+            x = float(input_.get('x', 0.0)); y = float(input_.get('y', 0.0)); z = float(input_.get('z', 0.0))
+            positions = [float(v) for v in input_['positions']]
+            indices = [int(v) for v in input_['indices']]
+            try:
+                result = self.create_mesh_object(x, y, z, positions, indices)
+            except ValueError as e:
+                return f'invalid request -- {e}'
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            ok, object_id = result
+            return f'created MeshObject id={object_id}' if ok else 'failed -- bad mesh topology, or the scene is full'
+
+        def tool_set_mesh_vertices(input_):
+            object_id = int(input_['object_id'])
+            positions = [float(v) for v in input_['positions']]
+            try:
+                result = self.set_mesh_vertices(object_id, positions)
+            except ValueError as e:
+                return f'invalid request -- {e}'
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            return 'ok' if result else (
+                f'failed -- either no MeshObject with id {object_id} exists, or the position count doesn\'t '
+                'match its existing vertex count (use get_scene_state\'s objects[].vert_count to check first)'
+            )
+
+        def tool_delete_mesh_object(input_):
+            object_id = int(input_['object_id'])
+            result = self.delete_mesh_object(object_id)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            return 'ok' if result else f'failed -- no MeshObject with id {object_id}'
+
         tools = [
             {
                 'name': 'get_asset_list',
@@ -524,15 +673,21 @@ class Client:
                 'name': 'get_scene_state',
                 'description': (
                     "Query the LIVE state of the specific running editor "
-                    "client that sent this chat message: the current test "
-                    "MeshObject's position/orientation/is_static, whether "
-                    "it has a physics body and its velocity if so, the "
-                    "loaded mesh's vertex/face counts, the currently "
-                    "ray-picked face's PBR material (if any face is "
-                    "selected), and the physics world's gravity. This is "
-                    "real introspection of a running process, not a cached "
-                    "snapshot -- use it whenever the user asks about the "
-                    "current state of their scene rather than guessing."
+                    "client that sent this chat message: an 'objects' "
+                    "array (every MeshObject currently in the scene -- id, "
+                    "position/orientation/is_static, vertex/face counts, "
+                    "whether it has a physics body and its velocity if "
+                    "so), which object_id is currently selected, the "
+                    "currently-selected object's ray-picked face's PBR "
+                    "material (if any face is selected), the live 'lights' "
+                    "array, render settings, and the physics world's "
+                    "gravity. This is real introspection of a running "
+                    "process, not a cached snapshot -- use it whenever the "
+                    "user asks about the current state of their scene "
+                    "rather than guessing, and ALWAYS call it before "
+                    "create_mesh_object/set_mesh_vertices/delete_mesh_"
+                    "object if you don't already know the relevant "
+                    "object_id or vertex count."
                 ),
                 'input_schema': {'type': 'object', 'properties': {}},
             },
@@ -607,6 +762,62 @@ class Client:
                     'required': ['samples'],
                 },
             },
+            {
+                'name': 'create_mesh_object',
+                'description': (
+                    "Build a real MeshObject from scratch in the running "
+                    "client's live scene -- no file, no pre-authored "
+                    "asset. positions is a flat [x0,y0,z0,x1,y1,z1,...] "
+                    "list; indices is a flat triangle-list "
+                    "[a0,b0,c0,a1,b1,c1,...] of indices INTO positions "
+                    "(0-based, 3 per triangle). x/y/z place the new "
+                    "object's origin in world space. Capped at 2048 "
+                    "vertices / 4096 triangles per call -- for anything "
+                    "bigger, tell the user to author it as a real asset "
+                    "and load it via the Asset Browser instead. Returns "
+                    "the new object's id, needed for set_mesh_vertices/"
+                    "delete_mesh_object afterward."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {
+                        'x': {'type': 'number'}, 'y': {'type': 'number'}, 'z': {'type': 'number'},
+                        'positions': {'type': 'array', 'items': {'type': 'number'}},
+                        'indices': {'type': 'array', 'items': {'type': 'integer'}},
+                    },
+                    'required': ['positions', 'indices'],
+                },
+            },
+            {
+                'name': 'set_mesh_vertices',
+                'description': (
+                    "Redefine EVERY vertex position of an existing "
+                    "MeshObject's live geometry in the running client's "
+                    "scene -- same flat [x0,y0,z0,x1,y1,z1,...] shape "
+                    "create_mesh_object uses. Must supply the SAME number "
+                    "of vertices the object already has (check get_scene_"
+                    "state's objects[].vert_count first) -- this moves "
+                    "existing vertices, it does not add/remove them or "
+                    "change topology (use create_mesh_object for that)."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {
+                        'object_id': {'type': 'integer'},
+                        'positions': {'type': 'array', 'items': {'type': 'number'}},
+                    },
+                    'required': ['object_id', 'positions'],
+                },
+            },
+            {
+                'name': 'delete_mesh_object',
+                'description': "Removes a MeshObject from the running client's live scene, by id.",
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {'object_id': {'type': 'integer'}},
+                    'required': ['object_id'],
+                },
+            },
         ]
         dispatch = {
             'get_asset_list': tool_get_asset_list,
@@ -615,6 +826,9 @@ class Client:
             'set_light_property': tool_set_light_property,
             'delete_light': tool_delete_light,
             'set_render_samples': tool_set_render_samples,
+            'create_mesh_object': tool_create_mesh_object,
+            'set_mesh_vertices': tool_set_mesh_vertices,
+            'delete_mesh_object': tool_delete_mesh_object,
         }
         system = (
             "You are Claude, embedded as a first-class participant inside "
@@ -628,13 +842,20 @@ class Client:
             "conversation is attached to -- use them when the user asks "
             "about the current scene/object state rather than guessing or "
             "making something up. You can also ACT: add_light/"
-            "set_light_property/delete_light/set_render_samples actually "
-            "change the running client's live scene, not just describe it "
-            "-- use them freely when the user asks you to set up lighting "
-            "or adjust render settings, you don't need to ask permission "
-            "first for these specifically. Everything else (assets, mesh "
-            "objects) is still read-only from here. Keep replies concise: "
-            "this renders in a small in-editor chat box, not a document."
+            "set_light_property/delete_light/set_render_samples/"
+            "create_mesh_object/set_mesh_vertices/delete_mesh_object "
+            "actually change the running client's live scene, not just "
+            "describe it -- use them freely when the user asks you to set "
+            "up lighting, adjust render settings, or create/edit "
+            "geometry, you don't need to ask permission first for these "
+            "specifically. create_mesh_object builds real geometry from "
+            "positions+indices you compute yourself (e.g. for a "
+            "procedural shape the user describes) -- call get_scene_state "
+            "first if you need an existing object's id or vertex count "
+            "before editing it with set_mesh_vertices. Assets (the Asset "
+            "Browser's library) are still read-only from here. Keep "
+            "replies concise: this renders in a small in-editor chat box, "
+            "not a document."
         )
         try:
             reply = model_display_name(DEFAULT_MODEL) + ': ' + run_tool_loop(system, user_text, tools, dispatch)
@@ -731,6 +952,30 @@ class Client:
             parsed = _parse_delete_light_reply(payload)
             if parsed is None:
                 log.info(f'Client {self.pid}: malformed PKT_DELETE_LIGHT_REPLY')
+            else:
+                req_id, ok = parsed
+                self._resolve_pending(req_id, ok)
+
+        elif t == PKT_CREATE_MESH_REPLY:
+            parsed = _parse_create_mesh_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_CREATE_MESH_REPLY')
+            else:
+                req_id, ok, object_id = parsed
+                self._resolve_pending(req_id, (ok, object_id))
+
+        elif t == PKT_SET_VERTICES_REPLY:
+            parsed = _parse_set_vertices_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_SET_VERTICES_REPLY')
+            else:
+                req_id, ok = parsed
+                self._resolve_pending(req_id, ok)
+
+        elif t == PKT_DELETE_MESH_OBJECT_REPLY:
+            parsed = _parse_delete_mesh_object_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_DELETE_MESH_OBJECT_REPLY')
             else:
                 req_id, ok = parsed
                 self._resolve_pending(req_id, ok)

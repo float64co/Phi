@@ -16,6 +16,7 @@
 #include "render_settings.h"
 #include "scene_target.h"
 #include "fracture_body.h"
+#include "scene_objects.h"
 #include "path_tracer.h"
 #include "skinned_mesh_object.h"
 #include "ragdoll.h"
@@ -50,24 +51,58 @@
 static Renderer    *g_renderer = NULL;
 static GBuffer      *g_gbuf     = NULL;  /* deferred renderer, see gbuffer.h — both build targets now */
 
-/* Phase 1 foundation test object: loads assets/cube.gltf (a hand-authored
- * unit cube, see the asset's own generator script) through the glTF ->
- * half-edge -> RenderMesh pipeline (halfedge_gltf.c, meshobject.c) at
- * startup and renders it as a fixed, static, non-interactive object —
- * proving the data actually flows into the live scene. No editor
- * interaction, UI, or physics yet; see phi.md's Phase 1 section. */
-static MeshObject   g_test_mesh_object = {0};
-static int          g_test_mesh_loaded = 0;
+/* Real multi-object scene graph (client/scene_objects.h) -- replaced the
+ * single g_test_mesh_object slot every earlier phase this session built
+ * around, per explicit request ("make it so the scene can have multiple
+ * meshes at the same time"). Any number (up to SCENE_MAX_OBJECTS) of
+ * independently loaded/created/positioned MeshObjects can now be live at
+ * once -- scene_objects.c owns the actual registry; main.c drives it the
+ * same way it already drives light.c's own registry (spawn/delete/find/
+ * get_all, no fixed-slot assumptions anywhere new code touches). Loading
+ * a mesh (Asset Browser, File > Load, Add > Mesh Object) now ADDS a new
+ * object rather than replacing whatever was already there -- deliberately
+ * allowed to spawn overlapping/clipping through existing geometry (no
+ * collision-free placement search), separable afterward with G, per
+ * explicit request. */
+static void spawn_test_mesh_object(void);   /* defined below, needed here as the startup call site */
+
+/* Whichever MeshObject the UI's shared selection currently points at, or
+ * NULL if that's a Light or nothing at all -- scans scene_objects.c's
+ * registry fresh each call (SCENE_MAX_OBJECTS=32 is cheap to scan; no
+ * caching needed, same reasoning resolve_xform_target below already
+ * relies on: selection can't change while anything that reads this is
+ * mid-operation). The single source of truth for "the mesh object this
+ * click/keystroke/context-menu-row is about" -- replaces the old fixed
+ * g_test_mesh_object pointer everywhere one was assumed. */
+static MeshObject *selected_mesh_object(void) {
+    unsigned int sel = ui_get_selected_object();
+    if (sel < 4000u || sel >= 5000u) return NULL;   /* MeshObjects=4000+id, see ui.h's own range comment */
+    return scene_object_find((int)(sel - 4000u));
+}
+
 /* True once fracture_body_activate has produced at least one live
- * fragment (see fracture_body.h) -- the ORIGINAL g_test_mesh_object
- * still exists (its hem/render_mesh are untouched, so nothing else that
- * assumes g_test_mesh_loaded breaks), it just stops being drawn/picked
- * while its shattered fragments are what's actually simulated and
- * visible instead. Cleared back to 0 by CTX_ACTION_DELETE (deleting the
- * fracture-source object also clears its fragments) -- there's no
- * "un-shatter" action, fracture is one-way once activated, matching
- * this pass's own "real but not Blender-grade polish" scope. */
-static int          g_fracture_active = 0;
+ * fragment (see fracture_body.h) FROM g_fracture_source_id specifically
+ * -- fracture still only ever affects ONE object at a time (fracture_
+ * body.c's own registry is a separate, smaller, bounded thing, not
+ * generalized to N simultaneous fracture sources this pass, a real,
+ * deliberate scope limit matching that module's own established scope).
+ * The SOURCE object itself still exists (its hem/render_mesh untouched)
+ * but stops being drawn/picked while its fragments are what's actually
+ * simulated/visible -- every OTHER live scene object is completely
+ * unaffected by one object being fractured. Cleared back to 0 whenever
+ * the source object specifically is deleted -- there's no "un-shatter"
+ * action, fracture is one-way once activated. */
+static int g_fracture_active = 0;
+static int g_fracture_source_id = -1;
+/* Which object CTX_ACTION_SAVE_AS_ASSET/TOP_ACTION_FILE_SAVE most
+ * recently began a create-flow for, by id -- the actual upload happens
+ * later, once the Asset Browser's edit form is submitted (g_ab.
+ * create_requested), by which point selection could have changed;
+ * remembered by id (re-resolved via scene_object_find at upload time,
+ * not a raw pointer -- the object could in principle be deleted in
+ * between) rather than assuming "whatever's selected now" is still the
+ * same thing that was being saved. -1 = nothing pending. */
+static int g_save_as_asset_object_id = -1;
 /* Which hem face (see meshobject_ray_pick_face) was under the cursor the
  * moment the Scene context menu was last opened with the test object
  * selected -- -1 if none/not applicable. Extrude/Inset/Loop Cut menu rows
@@ -155,116 +190,99 @@ static Vec3f g_cam_drag_start_pivot = {0.0f, 0.0f, 0.0f};
 static PhiPhysicsWorld *g_phys_world      = NULL;
 static PhiRigidBody    *g_ground_phys_body = NULL;
 
-/* Loads any glTF/GLB file into the one test-object slot -- generalized
- * from what used to be spawn_test_mesh_object()'s inline body, once the
- * Asset Browser's "Load" button (see ui.h's AssetBrowserState) needed to
- * load an arbitrary server-indexed asset into the same slot, not just the
- * hardcoded assets/cube.gltf. `scale` bakes a uniform scale directly into
- * the flattened vertex positions (no scale field on MeshObject yet, see
- * meshobject.h) -- 16.0 for cube.gltf (a unit, half-extent-0.5 cube that
- * needs scaling up to read at the scene's existing proportions), 1.0 for
- * assets authored at that scale already (see tools/gen_test_assets.py).
- * Frees whatever was previously loaded first -- unlike the old spawn-once
- * call site, Load can now be clicked while something is already in the
- * slot, and letting that leak the old render_mesh/hem would be a real
- * bug, not a hypothetical one. Returns 1 on success, 0 if the file
- * couldn't be loaded (slot left untouched). */
-static int load_mesh_object_from_path(const char *path, float scale) {
+/* Loads any glTF/GLB file as a NEW scene object (scene_objects.h) at
+ * `position` -- generalized from the old spawn_test_mesh_object()'s
+ * inline body, which used to overwrite the one fixed slot; now every
+ * call ADDS, real multi-object support, per explicit request. `scale`
+ * bakes a uniform scale directly into the flattened vertex positions (no
+ * scale field on MeshObject yet, see meshobject.h) -- 16.0 for
+ * cube.gltf (a unit, half-extent-0.5 cube that needs scaling up to read
+ * at the scene's existing proportions), 1.0 for assets authored at that
+ * scale already (see tools/gen_test_assets.py). Deliberately does NOT
+ * check for/avoid overlapping existing geometry -- allowed to clip
+ * through whatever's already there (per explicit request), separable
+ * afterward with G (see resolve_xform_target/selected_mesh_object).
+ * Returns the new object (already selected, so it's immediately
+ * grabbable) on success, NULL if the file couldn't be loaded or the
+ * scene registry is already full (SCENE_MAX_OBJECTS). */
+static MeshObject *add_mesh_object_from_path(const char *path, float scale, Vec3f position) {
     HalfEdgeMesh *hem = halfedge_load_gltf(path);
     if (!hem) {
         printf("[main] failed to load %s — MeshObject load skipped\n", path);
-        return 0;
+        return NULL;
     }
-    if (g_test_mesh_loaded) {
-        mesh_destroy(g_test_mesh_object.render_mesh);
-        halfedge_destroy(g_test_mesh_object.hem);
-        if (g_test_mesh_object.phys_body) {
-            phi_physics_remove_body(g_phys_world, g_test_mesh_object.phys_body);
-            g_test_mesh_object.phys_body = NULL;
-        }
-        /* Loading a new mesh over the slot replaces whatever fracture
-         * fragments the OLD one might have been shattered into (see
-         * g_fracture_active's own comment) -- same reasoning
-         * delete_test_mesh_object clears them too. */
-        if (g_fracture_active) {
-            fracture_body_clear(g_phys_world);
-            g_fracture_active = 0;
-        }
+    MeshObject *obj = scene_object_add();
+    if (!obj) {
+        printf("[main] failed to load %s — scene is full (SCENE_MAX_OBJECTS)\n", path);
+        halfedge_destroy(hem);
+        return NULL;
     }
-    g_test_mesh_object.id = 1;
-    g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
-    g_test_mesh_object.orientation = quat_identity();
-    g_test_mesh_object.scale = (Vec3f){1.0f, 1.0f, 1.0f};
-    g_test_mesh_object.is_static = 1;
-    g_test_mesh_object.render_mesh = mesh_create();
+    obj->position = position;
+    obj->orientation = quat_identity();
+    obj->scale = (Vec3f){1.0f, 1.0f, 1.0f};
+    obj->is_static = 1;
+    obj->render_mesh = mesh_create();
     if (scale != 1.0f) {
         for (int i = 0; i < hem->vert_count; i++)
             for (int a = 0; a < 3; a++)
                 hem->verts[i].pos[a] *= scale;
     }
-    meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, hem);
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, hem);
     /* Kept alive (not halfedge_destroy'd) as the object's live editable
      * representation -- extrude/inset/loop-cut (mesh_edit.c) mutate this
      * in place and re-flatten, so it needs to survive past this one
      * initial build the way it used to only ever be used for. */
-    g_test_mesh_object.hem = hem;
-    g_test_mesh_loaded = 1;
-    printf("[main] loaded %s as MeshObject: %d triangles\n",
-           path, g_test_mesh_object.render_mesh->count / 3);
-    return 1;
+    obj->hem = hem;
+    ui_set_selected_object(4000u + (unsigned int)obj->id);
+    printf("[main] loaded %s as MeshObject #%d: %d triangles\n",
+           path, obj->id, obj->render_mesh->count / 3);
+    return obj;
 }
 
-/* Loads assets/cube.gltf into g_test_mesh_object -- factored out so the
- * scene right-click context menu's "Add > Mesh Object" (see
- * CTX_ACTION_ADD_MESH below) can reuse it instead of duplicating the
- * glTF -> half-edge -> RenderMesh pipeline call sequence. There's still
- * only ever one test-object slot (see g_test_mesh_object's own comment
- * above) — this spawns/reloads that one slot, it doesn't add a new
- * independent object to a list, since no such list exists yet. */
+/* Loads assets/cube.gltf as a new scene object at the scene's original
+ * startup position -- factored out so the scene right-click context
+ * menu's "Add > Mesh Object" (see CTX_ACTION_ADD_MESH below) can reuse
+ * the same glTF -> half-edge -> RenderMesh pipeline call (that row uses
+ * g_cam_pivot instead, the same "spawn at the camera's own orbit pivot"
+ * convention Add Light already established, so a deliberately-added
+ * object lands somewhere the user's actually looking at). */
 static void spawn_test_mesh_object(void) {
-    load_mesh_object_from_path("assets/cube.gltf", 16.0f);
+    add_mesh_object_from_path("assets/cube.gltf", 16.0f, (Vec3f){128.0f, 100.0f, 90.0f});
 }
 
-/* Frees the one test-object slot's GPU-side mesh and marks it unloaded —
- * scene_content_cb below already checks g_test_mesh_loaded before drawing
- * it, so clearing that flag is what actually makes it disappear. Clears
- * the UI's own selection too if it was pointing at this object, so
- * Properties doesn't keep showing a readout for something that no longer
- * exists. */
-static void delete_test_mesh_object(void) {
-    if (!g_test_mesh_loaded) return;
-    if (ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
+/* Frees obj's GPU-side mesh/physics body and removes it from the scene
+ * registry (scene_objects.h). Clears the UI's own selection first if it
+ * was pointing at this object, so Properties doesn't keep showing a
+ * readout for something that no longer exists. Deleting the fracture
+ * SOURCE object also clears whatever it was shattered into (fracture_
+ * body.h) -- there's no meaning to keeping a fragment swarm alive once
+ * the object it came from is gone; deleting any OTHER object leaves an
+ * active fracture completely untouched (see g_fracture_source_id). */
+static void delete_mesh_object(MeshObject *obj) {
+    if (!obj) return;
+    if (ui_get_selected_object() == 4000u + (unsigned int)obj->id) {
         ui_set_selected_object(0xFFFFFFFFu);
     }
-    mesh_destroy(g_test_mesh_object.render_mesh);
-    g_test_mesh_object.render_mesh = NULL;
-    halfedge_destroy(g_test_mesh_object.hem);
-    g_test_mesh_object.hem = NULL;
-    if (g_test_mesh_object.phys_body) {
-        phi_physics_remove_body(g_phys_world, g_test_mesh_object.phys_body);
-        g_test_mesh_object.phys_body = NULL;
-    }
-    /* Deleting the fracture SOURCE object also clears whatever it was
-     * shattered into (fracture_body.h) -- there's no meaning to keeping
-     * a fragment swarm alive once the object it came from is gone. */
-    if (g_fracture_active) {
+    if (g_fracture_active && g_fracture_source_id == obj->id) {
         fracture_body_clear(g_phys_world);
         g_fracture_active = 0;
+        g_fracture_source_id = -1;
     }
-    g_test_mesh_loaded = 0;
+    int id = obj->id;
+    scene_object_delete(obj, g_phys_world);
     g_edit_face = -1;
-    printf("[main] deleted MeshObject\n");
+    printf("[main] deleted MeshObject #%d\n", id);
 }
 
-/* Re-flattens g_test_mesh_object.hem into its render_mesh after a mesh
- * edit op mutates it (extrude/inset/loop-cut, see mesh_edit.c), and prints
- * a before/after triangle count -- the topology sanity check this loop's
- * own verification standard calls for (matching the same "real, checked
+/* Re-flattens obj->hem into its render_mesh after a mesh edit op mutates
+ * it (extrude/inset/loop-cut, see mesh_edit.c), and prints a before/after
+ * triangle count -- the topology sanity check this loop's own
+ * verification standard calls for (matching the same "real, checked
  * behavior over cosmetic-only claims" bar the ray-picking/gizmo work
  * already established this session), not just "it compiled". */
-static void rebuild_test_mesh_render(const char *op_name, int tris_before) {
-    meshobject_build_render_mesh_from_halfedge(g_test_mesh_object.render_mesh, g_test_mesh_object.hem);
-    int tris_after = g_test_mesh_object.render_mesh->count / 3;
+static void rebuild_mesh_render(MeshObject *obj, const char *op_name, int tris_before) {
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    int tris_after = obj->render_mesh->count / 3;
     printf("[main] mesh edit '%s': %d -> %d triangles\n", op_name, tris_before, tris_after);
 }
 
@@ -274,9 +292,8 @@ static void rebuild_test_mesh_render(const char *op_name, int tris_before) {
  * gbuffer_render_shadow_map(). Used to also draw Qek's octree world mesh,
  * ground plane, players, and rockets, plus the octree carve-editor
  * overlay — all gone along with that code (see phi.md's Phase 1 status,
- * "Client/server model"). The MeshObject + gizmo below are the only scene
- * content that exists right now. */
-static int selected_is_test_mesh(void);  /* defined below, needed here for the gizmo draw */
+ * "Client/server model"). Every live MeshObject (scene_objects.h) + the
+ * gizmo are the scene content that exists now. */
 
 /* Ground-aligned reference grid -- centered/sized to match
  * g_ground_phys_body exactly (position (128,40,90), half-extents
@@ -301,11 +318,21 @@ static void draw_scene_grid(void) {
 static void scene_content_cb(void *userdata) {
     (void)userdata;
     draw_scene_grid();
-    /* Once fractured, the fragments (drawn below) ARE the object visually
-     * -- drawing the still-intact original on top would just show a
-     * whole cube overlapping its own shattered pieces. */
-    if (g_test_mesh_loaded && !g_fracture_active) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
-    if (selected_is_test_mesh() && !g_fracture_active) gizmo_draw(g_renderer, g_test_mesh_object.position);
+    /* Every live scene object -- skipping only the current fracture
+     * SOURCE (once fractured, its fragments, drawn below via fracture_
+     * body_sync_and_draw_all, ARE that one object visually; every OTHER
+     * object draws completely normally regardless of fracture state,
+     * see g_fracture_source_id's own comment). */
+    MeshObject *objects[SCENE_MAX_OBJECTS];
+    int n_objects = scene_object_get_all(objects);
+    for (int i = 0; i < n_objects; i++) {
+        if (g_fracture_active && objects[i]->id == g_fracture_source_id) continue;
+        renderer_draw_mesh_object(g_renderer, objects[i]);
+    }
+    MeshObject *sel = selected_mesh_object();
+    if (sel && !(g_fracture_active && sel->id == g_fracture_source_id)) {
+        gizmo_draw(g_renderer, sel->position);
+    }
     renderer_draw_lights(g_renderer);
     fracture_body_sync_and_draw_all(g_renderer);
     if (g_skinned_test_loaded) renderer_draw_skinned_mesh(g_renderer, &g_skinned_test_obj, SKINNED_TEST_ID_BASE + 1u);
@@ -335,16 +362,20 @@ static void scene_content_cb(void *userdata) {
  * themselves failing) -- printed to stdout either way so both the top-
  * menu action and the Python binding get real user-visible feedback. */
 static int render_still_frame_to_disk(char *out_path, size_t out_path_cap) {
-    const MeshObject *objs[1 + PHI_MAX_FRACTURE_BODIES];
+    const MeshObject *objs[SCENE_MAX_OBJECTS + PHI_MAX_FRACTURE_BODIES];
     int n_objs = 0;
+    MeshObject *scene_objs[SCENE_MAX_OBJECTS];
+    int n_scene = scene_object_get_all(scene_objs);
+    for (int i = 0; i < n_scene && n_objs < (int)(sizeof(objs) / sizeof(objs[0])); i++) {
+        if (g_fracture_active && scene_objs[i]->id == g_fracture_source_id) continue;   /* replaced by its fragments below */
+        objs[n_objs++] = scene_objs[i];
+    }
     if (g_fracture_active) {
         int fc = fracture_body_count();
         for (int i = 0; i < fc && n_objs < (int)(sizeof(objs) / sizeof(objs[0])); i++) {
             const MeshObject *o = fracture_body_get_object(i);
             if (o) objs[n_objs++] = o;
         }
-    } else if (g_test_mesh_loaded) {
-        objs[n_objs++] = &g_test_mesh_object;
     }
 
     PhiLight *lights[PHI_MAX_LIGHTS];
@@ -515,15 +546,6 @@ static int compute_scene_ray(float scene_x, float scene_y, float scene_w, float 
     return 1;
 }
 
-/* Whether the currently-selected object (via the UI's shared selection
- * state) is the one test-object slot — the gizmo only ever has this one
- * object to attach to right now, same "one slot, not a general list"
- * honesty already established for Add/Delete. */
-static int selected_is_test_mesh(void) {
-    return g_test_mesh_loaded &&
-           ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id;
-}
-
 /* Light objects share the same ui_get_selected_object() selection slot
  * MeshObjects use, in a separate id range (5000+id vs. MeshObjects'
  * 4000+id -- see ui.h's own comment on the convention) so there's still
@@ -555,10 +577,11 @@ static PhiLight *selected_light(void) {
  * the three out-pointers set if there's a valid target for `kind`, 0
  * (pointers untouched) otherwise. */
 static int resolve_xform_target(TransformOpKind kind, Vec3f **out_position, Quat **out_orientation, Vec3f **out_scale) {
-    if (selected_is_test_mesh()) {
-        *out_position = &g_test_mesh_object.position;
-        *out_orientation = &g_test_mesh_object.orientation;
-        *out_scale = &g_test_mesh_object.scale;
+    MeshObject *obj = selected_mesh_object();
+    if (obj) {
+        *out_position = &obj->position;
+        *out_orientation = &obj->orientation;
+        *out_scale = &obj->scale;
         return 1;
     }
     PhiLight *l = selected_light();
@@ -578,7 +601,7 @@ static int resolve_xform_target(TransformOpKind kind, Vec3f **out_position, Quat
  * comment) so it's cleared on every transition, not just Object-mode picks. */
 static void toggle_editor_mode(void) {
     if (g_editor_mode == EDITOR_MODE_OBJECT) {
-        if (!selected_is_test_mesh()) {
+        if (!selected_mesh_object()) {
             printf("[main] Enter Edit Mode: no mesh object selected\n");
             return;
         }
@@ -592,12 +615,11 @@ static void toggle_editor_mode(void) {
 /* Ray-vs-mesh picking, plus gizmo handle priority: if the selected
  * object's translate gizmo is showing, a click on one of its handles
  * begins a drag instead of re-picking — grabbing the gizmo must win over
- * whatever's directly behind it. Otherwise tests against
- * g_test_mesh_object's real triangle data (meshobject.c's
- * meshobject_ray_pick_face, Möller–Trumbore, not a bounding-box guess); a
- * hit selects (same 4000+id convention Outliner/gbuffer picking already
- * use), a miss deselects, matching normal editor click-away-to-deselect
- * behavior. */
+ * whatever's directly behind it. Otherwise tests EVERY live scene object's
+ * real triangle data (meshobject.c's meshobject_ray_pick_face, Möller–
+ * Trumbore, not a bounding-box guess), nearest hit wins; a hit selects
+ * (same 4000+id convention Outliner/gbuffer picking already use), a miss
+ * deselects, matching normal editor click-away-to-deselect behavior. */
 static void try_pick_object(float scene_x, float scene_y, float scene_w, float scene_h, int click_x, int click_y) {
     Vec3f origin, dir;
     if (!compute_scene_ray(scene_x, scene_y, scene_w, scene_h, click_x, click_y, &origin, &dir)) return;
@@ -609,8 +631,10 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
          * object" invariant. A miss just clears the face selection, same
          * as clicking empty space in Blender's edit mode (does NOT kick
          * back to Object mode or deselect the object). */
+        MeshObject *sel = selected_mesh_object();
         float t; int face;
-        if (g_test_mesh_loaded && !g_fracture_active && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
+        if (sel && !(g_fracture_active && sel->id == g_fracture_source_id) &&
+            meshobject_ray_pick_face(sel, origin, dir, &t, &face)) {
             g_edit_face = face;
         } else {
             g_edit_face = -1;
@@ -620,35 +644,45 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
 
     /* Object mode: gizmo handle priority, then whole-object select/
      * deselect -- no face-level state (g_edit_face is Edit-mode-only from
-     * here on, see its own comment). Once fractured, the original
-     * object's own hem/render_mesh still exist (see g_fracture_active's
-     * own comment) but are no longer meant to be pickable -- its
-     * fragments aren't first-class pickable objects either (see
-     * fracture_body.h's own scope note), so a click where the shattered
-     * object used to be simply misses/deselects, same as clicking any
-     * other empty space. */
-    if (!g_fracture_active && selected_is_test_mesh()) {
-        GizmoAxis axis = gizmo_pick_handle(g_test_mesh_object.position, origin, dir);
+     * here on, see its own comment). Once fractured, the source object's
+     * own hem/render_mesh still exist (see g_fracture_source_id's own
+     * comment) but are no longer meant to be pickable -- its fragments
+     * aren't first-class pickable objects either (see fracture_body.h's
+     * own scope note), so a click where the shattered object used to be
+     * simply misses/deselects, same as clicking any other empty space. */
+    MeshObject *cur_sel = selected_mesh_object();
+    if (cur_sel && !(g_fracture_active && cur_sel->id == g_fracture_source_id)) {
+        GizmoAxis axis = gizmo_pick_handle(cur_sel->position, origin, dir);
         if (axis != GIZMO_AXIS_NONE) {
-            gizmo_begin_drag(axis, g_test_mesh_object.position, origin, dir);
+            gizmo_begin_drag(axis, cur_sel->position, origin, dir);
             return;
         }
     }
 
-    /* Whole-object select: tests both the mesh and every live light,
-     * nearest hit wins (compares real ray t, same "nearest hit wins"
-     * contract meshobject_ray_pick_face and light_ray_pick both already
-     * follow) -- a light in front of the mesh from this angle should win
-     * the pick, and vice versa, not "mesh always checked first". */
-    float mesh_t; int face;
-    int mesh_hit = g_test_mesh_loaded && !g_fracture_active &&
-                   meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &mesh_t, &face);
+    /* Whole-object select: tests every live MeshObject and every live
+     * light, nearest hit wins (compares real ray t, same "nearest hit
+     * wins" contract meshobject_ray_pick_face and light_ray_pick both
+     * already follow) -- a light or object in front of others from this
+     * angle should win the pick, not "objects always checked first" or
+     * "first object in the registry always wins". */
+    MeshObject *objects[SCENE_MAX_OBJECTS];
+    int n_objects = scene_object_get_all(objects);
+    MeshObject *best_obj = NULL;
+    float best_t = 0.0f;
+    for (int i = 0; i < n_objects; i++) {
+        if (g_fracture_active && objects[i]->id == g_fracture_source_id) continue;
+        float t; int face;
+        if (meshobject_ray_pick_face(objects[i], origin, dir, &t, &face)) {
+            if (!best_obj || t < best_t) { best_obj = objects[i]; best_t = t; }
+        }
+    }
+
     float light_t;
     PhiLight *hit_light = light_ray_pick(origin, dir, &light_t);
 
     g_edit_face = -1;
-    if (mesh_hit && (!hit_light || mesh_t <= light_t)) {
-        ui_set_selected_object(4000u + (unsigned int)g_test_mesh_object.id);
+    if (best_obj && (!hit_light || best_t <= light_t)) {
+        ui_set_selected_object(4000u + (unsigned int)best_obj->id);
     } else if (hit_light) {
         ui_set_selected_object(LIGHT_ID_BASE + (unsigned int)hit_light->id);
     } else {
@@ -683,13 +717,21 @@ static void main_loop(void *userdata) {
      * activation, which spawns SEPARATE capsule bodies -- see ragdoll.h --
      * rather than attaching one to this object directly). */
     if (g_skinned_test_loaded) skinned_mesh_object_update(&g_skinned_test_obj, dt);
-    if (g_test_mesh_loaded && g_test_mesh_object.phys_body) {
-        float orientation[4];
-        phi_physics_get_transform(g_test_mesh_object.phys_body, &g_test_mesh_object.position, orientation);
-        g_test_mesh_object.orientation.x = orientation[0];
-        g_test_mesh_object.orientation.y = orientation[1];
-        g_test_mesh_object.orientation.z = orientation[2];
-        g_test_mesh_object.orientation.w = orientation[3];
+    /* Syncs EVERY live scene object that has a physics body (most don't --
+     * phys_body is NULL by default, see meshobject.h -- so this loop is a
+     * no-op read for the common case), not just one fixed slot. */
+    {
+        MeshObject *objects[SCENE_MAX_OBJECTS];
+        int n_objects = scene_object_get_all(objects);
+        for (int i = 0; i < n_objects; i++) {
+            if (!objects[i]->phys_body) continue;
+            float orientation[4];
+            phi_physics_get_transform(objects[i]->phys_body, &objects[i]->position, orientation);
+            objects[i]->orientation.x = orientation[0];
+            objects[i]->orientation.y = orientation[1];
+            objects[i]->orientation.z = orientation[2];
+            objects[i]->orientation.w = orientation[3];
+        }
     }
 
     /* --- UI layout + click routing --- ui_layout() needs to run before
@@ -754,7 +796,7 @@ static void main_loop(void *userdata) {
             int hovering_scene =
                 (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
                 (float)g_inp.mouse_y >= sy && (float)g_inp.mouse_y < sy + sh;
-            if (hovering_scene && (selected_is_test_mesh() || selected_light())) {
+            if (hovering_scene && (selected_mesh_object() || selected_light())) {
                 for (int i = 0; i < g_inp.typed_count; i++) {
                     char c = g_inp.typed_chars[i];
                     TransformOpKind kind = XFORM_NONE;
@@ -834,8 +876,7 @@ static void main_loop(void *userdata) {
     UIRenderContext ui_ctx = {0};
     ui_ctx.renderer = g_renderer;
     ui_ctx.gbuf = g_gbuf;
-    ui_ctx.test_obj = &g_test_mesh_object;
-    ui_ctx.test_obj_loaded = g_test_mesh_loaded;
+    ui_ctx.test_obj = selected_mesh_object();   /* NULL if a Light or nothing is selected -- see UIRenderContext::test_obj's own updated comment */
     ui_ctx.edit_face = g_edit_face;
     ui_ctx.render_settings = &g_render_settings;
     ui_ctx.skinned_obj = g_skinned_test_loaded ? &g_skinned_test_obj : NULL;
@@ -934,14 +975,15 @@ static void main_loop(void *userdata) {
                  * show -- see g_edit_face's own comment on why this is
                  * captured here rather than re-picked at click-a-row time. */
                 g_edit_face = -1;
-                if (g_editor_mode == EDITOR_MODE_EDIT && selected_is_test_mesh()) {
+                MeshObject *edit_sel = selected_mesh_object();
+                if (g_editor_mode == EDITOR_MODE_EDIT && edit_sel) {
                     Vec3f origin, dir;
                     if (compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &origin, &dir)) {
                         float t; int face;
-                        if (meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
+                        if (meshobject_ray_pick_face(edit_sel, origin, dir, &t, &face)) {
                             g_edit_face = face;
                             Vec3f world_hit = { origin.x + dir.x * t, origin.y + dir.y * t, origin.z + dir.z * t };
-                            g_edit_hit_local = meshobject_world_to_local(&g_test_mesh_object, world_hit);
+                            g_edit_hit_local = meshobject_world_to_local(edit_sel, world_hit);
                         }
                     }
                 }
@@ -959,10 +1001,11 @@ static void main_loop(void *userdata) {
     if (gizmo_is_dragging()) {
         if (g_inp.lmb_down) {
             float sx, sy, sw, sh;
-            if (ui_get_scene_rect(&sx, &sy, &sw, &sh)) {
+            MeshObject *drag_sel = selected_mesh_object();
+            if (drag_sel && ui_get_scene_rect(&sx, &sy, &sw, &sh)) {
                 Vec3f origin, dir;
                 if (compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &origin, &dir)) {
-                    gizmo_update_drag(&g_test_mesh_object.position, origin, dir);
+                    gizmo_update_drag(&drag_sel->position, origin, dir);
                 }
             }
         } else {
@@ -986,12 +1029,12 @@ static void main_loop(void *userdata) {
     CtxMenuAction ctx_action = ui_poll_context_menu_action();
     switch (ctx_action) {
         case CTX_ACTION_ADD_MESH:
-            if (g_test_mesh_loaded) {
-                printf("[main] context menu Add > Mesh Object: already exists "
-                       "(only one test-object slot for now)\n");
-            } else {
-                spawn_test_mesh_object();
-            }
+            /* Real multi-object support -- always adds a NEW cube (no
+             * "already exists" refusal anymore), at the camera's own
+             * orbit pivot, same spawn-point convention Add Light already
+             * established. Deliberately allowed to clip through whatever
+             * else is already there, separable afterward with G. */
+            add_mesh_object_from_path("assets/cube.gltf", 16.0f, g_cam_pivot);
             break;
         case CTX_ACTION_ADD_LIGHT_POINT:
         case CTX_ACTION_ADD_LIGHT_SUN:
@@ -1016,9 +1059,10 @@ static void main_loop(void *userdata) {
             break;
         }
         case CTX_ACTION_DELETE: {
+            MeshObject *sel_obj = selected_mesh_object();
             PhiLight *sel_light = selected_light();
-            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
-                delete_test_mesh_object();
+            if (sel_obj) {
+                delete_mesh_object(sel_obj);
             } else if (sel_light) {
                 int id = sel_light->id;
                 light_delete(id);
@@ -1029,16 +1073,17 @@ static void main_loop(void *userdata) {
             }
             break;
         }
-        case CTX_ACTION_EXTRUDE_FACE:
-            if (g_test_mesh_loaded && g_edit_face >= 0) {
-                int before = g_test_mesh_object.render_mesh->count / 3;
+        case CTX_ACTION_EXTRUDE_FACE: {
+            MeshObject *sel = selected_mesh_object();
+            if (sel && g_edit_face >= 0) {
+                int before = sel->render_mesh->count / 3;
                 /* Fixed 4-unit offset along the face's own normal -- no
                  * mouse-driven interactive extrude distance in this pass,
                  * matching this loop's "minimal, correct, not Blender-grade
                  * polish" bar (see mesh_edit.h). */
-                int cap = mesh_edit_extrude_face(g_test_mesh_object.hem, g_edit_face, 4.0f);
+                int cap = mesh_edit_extrude_face(sel->hem, g_edit_face, 4.0f);
                 if (cap >= 0) {
-                    rebuild_test_mesh_render("Extrude Face", before);
+                    rebuild_mesh_render(sel, "Extrude Face", before);
                     g_edit_face = cap;  /* new cap becomes the natural next target, e.g. a chained extrude */
                 } else {
                     printf("[main] context menu Extrude Face: operation failed (non-triangle or stale face)\n");
@@ -1047,12 +1092,14 @@ static void main_loop(void *userdata) {
                 printf("[main] context menu Extrude Face: no face under the last right-click\n");
             }
             break;
-        case CTX_ACTION_INSET_FACE:
-            if (g_test_mesh_loaded && g_edit_face >= 0) {
-                int before = g_test_mesh_object.render_mesh->count / 3;
-                int cap = mesh_edit_inset_face(g_test_mesh_object.hem, g_edit_face, 0.4f);
+        }
+        case CTX_ACTION_INSET_FACE: {
+            MeshObject *sel = selected_mesh_object();
+            if (sel && g_edit_face >= 0) {
+                int before = sel->render_mesh->count / 3;
+                int cap = mesh_edit_inset_face(sel->hem, g_edit_face, 0.4f);
                 if (cap >= 0) {
-                    rebuild_test_mesh_render("Inset Face", before);
+                    rebuild_mesh_render(sel, "Inset Face", before);
                     g_edit_face = cap;
                 } else {
                     printf("[main] context menu Inset Face: operation failed (non-triangle or stale face)\n");
@@ -1061,14 +1108,16 @@ static void main_loop(void *userdata) {
                 printf("[main] context menu Inset Face: no face under the last right-click\n");
             }
             break;
-        case CTX_ACTION_LOOP_CUT:
-            if (g_test_mesh_loaded && g_edit_face >= 0) {
-                int before = g_test_mesh_object.render_mesh->count / 3;
-                int edge = mesh_edit_nearest_edge_of_face(g_test_mesh_object.hem, g_edit_face,
+        }
+        case CTX_ACTION_LOOP_CUT: {
+            MeshObject *sel = selected_mesh_object();
+            if (sel && g_edit_face >= 0) {
+                int before = sel->render_mesh->count / 3;
+                int edge = mesh_edit_nearest_edge_of_face(sel->hem, g_edit_face,
                                                             g_edit_hit_local.x, g_edit_hit_local.y, g_edit_hit_local.z);
-                int mv = edge >= 0 ? mesh_edit_loop_cut_edge(g_test_mesh_object.hem, edge) : -1;
+                int mv = edge >= 0 ? mesh_edit_loop_cut_edge(sel->hem, edge) : -1;
                 if (mv >= 0) {
-                    rebuild_test_mesh_render("Loop Cut", before);
+                    rebuild_mesh_render(sel, "Loop Cut", before);
                 } else {
                     printf("[main] context menu Loop Cut: operation failed (no edge/stale face)\n");
                 }
@@ -1077,6 +1126,7 @@ static void main_loop(void *userdata) {
                 printf("[main] context menu Loop Cut: no face under the last right-click\n");
             }
             break;
+        }
         case CTX_ACTION_FRACTURE:
             /* Computes Voronoi fragments (fracture.h) and now does BOTH
              * things that capability was always meant to support: saves
@@ -1098,47 +1148,59 @@ static void main_loop(void *userdata) {
              * can't open a real GL window to watch it actually shatter
              * and tune the feel, flagged honestly rather than claimed
              * correct by construction. */
-            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
-                const int n_frag = 8;
-                const float breaking_threshold = 200.0f;
-                unsigned int seed = (unsigned int)phi_platform_now();
+            {
+                MeshObject *sel = selected_mesh_object();
+                if (sel) {
+                    const int n_frag = 8;
+                    const float breaking_threshold = 200.0f;
+                    unsigned int seed = (unsigned int)phi_platform_now();
 
-                FractureFragment *frags = fracture_voronoi(&g_test_mesh_object, n_frag, seed);
-                if (frags) {
-                    int ok = fracture_save_glb(frags, n_frag, "assets/fracture_output.gltf");
-                    int non_empty = 0;
-                    for (int i = 0; i < n_frag; i++) if (frags[i].pos_count > 0) non_empty++;
-                    printf("[main] context menu Fracture: %d/%d non-empty fragments, %s -> assets/fracture_output.gltf\n",
-                           non_empty, n_frag, ok ? "saved" : "SAVE FAILED");
-                    fracture_free_fragments(frags, n_frag);
-                } else {
-                    printf("[main] context menu Fracture: precompute failed (no hem?)\n");
-                }
+                    FractureFragment *frags = fracture_voronoi(sel, n_frag, seed);
+                    if (frags) {
+                        int ok = fracture_save_glb(frags, n_frag, "assets/fracture_output.gltf");
+                        int non_empty = 0;
+                        for (int i = 0; i < n_frag; i++) if (frags[i].pos_count > 0) non_empty++;
+                        printf("[main] context menu Fracture: %d/%d non-empty fragments, %s -> assets/fracture_output.gltf\n",
+                               non_empty, n_frag, ok ? "saved" : "SAVE FAILED");
+                        fracture_free_fragments(frags, n_frag);
+                    } else {
+                        printf("[main] context menu Fracture: precompute failed (no hem?)\n");
+                    }
 
-                int spawned = fracture_body_activate(g_phys_world, g_test_mesh_object.hem,
-                                                      g_test_mesh_object.position, g_test_mesh_object.orientation,
-                                                      n_frag, seed, breaking_threshold);
-                if (spawned > 0) {
-                    g_fracture_active = 1;
-                    ui_set_selected_object(0xFFFFFFFFu);
-                    g_edit_face = -1;
-                    printf("[main] context menu Fracture: activated %d live fragment bodies\n", spawned);
+                    int spawned = fracture_body_activate(g_phys_world, sel->hem,
+                                                          sel->position, sel->orientation,
+                                                          n_frag, seed, breaking_threshold);
+                    if (spawned > 0) {
+                        g_fracture_active = 1;
+                        g_fracture_source_id = sel->id;
+                        ui_set_selected_object(0xFFFFFFFFu);
+                        g_edit_face = -1;
+                        printf("[main] context menu Fracture: activated %d live fragment bodies\n", spawned);
+                    } else {
+                        printf("[main] context menu Fracture: activation produced no live fragments\n");
+                    }
                 } else {
-                    printf("[main] context menu Fracture: activation produced no live fragments\n");
+                    printf("[main] context menu Fracture: no MeshObject selected\n");
                 }
-            } else {
-                printf("[main] context menu Fracture: no MeshObject selected\n");
             }
             break;
         case CTX_ACTION_SAVE_AS_ASSET:
             /* Starts a pending create in the Asset Browser's shared edit
              * form (see asset_browser_begin_create) -- doesn't upload
              * anything yet, that only happens once g_ab.create_requested
-             * fires from actually submitting the form (see above). */
-            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
-                asset_browser_begin_create(&g_ab, "MeshObject");
-            } else {
-                printf("[main] context menu Save as Asset: no MeshObject selected\n");
+             * fires from actually submitting the form (see below). Which
+             * object gets uploaded at that later point is remembered by
+             * id (g_save_as_asset_object_id), not re-resolved from
+             * "whichever is selected" -- selection could change in
+             * between opening the form and submitting it. */
+            {
+                MeshObject *sel = selected_mesh_object();
+                if (sel) {
+                    g_save_as_asset_object_id = sel->id;
+                    asset_browser_begin_create(&g_ab, "MeshObject");
+                } else {
+                    printf("[main] context menu Save as Asset: no MeshObject selected\n");
+                }
             }
             break;
         case CTX_ACTION_ENABLE_PHYSICS:
@@ -1156,29 +1218,32 @@ static void main_loop(void *userdata) {
              * restitution so it doesn't bounce forever. Once created,
              * main_loop's frame step syncs position/orientation FROM the
              * simulated body every frame instead of leaving them alone. */
-            if (!g_test_mesh_loaded || ui_get_selected_object() != 4000u + (unsigned int)g_test_mesh_object.id) {
-                printf("[main] context menu Enable Physics: no MeshObject selected\n");
-            } else if (g_test_mesh_object.phys_body) {
-                printf("[main] context menu Enable Physics: already has a physics body\n");
-            } else if (!g_test_mesh_object.hem || g_test_mesh_object.hem->vert_count < 4) {
-                printf("[main] context menu Enable Physics: not enough vertices for a hull (need a real 3D mesh)\n");
-            } else {
-                HalfEdgeMesh *hem = g_test_mesh_object.hem;
-                float *flat = (float *)malloc((size_t)hem->vert_count * 3 * sizeof(float));
-                for (int i = 0; i < hem->vert_count; i++) {
-                    flat[i*3+0] = hem->verts[i].pos[0];
-                    flat[i*3+1] = hem->verts[i].pos[1];
-                    flat[i*3+2] = hem->verts[i].pos[2];
+            {
+                MeshObject *sel = selected_mesh_object();
+                if (!sel) {
+                    printf("[main] context menu Enable Physics: no MeshObject selected\n");
+                } else if (sel->phys_body) {
+                    printf("[main] context menu Enable Physics: already has a physics body\n");
+                } else if (!sel->hem || sel->hem->vert_count < 4) {
+                    printf("[main] context menu Enable Physics: not enough vertices for a hull (need a real 3D mesh)\n");
+                } else {
+                    HalfEdgeMesh *hem = sel->hem;
+                    float *flat = (float *)malloc((size_t)hem->vert_count * 3 * sizeof(float));
+                    for (int i = 0; i < hem->vert_count; i++) {
+                        flat[i*3+0] = hem->verts[i].pos[0];
+                        flat[i*3+1] = hem->verts[i].pos[1];
+                        flat[i*3+2] = hem->verts[i].pos[2];
+                    }
+                    float orientation[4] = {
+                        sel->orientation.x, sel->orientation.y,
+                        sel->orientation.z, sel->orientation.w
+                    };
+                    sel->phys_body = phi_physics_add_convex_hull_body(
+                        g_phys_world, flat, hem->vert_count, sel->position, orientation, 1.0f, 0.3f);
+                    printf("[main] context menu Enable Physics: convex hull from %d vertices, mass=1.0\n",
+                           hem->vert_count);
+                    free(flat);
                 }
-                float orientation[4] = {
-                    g_test_mesh_object.orientation.x, g_test_mesh_object.orientation.y,
-                    g_test_mesh_object.orientation.z, g_test_mesh_object.orientation.w
-                };
-                g_test_mesh_object.phys_body = phi_physics_add_convex_hull_body(
-                    g_phys_world, flat, hem->vert_count, g_test_mesh_object.position, orientation, 1.0f, 0.3f);
-                printf("[main] context menu Enable Physics: convex hull from %d vertices, mass=1.0\n",
-                       hem->vert_count);
-                free(flat);
             }
             break;
         case CTX_ACTION_TOGGLE_EDIT_MODE:
@@ -1199,13 +1264,16 @@ static void main_loop(void *userdata) {
      * the block further down that actually performs a load (g_ab.
      * load_requested) doesn't know or care which UI triggered it. */
     switch (ui_poll_top_menu_action()) {
-        case TOP_ACTION_FILE_SAVE:
-            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
+        case TOP_ACTION_FILE_SAVE: {
+            MeshObject *sel = selected_mesh_object();
+            if (sel) {
+                g_save_as_asset_object_id = sel->id;   /* see its own comment -- remembered by id, re-resolved at actual-upload time */
                 asset_browser_begin_create(&g_ab, "MeshObject");
             } else {
                 printf("[main] File > Save: no MeshObject selected\n");
             }
             break;
+        }
         case TOP_ACTION_FILE_LOAD:
             if (g_ab.selected >= 0 && g_ab.selected < g_ab.count) {
                 g_ab.load_requested = 1;
@@ -1305,7 +1373,7 @@ static void main_loop(void *userdata) {
         for (int i = 0; i < g_ab.count; i++) {
             if (g_ab.items[i].id == g_ab.load_requested_id) { path = g_ab.items[i].path; break; }
         }
-        if (path) load_mesh_object_from_path(path, 1.0f);
+        if (path) add_mesh_object_from_path(path, 1.0f, g_cam_pivot);   /* adds a NEW object, allowed to clip through whatever's already there -- see add_mesh_object_from_path's own comment */
         else printf("[main] asset browser: load requested for id=%u, not in the current list\n", g_ab.load_requested_id);
     }
     if (g_ab.delete_requested) {
@@ -1323,11 +1391,12 @@ static void main_loop(void *userdata) {
     if (g_ab.create_requested) {
         g_ab.create_requested = 0;
 #ifdef PHI_HAVE_HTTP_CLIENT
-        if (!g_test_mesh_loaded || !g_test_mesh_object.hem) {
-            printf("[main] asset browser: create requested, but no MeshObject is loaded to save\n");
+        MeshObject *save_obj = scene_object_find(g_save_as_asset_object_id);
+        if (!save_obj || !save_obj->hem) {
+            printf("[main] asset browser: create requested, but the object being saved no longer exists\n");
         } else {
             uint8_t *glb; int glb_len;
-            if (!halfedge_save_glb_buffer(g_test_mesh_object.hem, &glb, &glb_len)) {
+            if (!halfedge_save_glb_buffer(save_obj->hem, &glb, &glb_len)) {
                 printf("[main] asset browser: failed to flatten the current MeshObject to GLB\n");
             } else {
                 char name_enc[192], tags_enc[192], path_and_query[512];
@@ -1412,19 +1481,24 @@ static void main_loop(void *userdata) {
                s_frame, picked);
     }
 
-    /* One-shot: confirm the Phase 1 test MeshObject (object_id 4001, see
-     * g_test_mesh_object) is genuinely rasterized SOMEWHERE on screen, not
-     * just loaded into memory — a coarse full-framebuffer object-id scan
-     * rather than relying on the center pixel happening to land on it.
-     * G-buffer-local coordinates throughout (see the comment above). */
+    /* One-shot: confirm the Phase 1 startup test MeshObject (the first
+     * object in the scene registry, object_id 4001 at startup -- see
+     * spawn_test_mesh_object) is genuinely rasterized SOMEWHERE on
+     * screen, not just loaded into memory — a coarse full-framebuffer
+     * object-id scan rather than relying on the center pixel happening
+     * to land on it. G-buffer-local coordinates throughout (see the
+     * comment above). */
     static int s_mesh_obj_checked = 0;
-    if (have_scene && g_test_mesh_loaded && !s_mesh_obj_checked && s_frame == 30) {
+    MeshObject *startup_check_objects[SCENE_MAX_OBJECTS];
+    int startup_check_count = (have_scene && !s_mesh_obj_checked && s_frame == 30) ? scene_object_get_all(startup_check_objects) : 0;
+    if (startup_check_count > 0) {
         s_mesh_obj_checked = 1;
+        unsigned int watch_id = 4000u + (unsigned int)startup_check_objects[0]->id;
         int found = 0, min_x = -1, max_x = -1, min_y = -1, max_y = -1;
         for (int y = 0; y < g_gbuf->h; y += 4) {
             for (int x = 0; x < g_gbuf->w; x += 4) {
                 unsigned int id = gbuffer_pick_object_id(g_gbuf, x, y);
-                if (id == 4000u + (unsigned int)g_test_mesh_object.id) {
+                if (id == watch_id) {
                     found++;
                     if (min_x < 0 || x < min_x) min_x = x;
                     if (x > max_x) max_x = x;
@@ -1491,26 +1565,111 @@ static void delete_light_handler(uint32_t req_id, uint32_t light_id) {
     net_send_delete_light_reply(&g_ns, req_id, ok);
 }
 
-static void scene_state_handler(uint32_t req_id) {
-    Vec3f vel = {0.0f, 0.0f, 0.0f};
-    int has_physics = (g_test_mesh_loaded && g_test_mesh_object.phys_body != NULL);
-    if (has_physics) vel = phi_physics_get_linear_velocity(g_test_mesh_object.phys_body);
+/* Chat-driven geometry creation/editing (Phase 5, see net.h's own
+ * comment on PKT_CREATE_MESH_REQUEST/PKT_SET_VERTICES_REQUEST/PKT_
+ * DELETE_MESH_OBJECT_REQUEST) -- same "server asks THIS client to act"
+ * shape as add_light_handler/delete_light_handler above, calling the
+ * exact same scene_objects.c/halfedge.c machinery main.c's own context-
+ * menu actions and mp_port.c's phi.create_mesh/set_vertices already use
+ * -- Claude's chat access to this is the actual point of this section
+ * ("make it so Claude can create geometry and redefine the verts of
+ * existing scene geometry"), not a separate implementation of it. */
+static void create_mesh_handler(uint32_t req_id, float x, float y, float z,
+                                 const float *positions, int vert_count,
+                                 const unsigned short *indices, int index_count) {
+    HalfEdgeMesh *hem = halfedge_build_from_triangles(positions, vert_count, indices, index_count);
+    if (!hem) {
+        net_send_create_mesh_reply(&g_ns, req_id, 0, 0);
+        return;
+    }
+    MeshObject *obj = scene_object_add();
+    if (!obj) {
+        halfedge_destroy(hem);
+        net_send_create_mesh_reply(&g_ns, req_id, 0, 0);
+        return;
+    }
+    obj->position = (Vec3f){x, y, z};
+    obj->orientation = quat_identity();
+    obj->scale = (Vec3f){1.0f, 1.0f, 1.0f};
+    obj->is_static = 1;
+    obj->render_mesh = mesh_create();
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, hem);
+    obj->hem = hem;
+    printf("[main] chat create_mesh_object: created MeshObject #%d (%d verts, %d indices)\n", obj->id, vert_count, index_count);
+    net_send_create_mesh_reply(&g_ns, req_id, 1, (uint32_t)obj->id);
+}
 
-    int vert_count = 0, face_count = 0;
-    if (g_test_mesh_loaded && g_test_mesh_object.hem) {
-        vert_count = g_test_mesh_object.hem->vert_count;
-        face_count = g_test_mesh_object.hem->face_count;
+static void set_vertices_handler(uint32_t req_id, uint32_t object_id, const float *positions, int vert_count) {
+    MeshObject *obj = scene_object_find((int)object_id);
+    if (!obj || !obj->hem || obj->hem->vert_count != vert_count) {
+        net_send_set_vertices_reply(&g_ns, req_id, 0);
+        return;
+    }
+    for (int i = 0; i < vert_count; i++) {
+        obj->hem->verts[i].pos[0] = positions[i*3+0];
+        obj->hem->verts[i].pos[1] = positions[i*3+1];
+        obj->hem->verts[i].pos[2] = positions[i*3+2];
+    }
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    printf("[main] chat set_mesh_vertices: updated %d vertices on MeshObject #%u\n", vert_count, object_id);
+    net_send_set_vertices_reply(&g_ns, req_id, 1);
+}
+
+static void delete_mesh_object_handler(uint32_t req_id, uint32_t object_id) {
+    MeshObject *obj = scene_object_find((int)object_id);
+    if (!obj) {
+        net_send_delete_mesh_object_reply(&g_ns, req_id, 0);
+        return;
+    }
+    delete_mesh_object(obj);
+    net_send_delete_mesh_object_reply(&g_ns, req_id, 1);
+}
+
+static void scene_state_handler(uint32_t req_id) {
+    /* Every live scene object (Phase 5's real multi-object support, see
+     * phi.md) -- id/position/orientation/is_static/vert_count/
+     * face_count/has_physics/velocity per object, replacing the old
+     * single flat set of fields this used to report for the one fixed
+     * slot. Claude's get_scene_state tool sees the whole scene now, not
+     * just one object -- a real prerequisite for create_mesh_object/
+     * set_vertices (see net.h) to be usable at all: you can't sensibly
+     * ask Claude to edit "the object" when there could be several. */
+    char objects_json[6144];
+    {
+        MeshObject *objects[SCENE_MAX_OBJECTS];
+        int n = scene_object_get_all(objects);
+        char *op = objects_json;
+        size_t remaining = sizeof(objects_json);
+        int written = snprintf(op, remaining, "[");
+        op += written; remaining -= (size_t)written;
+        for (int i = 0; i < n && remaining > 200; i++) {
+            MeshObject *o = objects[i];
+            int vc = o->hem ? o->hem->vert_count : 0;
+            int fc = o->hem ? o->hem->face_count : 0;
+            int has_phys = o->phys_body != NULL;
+            Vec3f v = has_phys ? phi_physics_get_linear_velocity(o->phys_body) : (Vec3f){0.0f, 0.0f, 0.0f};
+            written = snprintf(op, remaining,
+                "%s{\"id\":%d,\"position\":[%.3f,%.3f,%.3f],\"orientation\":[%.3f,%.3f,%.3f,%.3f],"
+                "\"is_static\":%s,\"vert_count\":%d,\"face_count\":%d,\"has_physics\":%s,"
+                "\"velocity\":[%.3f,%.3f,%.3f]}",
+                i > 0 ? "," : "", o->id, o->position.x, o->position.y, o->position.z,
+                o->orientation.x, o->orientation.y, o->orientation.z, o->orientation.w,
+                o->is_static ? "true" : "false", vc, fc, has_phys ? "true" : "false",
+                v.x, v.y, v.z);
+            op += written; remaining -= (size_t)written;
+        }
+        snprintf(op, remaining, "]");
     }
 
-    int has_edit_face = (g_edit_face >= 0 && g_test_mesh_loaded && g_test_mesh_object.hem &&
-                          g_edit_face < g_test_mesh_object.hem->face_count);
+    MeshObject *sel = selected_mesh_object();
+    int has_edit_face = (g_edit_face >= 0 && sel && sel->hem && g_edit_face < sel->hem->face_count);
     char face_json[256];
     if (has_edit_face) {
-        HEFace *ef = &g_test_mesh_object.hem->faces[g_edit_face];
+        HEFace *ef = &sel->hem->faces[g_edit_face];
         snprintf(face_json, sizeof(face_json),
-                 "{\"index\":%d,\"base_color\":[%.3f,%.3f,%.3f],\"metallic\":%.3f,"
+                 "{\"object_id\":%d,\"index\":%d,\"base_color\":[%.3f,%.3f,%.3f],\"metallic\":%.3f,"
                  "\"roughness\":%.3f,\"emission\":[%.3f,%.3f,%.3f]}",
-                 g_edit_face, ef->base_color[0], ef->base_color[1], ef->base_color[2],
+                 sel->id, g_edit_face, ef->base_color[0], ef->base_color[1], ef->base_color[2],
                  ef->metallic, ef->roughness, ef->emission[0], ef->emission[1], ef->emission[2]);
     } else {
         snprintf(face_json, sizeof(face_json), "null");
@@ -1544,30 +1703,23 @@ static void scene_state_handler(uint32_t req_id) {
         snprintf(lp, remaining, "]");
     }
 
-    char json[4096];
+    /* Comfortably over the worst case (objects_json's own 6144 cap +
+     * lights_json's own 3072 cap + face_json's own 256 cap + this
+     * format string's own static text) -- 8192 was too tight (real
+     * -Wformat-truncation warning, not a false positive: those three
+     * sub-buffers really can combine to exceed it). */
+    char json[10240];
     snprintf(json, sizeof(json),
         "{"
-        "\"mesh_loaded\":%s,"
-        "\"position\":[%.3f,%.3f,%.3f],"
-        "\"orientation\":[%.3f,%.3f,%.3f,%.3f],"
-        "\"is_static\":%s,"
-        "\"vert_count\":%d,"
-        "\"face_count\":%d,"
-        "\"has_physics\":%s,"
-        "\"velocity\":[%.3f,%.3f,%.3f],"
+        "\"objects\":%s,"
+        "\"selected_object_id\":%d,"
         "\"physics_gravity\":[0.0,-9.81,0.0],"
         "\"selected_face\":%s,"
         "\"lights\":%s,"
         "\"render_settings\":{\"samples\":%d}"
         "}",
-        g_test_mesh_loaded ? "true" : "false",
-        g_test_mesh_object.position.x, g_test_mesh_object.position.y, g_test_mesh_object.position.z,
-        g_test_mesh_object.orientation.x, g_test_mesh_object.orientation.y,
-        g_test_mesh_object.orientation.z, g_test_mesh_object.orientation.w,
-        g_test_mesh_object.is_static ? "true" : "false",
-        vert_count, face_count,
-        has_physics ? "true" : "false",
-        vel.x, vel.y, vel.z,
+        objects_json,
+        sel ? sel->id : -1,
         face_json,
         lights_json,
         g_render_settings.samples);
@@ -1601,9 +1753,16 @@ int main(void) {
     g_gbuf = gbuffer_create(w, h);
     if (!ui_init()) printf("[main] WARNING: ui_init() failed -- editor UI will not render correctly\n");
 
-    /* Phase 1 foundation test object — see g_test_mesh_object's comment
-     * and spawn_test_mesh_object() above (also reused by the scene
-     * context menu's "Add > Mesh Object", see CTX_ACTION_ADD_MESH). */
+    /* Real multi-object scene graph (Phase 5, see scene_objects.h) --
+     * cleared once here, same convention every other bounded registry
+     * (light.c/fracture_body.c/ragdoll.c) already uses. Must run BEFORE
+     * spawn_test_mesh_object below, which allocates the first slot. */
+    scene_objects_init();
+
+    /* Phase 1 foundation test object — see spawn_test_mesh_object's own
+     * comment (also reused by the scene context menu's "Add > Mesh
+     * Object", see CTX_ACTION_ADD_MESH, and Asset Browser/File > Load,
+     * all of which now ADD a new object rather than replacing this one). */
     spawn_test_mesh_object();
 
     /* Initial camera vantage point, close enough to the test object's own
@@ -1649,17 +1808,18 @@ int main(void) {
 
     /* DNA/RNA + physics targets -- see phi.md's "Property System (DNA/RNA
      * analogue)". phi.prop_get/set('object'/'face', ...) and phi.
-     * enable_physics/apply_impulse/get_velocity/set_velocity all read/
-     * write through these live pointers; g_test_mesh_loaded/g_edit_face
-     * are passed by address (not by value) since they change every frame
-     * and phi_mp_register_targets only runs once, here. */
-    phi_mp_register_targets(&g_test_mesh_object, &g_test_mesh_loaded, &g_edit_face, g_phys_world);
+     * enable_physics/apply_impulse/get_velocity/set_velocity all resolve
+     * "the object" through selected_mesh_object (Phase 5's real multi-
+     * object scene graph, see scene_objects.h) every call, not a fixed
+     * pointer; g_edit_face is still passed by address (changes every
+     * frame) -- phi_mp_register_targets only runs once, here. */
+    phi_mp_register_targets(selected_mesh_object, &g_edit_face, g_phys_world);
     /* Shared "object"/"face"/"light:<id>"/"render" resolver (scene_target.h)
-     * -- same underlying pointers phi_mp_register_targets just got, plus
-     * g_render_settings (light:<id> needs no registration, see light.h's
-     * own self-contained registry). Used by phi.prop_get/set AND, once
-     * wired, chat-driven scene mutation. */
-    scene_target_register(&g_test_mesh_object, &g_test_mesh_loaded, &g_edit_face, &g_render_settings);
+     * -- same selected_mesh_object resolver phi_mp_register_targets just
+     * got, plus g_render_settings (light:<id> needs no registration, see
+     * light.h's own self-contained registry). Used by phi.prop_get/set
+     * AND chat-driven scene mutation. */
+    scene_target_register(selected_mesh_object, &g_edit_face, &g_render_settings);
     /* phi.render() -- Phase 3's real path tracer (path_tracer.h), same
      * "give mp_port.c a function pointer to main.c's own logic" shape as
      * the registration calls just above. */
@@ -1699,6 +1859,9 @@ int main(void) {
     net_set_prop_set_handler(prop_set_handler);
     net_set_add_light_handler(add_light_handler);
     net_set_delete_light_handler(delete_light_handler);
+    net_set_create_mesh_handler(create_mesh_handler);
+    net_set_set_vertices_handler(set_vertices_handler);
+    net_set_delete_mesh_object_handler(delete_mesh_object_handler);
 
     /* Network -- see phi.md's Phase 1 status, "Client/server model": this
      * is Qek's connection/transport machinery, repurposed rather than

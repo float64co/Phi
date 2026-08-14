@@ -27,6 +27,26 @@ void net_set_delete_light_handler(void (*handler)(uint32_t req_id, uint32_t ligh
     s_delete_light_handler = handler;
 }
 
+static void (*s_create_mesh_handler)(uint32_t req_id, float x, float y, float z,
+                                       const float *positions, int vert_count,
+                                       const unsigned short *indices, int index_count) = NULL;
+static void (*s_set_vertices_handler)(uint32_t req_id, uint32_t object_id,
+                                        const float *positions, int vert_count) = NULL;
+static void (*s_delete_mesh_object_handler)(uint32_t req_id, uint32_t object_id) = NULL;
+
+void net_set_create_mesh_handler(void (*handler)(uint32_t req_id, float x, float y, float z,
+                                                    const float *positions, int vert_count,
+                                                    const unsigned short *indices, int index_count)) {
+    s_create_mesh_handler = handler;
+}
+void net_set_set_vertices_handler(void (*handler)(uint32_t req_id, uint32_t object_id,
+                                                      const float *positions, int vert_count)) {
+    s_set_vertices_handler = handler;
+}
+void net_set_delete_mesh_object_handler(void (*handler)(uint32_t req_id, uint32_t object_id)) {
+    s_delete_mesh_object_handler = handler;
+}
+
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/websocket.h>
@@ -282,6 +302,37 @@ void net_send_delete_light_reply(NetState *ns, uint32_t req_id, int ok) {
     ws_send_binary(pkt, (int)(p - pkt));
 }
 
+void net_send_create_mesh_reply(NetState *ns, uint32_t req_id, int ok, uint32_t object_id) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1 + 4];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_CREATE_MESH_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    memcpy(p, &object_id, 4); p += 4;
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_set_vertices_reply(NetState *ns, uint32_t req_id, int ok) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_SET_VERTICES_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_delete_mesh_object_reply(NetState *ns, uint32_t req_id, int ok) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_DELETE_MESH_OBJECT_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
 void net_on_message(NetState *ns, const uint8_t *data, int len) {
     if (len < 1) return;
     const uint8_t *p = data;
@@ -382,6 +433,60 @@ void net_on_message(NetState *ns, const uint8_t *data, int len) {
         uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
         uint32_t light_id; memcpy(&light_id, p, 4); p += 4;
         if (s_delete_light_handler) s_delete_light_handler(req_id, light_id);
+        break;
+    }
+
+    case PKT_CREATE_MESH_REQUEST: {
+        /* [req_id:u32 x:f32 y:f32 z:f32 vert_count:u16 (vert_count*3)*f32 tri_count:u16 (tri_count*3)*u16] --
+         * positions/indices are memcpy'd into real aligned local arrays
+         * (not cast-in-place from the raw byte cursor) -- p has no
+         * guaranteed alignment for a multi-byte type on every platform,
+         * same reasoning every OTHER multi-byte field in this parser
+         * already reads via memcpy rather than a direct pointer cast. */
+        if (len < 1 + 4 + 12 + 2) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        float x, y, z;
+        memcpy(&x, p, 4); p += 4;
+        memcpy(&y, p, 4); p += 4;
+        memcpy(&z, p, 4); p += 4;
+        uint16_t vert_count; memcpy(&vert_count, p, 2); p += 2;
+        if (vert_count > PKT_MESH_MAX_VERTS) break;   /* malformed/oversized -- refuse rather than read past the buffer */
+        size_t pos_bytes = (size_t)vert_count * 3 * sizeof(float);
+        if (p + pos_bytes + 2 > data + len) break;
+        static float pos_buf[PKT_MESH_MAX_VERTS * 3];
+        memcpy(pos_buf, p, pos_bytes);
+        p += pos_bytes;
+        uint16_t tri_count; memcpy(&tri_count, p, 2); p += 2;
+        if (tri_count > PKT_MESH_MAX_TRIS) break;
+        size_t idx_bytes = (size_t)tri_count * 3 * sizeof(uint16_t);
+        if (p + idx_bytes > data + len) break;
+        static unsigned short idx_buf[PKT_MESH_MAX_TRIS * 3];
+        memcpy(idx_buf, p, idx_bytes);
+        if (s_create_mesh_handler) s_create_mesh_handler(req_id, x, y, z, pos_buf, (int)vert_count, idx_buf, (int)tri_count * 3);
+        break;
+    }
+
+    case PKT_SET_VERTICES_REQUEST: {
+        /* [req_id:u32 object_id:u32 vert_count:u16 (vert_count*3)*f32] --
+         * same memcpy-into-aligned-local-array reasoning as above. */
+        if (len < 1 + 4 + 4 + 2) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint32_t object_id; memcpy(&object_id, p, 4); p += 4;
+        uint16_t vert_count; memcpy(&vert_count, p, 2); p += 2;
+        if (vert_count > PKT_MESH_MAX_VERTS) break;
+        size_t pos_bytes = (size_t)vert_count * 3 * sizeof(float);
+        if (p + pos_bytes > data + len) break;
+        static float pos_buf[PKT_MESH_MAX_VERTS * 3];
+        memcpy(pos_buf, p, pos_bytes);
+        if (s_set_vertices_handler) s_set_vertices_handler(req_id, object_id, pos_buf, (int)vert_count);
+        break;
+    }
+
+    case PKT_DELETE_MESH_OBJECT_REQUEST: {
+        if (len < 1 + 4 + 4) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint32_t object_id; memcpy(&object_id, p, 4); p += 4;
+        if (s_delete_mesh_object_handler) s_delete_mesh_object_handler(req_id, object_id);
         break;
     }
 

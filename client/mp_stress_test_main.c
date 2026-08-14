@@ -21,7 +21,9 @@
  * "many mostly-idle NPCs/vehicles, each doing a small amount of work per
  * tick" rather than "run each one's full behavior synchronously". */
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
+#include "octree_render.h"
 #include "port/micropython_embed.h"
 #include "py/obj.h"
 #include "py/objgenerator.h"
@@ -39,6 +41,15 @@ static double now_s(void) {
 
 static mp_obj_t lookup_global(const char *name) {
     return mp_obj_dict_get(MP_OBJ_FROM_PTR(mp_globals_get()), MP_OBJ_NEW_QSTR(qstr_from_str(name)));
+}
+
+/* Stub -- see mp_test_main.c's own identical stub for why this is needed
+ * (mp_port.c now links scene_objects.c, whose scene_object_delete
+ * references mesh_destroy, octree_render.c's real GL-touching home). */
+void mesh_destroy(RenderMesh *m) {
+    if (!m) return;
+    free(m->data);
+    free(m);
 }
 
 int main(void) {

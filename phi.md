@@ -2715,6 +2715,97 @@ recompile regardless). No live GL/input verification was possible in this
 sandbox (no real X display) -- compile-clean-and-reviewed, not
 click-tested. Win32 remains the user's own `build.bat` responsibility.
 
+#### Real multi-object scene graph, 2026-08-14
+
+Closes the single-object-slot limitation every earlier phase this session
+flagged and deliberately deferred (Phase 2's fracture-activation note,
+Phase 4's skinned-test-object comment, etc. -- all explicitly called this
+"a genuinely separate, much larger undertaking" and scoped around it
+rather than half-building it). Per explicit request: "make it so the
+scene can have multiple meshes at the same time."
+
+- **`client/scene_objects.h`/`.c`** (new): a real bounded `MeshObject`
+  registry -- same fixed-array-of-slots pattern `light.c`/`fracture_
+  body.c` already established (addresses never move for a live object's
+  whole lifetime, no realloc, so every system that holds a `MeshObject*`
+  across frames -- Properties, Python, `scene_target.c`'s resolver, the
+  gizmo -- can keep doing so safely), monotonically-increasing ids
+  (never reused, so a stale reference from a deleted object can't
+  silently collide with a new one). `SCENE_MAX_OBJECTS = 32`.
+- **`main.c`'s single `g_test_mesh_object` global is gone**, replaced
+  throughout by the registry: `scene_content_cb` draws every live
+  object; `try_pick_object`'s whole-object select now ray-tests every
+  live object (plus every light), nearest hit wins, not "the one
+  object, then lights"; a new `selected_mesh_object()` helper (scans the
+  registry for whichever id matches the UI's shared selection, mirrors
+  `selected_light()`'s own shape) is the one place every context-menu
+  action (Extrude/Inset/Loop Cut/Fracture/Enable Physics/Save as
+  Asset/Delete), `resolve_xform_target` (G/S/R, see the dated note two
+  sections up -- now generalizes cleanly to "whichever object is
+  selected" instead of one fixed slot), and the physics-transform-sync
+  loop all resolve "the relevant object" through.
+- **Loading a mesh now ADDS a new object, not replaces**: the Asset
+  Browser's Load button, File > Load, and the Scene context menu's Add >
+  Mesh Object row all funnel through a new `add_mesh_object_from_path`
+  (renamed/generalized from the old replace-the-one-slot `load_mesh_
+  object_from_path`) that allocates a fresh registry slot and selects it
+  immediately. Deliberately does NOT check for/avoid overlapping
+  existing geometry -- allowed to clip straight through whatever's
+  already there, per explicit request ("allow the mesh to clip through
+  any existing geometry and then be moved with 'g' to be separated") --
+  separating overlapping objects is a manual G-grab, not an automatic
+  placement search.
+- **Fracture is still deliberately single-target**: `fracture_body.c`'s
+  own registry stays a separate, smaller, bounded thing (its own
+  established scope), but now tracks WHICH object it was activated from
+  by id (`g_fracture_source_id`) rather than assuming there's only ever
+  one object that could be fractured -- fracturing one object leaves
+  every other live object completely unaffected (drawn/picked
+  normally), and deleting the fracture source (and only the source)
+  correctly clears its fragments.
+- **`phi_mp_register_targets`/`scene_target_register` widened from a
+  fixed `MeshObject*`+loaded-bool pair to a resolver CALLBACK**
+  (`MeshObject *(*)(void)`, main.c passes `selected_mesh_object` itself)
+  -- `phi.prop_get/set("object", ...)` and chat's prop-set tool now
+  correctly mean "whichever object is currently selected", matching
+  Blender's own `bpy.context.object` (active/selected object) model,
+  not a single hardcoded slot. Every standalone test harness that
+  registered these directly (`light_test`, `mp_prop_panel_test`, `mp_
+  physics_test`) updated to pass an equivalent local resolver.
+- **Outliner lists every live object** as its own row (same accent-
+  highlight-when-selected convention the Light rows already established,
+  calling `scene_object_get_all` directly rather than threading the
+  whole list through `UIRenderContext` -- the same "call the registry
+  directly, no context-struct plumbing needed" shape `light_get_all`
+  already uses from `ui.c`). `UIRenderContext::test_obj` narrowed to mean
+  specifically "whichever object is selected, or NULL" (dropped the
+  separate `test_obj_loaded` bool entirely -- NULL already means exactly
+  that) for Properties' single-object display and the Outliner/context-
+  menu's "is a mesh selected" checks.
+- **`get_scene_state`'s JSON reshaped**: was one flat set of fields for
+  "the" object; now a real `objects` array (id/position/orientation/
+  is_static/vert_count/face_count/has_physics/velocity per object) plus
+  `selected_object_id`, so Claude (and any future tooling) can see the
+  whole scene, not one slot -- a real prerequisite for the geometry-
+  creation/vertex-editing tools landing in the same pass (see Phase 5's
+  own dated note below).
+
+Verified with a new standalone no-GL harness (`scene_objects_test`, `make
+scene_objects_test`): add/find/get_all/count are exercised directly;
+address stability is checked explicitly (adding a third object doesn't
+invalidate earlier pointers -- the actual property a fixed array
+provides that a realloc'd one wouldn't); delete frees the slot and the
+deleted id is verified to NEVER be reused by a subsequent add (monotonic
+`s_next_id`, checked against a real freed-then-reallocated sequence, not
+assumed); registry-full behavior fills to exactly `SCENE_MAX_OBJECTS`
+and no further. Native and wasm both rebuilt clean from a forced-clean
+state; every other standalone harness in the project re-run and
+re-verified passing, since `main.c`/`ui.c`/`ui.h`/`mp_port.c`/`scene_
+target.c`/the `Makefile` all changed. No live GUI verification possible
+in this sandbox (no real X display) -- multi-object picking/Outliner/G-
+grab-to-separate are compile-clean-and-reviewed against the exact same
+math the single-object versions already had, not click-tested.
+
 ### Fracturing
 
 Meshes are authored with a fracture pattern at creation time. The editor provides
@@ -2736,7 +2827,7 @@ by Phase 4 no longer needing to stand up its own glTF pipeline)*
 
 ## Phase 2 — Physics
 
-### Status: real first slice landed 2026-08-10; convex hulls + breaking-threshold constraints landed 2026-08-14; runtime fracture-activation (bounded FractureBody registry) landed 2026-08-14 (see dated notes below) — Phase 2 is complete for this engine's current single-object-slot scope; a real multi-object scene graph remains future work, not a Phase 2 gap
+### Status: real first slice landed 2026-08-10; convex hulls + breaking-threshold constraints landed 2026-08-14; runtime fracture-activation (bounded FractureBody registry) landed 2026-08-14 (see dated notes below) — the real multi-object scene graph this section's own earlier notes deferred as future work has since landed too (see Phase 1's "Real multi-object scene graph" dated entry, 2026-08-14); fracture itself still deliberately operates on one object at a time (its own separate, smaller registry, tracked by source id), a real scope choice, not a gap
 
 **Correction to this section's original claim, below**: Bullet has **no
 official C API** for its core engine — verified by cloning the `bullet3`
@@ -3772,7 +3863,7 @@ project, but a smaller one than before)*
 
 ## Phase 5 — MicroPython Integration
 
-### Status: embedding + decorator-pattern prototyping done; real C API surface not started
+### Status: embedding + decorator-pattern prototyping done; wired into the real build with a real Console REPL; a real (if intentionally scoped) C API surface landed 2026-08-14 (see dated note below) — geometry creation/vertex editing specifically, per explicit request; the original "initial" sketch's gameplay-oriented items (`phi.spawn`/`destroy`/`players`, the `phi.on`/`emit` event system) don't apply to this project's current single-player-editor architecture (no gameplay-entity system exists) and were deliberately not built
 
 A bounded first slice is complete and build-verified on all three targets
 (native/win32/wasm): MicroPython itself is embedded (`client/micropython_embed/`,
@@ -3827,13 +3918,19 @@ that's 280 *trivial* 3-yield tasks; a real NPC/vehicle coroutine doing
 actual decision logic per resume will cost more than this floor number,
 so this isn't a substitute for testing real behavior scripts once they exist.
 
-**Not started**: the actual C API surface (`phi.mesh_object`, `phi.raycast`,
-scene bindings, etc. — the "C API surface (initial)" section below is still
-a design sketch, not implemented against the embedding), and MicroPython
-isn't wired into the real game build (`phi_native`/`phi_win32`/`game.wasm`)
-at all yet — `client/mp_test_main.c` is a standalone self-test, deliberately
-kept separate so nothing about the shipped binary's size or behavior changes
-until the real API is designed.
+**Update, 2026-08-14**: this "Not started" paragraph is now stale on both
+counts. MicroPython IS wired into the real game build (`client/mp_port.c`
+is in `COMMON_SRCS` -- native/win32/wasm all link it), the Console panel
+executes real typed Python (falling through from `console_dispatch`'s own
+dev-commands), and a real (if deliberately scoped) part of the C API
+surface below -- `phi.mesh_object`/`create_mesh`/`set_vertices`/
+`set_vertex`/`list_objects`/`delete_object`, plus the already-longer-
+standing `phi.prop_get`/`set`/`enable_physics`/`add_light`/`render`/
+`activate_ragdoll` -- is real and build-verified, not a sketch. See this
+section's own new dated entry below for what specifically landed and why
+the REST of the sketch (`phi.raycast`, `phi.spawn`/`destroy`/`players`,
+`phi.on`/`emit`) either remains genuinely unbuilt or doesn't apply to
+this project's current architecture at all.
 
 ### Embedding strategy
 
@@ -3928,8 +4025,113 @@ phi.on(event_name, callback)
 phi.emit(event_name, *args)
 ```
 
+**Update, 2026-08-14 -- what actually got built vs. what didn't, and why**:
+this was always a design sketch, not a commitment to build every line of
+it verbatim. What landed for real, with a real (if different, see below)
+signature -- `phi.mesh_object(path, x=0, y=0, z=0)` (loads AND adds a new
+scene object, doesn't just return a floating `MeshObject` handle -- this
+engine's actual object model is main.c's `scene_objects.c` registry, not
+a Python-side value type), `phi.create_mesh(positions, indices, x=0,
+y=0, z=0)` (new -- not in the original sketch at all; the actual "create
+geometry" capability the sketch's `mesh_subdivide`/`mesh_extrude`/
+`mesh_merge` were gesturing at, built as one general raw-geometry
+primitive instead of three separate derived-mesh operations),
+`phi.set_vertices(id, positions)`/`set_vertex(id, i, x, y, z)` (new --
+"redefine the verts of existing scene geometry", the real ask this
+landed for), `phi.list_objects()`/`delete_object(id)`. `phi.apply_
+impulse` already existed (Phase 2, takes no explicit `obj` argument --
+operates on "the selected object" via `phi_mp_register_targets`'s
+resolver, see Phase 1's "Real multi-object scene graph" dated entry,
+rather than an object value passed as an argument -- a real, deliberate
+difference from the sketch's own signature, matching how `phi.prop_get/
+set` already worked). **Still genuinely unbuilt**: `phi.raycast`,
+`mesh_subdivide`/`extrude`/`merge`/`noise3` as their own distinct ops,
+`anim_clip`/`play` (Phase 4's `AnimClip`/`AnimPlayback` exist and are
+real, just not Python-bound yet). **Deliberately will not be built as
+sketched**: `phi.spawn`/`destroy`/`players`/`time`/`on`/`emit` -- these
+describe a multiplayer gameplay-entity/event system (Qek's own domain,
+see phi.md's Phase 1 "Client/server model" note on that code being
+removed) that has no equivalent in Phi's current single-player-editor
+architecture; revisiting this sketch's gameplay half only makes sense
+once/if a real entity-and-event system exists to bind it to, not before.
+
 Its design is the highest-leverage design decision in the project — changing it
 breaks all user scripts.
+
+#### Geometry creation + vertex editing, real for both the Console and Claude, 2026-08-14
+
+Per explicit request ("make it so Claude can create geometry and
+redefine the verts of existing scene geometry via the Python API"). Two
+halves, sharing one implementation:
+
+- **The Python bindings themselves** (`client/mp_port.c`): `phi.mesh_
+  object`/`create_mesh`/`set_vertices`/`set_vertex`/`list_objects`/
+  `delete_object`, calling `scene_objects.c`/`halfedge.c`/`halfedge_
+  gltf.c` directly -- no `main.c` callback indirection needed (unlike
+  `phi.render()`/`activate_ragdoll()`, which genuinely need main.c-only
+  state like `g_cam_pos`/`g_skinned_test_obj`; `scene_objects.c` is a
+  self-contained registry module, the same shape `light.c` already is,
+  and `phi.add_light`/`delete_light`/`list_lights` already called it
+  directly too). `create_mesh` uses the existing `halfedge_build_from_
+  triangles` (previously unused by any Python-reachable path) to turn a
+  flat position list + a flat triangle-index list into real half-edge
+  topology, with real bounds/index-range validation (a bad index raises
+  a real `ValueError`, doesn't read past the position array). The new
+  `RenderMesh` for each created/loaded object is `calloc`'d directly
+  rather than via `octree_render.c`'s `mesh_create()` -- deliberately,
+  so `mp_port.c`'s translation unit never needs that GL-touching file
+  linked, keeping every existing no-GL `mp_*` standalone test building
+  exactly as before (would otherwise force a real GL context onto tests
+  that have never needed one).
+- **Claude's chat access to the same capability** (`client/net.h`/`.c`,
+  `main.c`, `server/server.py`): three new wire-protocol request/reply
+  pairs (`PKT_CREATE_MESH_REQUEST`/`REPLY`, `PKT_SET_VERTICES_REQUEST`/
+  `REPLY`, `PKT_DELETE_MESH_OBJECT_REQUEST`/`REPLY`), same "server asks
+  THIS client to act" shape `PKT_ADD_LIGHT_REQUEST` already established,
+  wired to three new Anthropic tools (`create_mesh_object`/`set_mesh_
+  vertices`/`delete_mesh_object`) -- explicit project decision, same
+  read-write-not-read-only choice already made for lights/render
+  settings, extended here per this session's later explicit request.
+  `get_scene_state`'s JSON grew a real `objects` array (see Phase 1's
+  "Real multi-object scene graph" dated entry) specifically so Claude
+  can discover an existing object's id/vertex count before editing it.
+  Wire-protocol vertex/triangle counts are capped (`PKT_MESH_MAX_VERTS`
+  = 2048, `PKT_MESH_MAX_TRIS` = 4096 -- matching constants in both
+  `client/net.h` and `server.py`, checked on both ends) -- a real,
+  deliberately modest bound distinct from the LOCAL Python console's own
+  `phi.create_mesh`, which has no extra cap beyond this codebase's
+  existing `uint16_t` index-width convention; anything bigger belongs in
+  a real authored asset via the Asset Browser, not a single chat-tool
+  call. Multi-byte fields in the new wire parsers are `memcpy`'d into
+  real aligned local arrays rather than cast in place from the raw byte
+  cursor -- the existing per-scalar convention every other field in
+  `net.c`'s parser already used, just extended to arrays (a cast-in-
+  place would risk both strict-aliasing UB and misaligned access on a
+  buffer with no guaranteed float alignment).
+
+Verified with two new standalone harnesses. `scene_objects_test` covers
+the registry itself (see Phase 1's own dated entry). `mp_geometry_test`
+(new, `make mp_geometry_test`) exercises the actual end-to-end ask
+against a real embedded interpreter: `create_mesh` builds a real 4-
+vertex/2-triangle quad, checked against the real C-side `HalfEdgeMesh`
+afterward (not just "Python didn't raise"); `set_vertices` rewrites
+every vertex, checked that vertex 0 AND vertex 3 both actually moved
+(not just the first one); `set_vertex` changes one vertex, checked that
+its NEIGHBORS did NOT change (a single-vertex edit not clobbering the
+rest); `list_objects`/`mesh_object`/`delete_object` all checked against
+`scene_object_find` directly, including that loading a second object
+via `phi.mesh_object` leaves the first (from `create_mesh`) completely
+untouched -- real multi-object behavior, not a replace in disguise; five
+distinct real error cases (mismatched array lengths, an out-of-range
+index, an off-by-one index, a wrong vertex count, a nonexistent object
+id) all checked to raise a real Python `ValueError`, not silently
+corrupt or crash. Native and wasm both rebuilt clean from a forced-clean
+state; every standalone harness in the project re-run and re-verified
+passing. `server/server.py` checked with `python3 -m py_compile` (no
+live end-to-end chat-tool round trip was run against a funded API key
+this pass, same honest limitation every earlier chat-tool addition this
+session already flagged). No live GUI verification possible in this
+sandbox.
 
 ### C modules (side modules)
 

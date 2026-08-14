@@ -789,15 +789,26 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
     y += row_h + 6.0f;
 
     char line[128];
-    if (ctx->test_obj_loaded && ctx->test_obj) {
-        int sel = (g_ui.selected_object_id == 4000u + (unsigned int)ctx->test_obj->id);
+    /* Every live scene object (Phase 5's real multi-object scene graph,
+     * see scene_objects.h) -- called directly, same as light_get_all
+     * just below, rather than threaded through UIRenderContext (that
+     * struct's own test_obj field only ever carries the SELECTED one,
+     * for Properties' single-object display -- the Outliner needs the
+     * whole list). Row order matches scene_object_get_all's own (stable
+     * within a session) -- the Outliner click handler below walks
+     * objects in this exact same order/step, so a click can never land
+     * on a different object than the one actually drawn there. */
+    MeshObject *objects[SCENE_MAX_OBJECTS];
+    int n_objects = scene_object_get_all(objects);
+    for (int i = 0; i < n_objects; i++) {
+        int sel = (g_ui.selected_object_id == 4000u + (unsigned int)objects[i]->id);
         if (sel) {
             ui_rect(a->x + 1.0f, y - 2.0f, a->w - 2.0f, row_h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.35f);
         } else {
             outliner_row_bg(a, y, row_h, row_index);
         }
         row_index++;
-        snprintf(line, sizeof(line), "MeshObject #%d", ctx->test_obj->id);
+        snprintf(line, sizeof(line), "MeshObject #%d", objects[i]->id);
         ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         y += row_h;
     }
@@ -916,8 +927,10 @@ static void properties_panel_walk(Area *a, const UIRenderContext *ctx, int do_dr
     if (g_ui.selected_object_id >= LIGHT_ID_BASE && g_ui.selected_object_id < LIGHT_ID_BASE + 100000u) {
         sel_light = light_find((int)(g_ui.selected_object_id - LIGHT_ID_BASE));
     }
-    int mesh_selected = ctx->test_obj_loaded && ctx->test_obj &&
-        g_ui.selected_object_id == 4000u + (unsigned int)ctx->test_obj->id;
+    /* ctx->test_obj is ALREADY "whichever object is selected, or NULL"
+     * (see UIRenderContext's own comment) -- no separate id comparison
+     * needed here anymore. */
+    int mesh_selected = ctx->test_obj != NULL;
 
     if (mesh_selected) {
         if (do_draw) {
@@ -1834,9 +1847,7 @@ static int build_ctx_menu_rows(const UIRenderContext *ctx, const char *items[CTX
         items[n] = "Fracture (Voronoi)"; actions[n++] = CTX_ACTION_FRACTURE;
         items[n] = "Save as Asset";      actions[n++] = CTX_ACTION_SAVE_AS_ASSET;
         items[n] = "Enable Physics";     actions[n++] = CTX_ACTION_ENABLE_PHYSICS;
-        int mesh_selected = ctx->test_obj_loaded && ctx->test_obj &&
-            ui_get_selected_object() == 4000u + (unsigned int)ctx->test_obj->id;
-        if (mesh_selected) {
+        if (ctx->test_obj != NULL) {
             items[n] = "Enter Edit Mode"; actions[n++] = CTX_ACTION_TOGGLE_EDIT_MODE;
         }
     }
@@ -2096,9 +2107,14 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
          * real per-row hit-list), but now at least at the right rows. */
         float row_h = 20.0f;
         float row_y = a->y + UI_PANEL_PAD + row_h + 6.0f;   /* matches draw_panel_outliner's first content row */
-        if (ctx->test_obj_loaded && ctx->test_obj) {
+        /* Every live scene object, same order scene_object_get_all
+         * returns them in draw_panel_outliner (see its own comment on
+         * why this can't drift from what's actually drawn). */
+        MeshObject *objects[SCENE_MAX_OBJECTS];
+        int n_objects = scene_object_get_all(objects);
+        for (int i = 0; i < n_objects; i++) {
             if ((float)y >= row_y - 2.0f && (float)y < row_y - 2.0f + row_h) {
-                g_ui.selected_object_id = 4000u + (unsigned int)ctx->test_obj->id;
+                g_ui.selected_object_id = 4000u + (unsigned int)objects[i]->id;
                 return 1;
             }
             row_y += row_h;

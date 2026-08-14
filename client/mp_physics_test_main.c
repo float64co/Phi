@@ -20,6 +20,23 @@ static void check(int cond, const char *msg) {
     if (!cond) g_fail = 1;
 }
 
+/* phi_mp_register_targets now takes a resolver CALLBACK (Phase 5's real
+ * multi-object scene graph, see scene_objects.h) rather than a fixed
+ * MeshObject*+loaded-bool pair -- this test's own stand-in for main.c's
+ * selected_mesh_object(), always returning the one test object. */
+static MeshObject *s_obj = NULL;
+static MeshObject *test_get_selected_object(void) { return s_obj; }
+
+/* Stub -- mp_port.c now links scene_objects.c (Phase 5's phi.delete_
+ * object etc.), whose scene_object_delete references mesh_destroy
+ * (octree_render.c's real GL-touching home) -- same technique fracture_
+ * body_test_main.c already established. Real free(), not a no-op. */
+void mesh_destroy(RenderMesh *m) {
+    if (!m) return;
+    free(m->data);
+    free(m);
+}
+
 int main(void) {
     int stack_top;
 
@@ -35,7 +52,7 @@ int main(void) {
     obj.orientation = quat_identity();
     obj.scale = (Vec3f){1.0f, 1.0f, 1.0f};
     obj.hem = hem;
-    int loaded = 1;
+    s_obj = &obj;
     int edit_face = -1;
 
     PhiPhysicsWorld *world = phi_physics_world_create();
@@ -45,7 +62,7 @@ int main(void) {
     phi_physics_add_box_body(world, ground_half, ground_pos, identity_quat, 0.0f, 0.3f);
 
     phi_mp_init(&stack_top);
-    phi_mp_register_targets(&obj, &loaded, &edit_face, world);
+    phi_mp_register_targets(test_get_selected_object, &edit_face, world);
 
     printf("[mp_physics_test] === 1: physics calls before enable_physics raise cleanly, don't crash ===\n");
     char *out = phi_mp_exec("phi.apply_impulse((1,0,0), (0,0,0))");

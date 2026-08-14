@@ -3,35 +3,35 @@
 #include <stdlib.h>
 #include <string.h>
 
-static MeshObject     *s_obj = NULL;
-static const int      *s_obj_loaded = NULL;
+static MeshObject     *(*s_get_selected_object)(void) = NULL;
 static const int      *s_edit_face = NULL;
 static RenderSettings *s_render_settings = NULL;
 
-void scene_target_register(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face,
+void scene_target_register(MeshObject *(*get_selected_object)(void), const int *edit_face,
                             RenderSettings *render_settings) {
-    s_obj = test_obj;
-    s_obj_loaded = test_obj_loaded;
+    s_get_selected_object = get_selected_object;
     s_edit_face = edit_face;
     s_render_settings = render_settings;
 }
 
 int scene_resolve_target(const char *target, const PhiPropGroup **out_group, void **out_owner) {
     if (strcmp(target, "object") == 0) {
-        if (!s_obj || !s_obj_loaded || !*s_obj_loaded) return 0;
+        MeshObject *obj = s_get_selected_object ? s_get_selected_object() : NULL;
+        if (!obj) return 0;
         *out_group = &g_phi_prop_mesh_object;
-        *out_owner = s_obj;
+        *out_owner = obj;
         return 1;
     }
     if (strcmp(target, "face") == 0) {
-        if (!s_obj || !s_obj_loaded || !*s_obj_loaded || !s_obj->hem ||
+        MeshObject *obj = s_get_selected_object ? s_get_selected_object() : NULL;
+        if (!obj || !obj->hem ||
             !s_edit_face || *s_edit_face < 0 ||
-            *s_edit_face >= s_obj->hem->face_count ||
-            s_obj->hem->faces[*s_edit_face].deleted) {
+            *s_edit_face >= obj->hem->face_count ||
+            obj->hem->faces[*s_edit_face].deleted) {
             return 0;
         }
         *out_group = &g_phi_prop_heface;
-        *out_owner = &s_obj->hem->faces[*s_edit_face];
+        *out_owner = &obj->hem->faces[*s_edit_face];
         return 1;
     }
     if (strcmp(target, "render") == 0) {

@@ -11,6 +11,7 @@
 #include "render_settings.h"
 #include "input.h"
 #include "skinned_mesh_object.h"
+#include "scene_objects.h"
 
 /* Native UI System — Phase 1 (see phi.md's "Native UI System" section for
  * the design this implements: Blender's recursive area-split model, not
@@ -169,15 +170,21 @@ void ui_layout(int window_w, int window_h);
 typedef struct {
     Renderer   *renderer;
     GBuffer    *gbuf;
-    MeshObject *test_obj;        /* Phase 1's assets/cube.gltf test object, see main.c */
-    int         test_obj_loaded;
+    /* Whichever MeshObject the shared selection currently points at, or
+     * NULL if that's a Light or nothing at all (Phase 5's real multi-
+     * object scene graph, see scene_objects.h -- main.c passes its own
+     * selected_mesh_object() here every frame). The Properties panel's
+     * single-object display and the context-menu's "is a mesh selected"
+     * checks both key off this being non-NULL; every OTHER live object
+     * is listed by ui.c's Outliner calling scene_object_get_all()
+     * directly (mirrors how light_get_all is already called directly,
+     * not threaded through this struct either). */
+    MeshObject *test_obj;
     RenderSettings *render_settings;  /* main.c's g_render_settings (Phase 3, see render_settings.h) -- always non-NULL once main.c wires it up, shown as a pinned Properties-panel section regardless of selection. */
     /* main.c's one skinned-test-object slot (Phase 4, see skinned_mesh_
-     * object.h) -- NULL until main.c has successfully loaded one (same
-     * "NULL means nothing to show yet" convention test_obj_loaded's own
-     * flag uses above, just via a pointer instead of a separate bool
-     * since this slot's existence and its loadedness are the same
-     * question). Read-only from ui.c's side -- the Timeline panel only
+     * object.h) -- NULL until main.c has successfully loaded one, same
+     * "NULL means nothing to show yet" convention test_obj above uses.
+     * Read-only from ui.c's side -- the Timeline panel only
      * ever mutates it indirectly, through ui_poll_timeline_scrub/_play_
      * toggle below, which main.c drains and applies itself, same "UI
      * raises intent, main.c executes" split every other panel action in
