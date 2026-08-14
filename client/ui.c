@@ -1422,7 +1422,24 @@ static void draw_panel_asset_browser(Area *a, const UIRenderContext *ctx) {
     ui_text_draw(dx + 8.0f, dy + 4.0f, "Delete", g_ui.font_body, 12.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, dim);
 }
 
-#define CHAT_ROW_H UI_SCROLL_ROW_H
+/* Chat scrollback text at 2x this panel's own previous size, per explicit
+ * request -- CHAT_ROW_H scales by the same 2x factor (not the shared
+ * UI_SCROLL_ROW_H Console/Asset Browser/Python Panel still use at their
+ * own unchanged size) so taller glyphs get taller rows and never overlap
+ * their neighbors; wrap_text's own call site below is sized off this same
+ * constant too, so the word-wrap boundary matches what's actually drawn
+ * instead of wrapping for 13pt metrics while rendering at 26pt (which
+ * would silently overflow avail_w on the right edge -- the exact
+ * "doesn't intersect clipping/overflow limits" failure mode this was
+ * explicitly asked to avoid). Scoped to the scrollback message text only
+ * (the "Chat" title, the input box, and the "thinking..." indicator all
+ * stay their own existing sizes -- the input box in particular sits in a
+ * fixed 24px-tall rect shared with the Asset Browser's own text fields
+ * via draw_text_field, so doubling ITS text would be the same overflow
+ * bug this change is specifically avoiding, not "the chat text" a reader
+ * actually reads). */
+#define CHAT_FONT_SIZE (13.0f * 2.0f)
+#define CHAT_ROW_H     (UI_SCROLL_ROW_H * 2.0f)
 
 /* Input row pinned to the bottom, same geometry shape asset_browser's
  * field rects use (a dedicated function shared between drawing and
@@ -1435,18 +1452,29 @@ static void chat_input_rect(Area *a, float *x, float *y, float *w, float *h) {
     *y = a->y + a->h - UI_PANEL_PAD - *h;
 }
 
+/* Clearance between the newest scrollback line's TOP edge (ui_text_draw's
+ * own y param, see its header comment) and the input box's top edge --
+ * originally a flat 20px tuned for 13pt text (matching draw_panel_
+ * console's own input-to-first-log-line gap; before that, 8px let the
+ * bottom of the newest line's glyphs clip into the input box's top edge,
+ * a real reported bug). Now scaled by the same 2x factor CHAT_FONT_SIZE/
+ * CHAT_ROW_H use -- left at a flat 20px while the text doubled in height
+ * would silently reintroduce that exact clipping bug at the new size (a
+ * 26pt glyph's own bottom edge would land ~8px INTO the input box with
+ * only 20px of top-edge clearance -- the glyph itself is taller than the
+ * old margin). */
+#define CHAT_INPUT_CLEARANCE (20.0f * 2.0f)
+
 /* Vertical span the scrollback actually has to draw in: from just below
- * the "Chat" title row down to a real 20px clearance above the input box
- * (matching draw_panel_console's own input-to-first-log-line gap) --
- * previously only 8px, which let the bottom of the newest line's glyphs
- * clip into the input box's top edge, a real reported bug. Shared by the
- * draw loop, the wheel-scroll clamp, and the scrollbar thumb geometry so
- * none of the three can disagree about how much room there is. */
+ * the "Chat" title row down to CHAT_INPUT_CLEARANCE above the input box.
+ * Shared by the draw loop, the wheel-scroll clamp, and the scrollbar
+ * thumb geometry so none of the three can disagree about how much room
+ * there is. */
 static void chat_log_area_rect(Area *a, float *top, float *bottom) {
     float ix, iy, iw, ih;
     chat_input_rect(a, &ix, &iy, &iw, &ih);
     *top = a->y + 30.0f;
-    *bottom = iy - 20.0f;
+    *bottom = iy - CHAT_INPUT_CLEARANCE;
 }
 
 /* How many scrollback rows actually fit right now -- reserve_rows lets
@@ -1541,7 +1569,7 @@ static int chat_build_visual_rows(const ChatState *cs, float avail_w, ChatVisual
     for (int e = 0; e < cs->log_count && n < max_out; e++) {
         const ChatLogLine *entry = &cs->log[e];
         char wrapped[CHAT_MAX_WRAP_PER_MSG][CHAT_VISUAL_ROW_LEN];
-        int wn = wrap_text(entry->text, avail_w, g_ui.font_body, 13.0f, wrapped, CHAT_MAX_WRAP_PER_MSG);
+        int wn = wrap_text(entry->text, avail_w, g_ui.font_body, CHAT_FONT_SIZE, wrapped, CHAT_MAX_WRAP_PER_MSG);
         for (int w = 0; w < wn && n < max_out; w++) {
             ChatVisualRow *row = &out[n++];
             strncpy(row->text, wrapped[w], CHAT_VISUAL_ROW_LEN - 1);
@@ -1596,7 +1624,7 @@ static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
      * scrolling. */
     cs->scroll_offset = ui_clamp_scroll(cs->scroll_offset, total_rows, visible);
 
-    float y = iy - 20.0f;
+    float y = iy - CHAT_INPUT_CLEARANCE;   /* matches chat_log_area_rect's own bottom exactly -- see CHAT_INPUT_CLEARANCE's own comment */
     if (cs->waiting_for_reply) {
         ui_text_draw(x, y, "Claude is thinking...", g_ui.font_body, 12.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
         y -= CHAT_ROW_H;
@@ -1615,11 +1643,11 @@ static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
             if (plen >= CHAT_VISUAL_ROW_LEN) plen = CHAT_VISUAL_ROW_LEN - 1;
             memcpy(prefix, row->text, (size_t)plen);
             prefix[plen] = 0;
-            ui_text_draw(x, y, prefix, g_ui.font_bold, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-            float rest_x = x + font_text_width(g_ui.font_bold, prefix, 13.0f);
-            ui_text_draw(rest_x, y, row->text + plen, g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            ui_text_draw(x, y, prefix, g_ui.font_bold, CHAT_FONT_SIZE, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            float rest_x = x + font_text_width(g_ui.font_bold, prefix, CHAT_FONT_SIZE);
+            ui_text_draw(rest_x, y, row->text + plen, g_ui.font_body, CHAT_FONT_SIZE, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         } else {
-            ui_text_draw(x, y, row->text, g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            ui_text_draw(x, y, row->text, g_ui.font_body, CHAT_FONT_SIZE, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         }
         y -= CHAT_ROW_H;
     }

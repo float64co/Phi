@@ -2364,6 +2364,59 @@ of the actual wrap/scrollbar/bold rendering is still not possible in
 this sandbox, same `XOpenDisplay()` limitation as everything else this
 session needing a real window.
 
+#### Chat scrollback text doubled in size, 2026-08-14
+
+Per explicit request ("2x the current size without intersecting current
+clipping/overflow limits"). Scoped to the actual conversation content
+(the scrollback message text, both the bold `"Name: "` prefix and the
+body) -- `CHAT_FONT_SIZE` (new, `13.0f * 2.0f`) replaces the hardcoded
+`13.0f` at every scrollback `ui_text_draw`/`font_text_width` call site.
+Three real WERE-going-to-be-broken pieces of geometry that this text
+size is load-bearing for, all found and fixed together rather than just
+bumping the font size and hoping:
+
+- **Word-wrap boundary**: `chat_build_visual_rows`'s call into
+  `wrap_text` was still measuring at the OLD `13.0f` while the text
+  would have rendered at the new size -- rows wrapped for 13pt metrics
+  but drawn at 26pt run measurably wider than `avail_w`, overflowing
+  past the panel's own right margin. Fixed by passing `CHAT_FONT_SIZE`
+  into the same `font_text_width`-based measurement the wrap already
+  used, so the wrap boundary and the rendered width are computed from
+  the same size again.
+- **Row height**: `CHAT_ROW_H` used to alias the shared `UI_SCROLL_ROW_H`
+  (18px, still used at its own unchanged size by Console/Asset Browser/
+  Python Panel's own scrollbacks -- deliberately NOT touched, this ask
+  was scoped to Chat specifically). Left at 18px with 26pt glyphs, rows
+  would overlap their neighbors -- a real, direct violation of "without
+  intersecting." Given its own `CHAT_ROW_H = UI_SCROLL_ROW_H * 2.0f`
+  instead, decoupled from the shared constant.
+- **Input-box clearance**: the 20px gap between the newest scrollback
+  line's top edge and the input box (`chat_log_area_rect`'s `bottom`,
+  duplicated inline in `draw_panel_chat`'s own `y = iy - ...`) was tuned
+  for 13pt glyph height. A 26pt glyph's own bottom edge would land
+  roughly 8px INSIDE the input box with that same flat 20px margin --
+  reintroducing the exact "scrollback clips the input box" bug the
+  2026-08-10 entry above already fixed once, just at the new size. Now
+  a named `CHAT_INPUT_CLEARANCE` (`20.0f * 2.0f`), referenced from both
+  call sites so they can't drift apart again.
+
+Deliberately NOT touched: the "Chat" title bar (chrome, not
+conversational content), the input box's own typed text/placeholder
+(`draw_text_field`, shared with the Asset Browser's search/name/tags
+fields at a fixed 24px box height -- doubling ITS text without also
+growing that fixed-height box would be the identical overflow bug this
+whole change is about avoiding, just relocated), and the "Claude is
+thinking..." indicator (a status label, not message content -- stays
+readable at its own smaller size inside the now-taller row it already
+reserves via `chat_visible_row_count`'s `reserve_rows`).
+
+Native and wasm both rebuilt clean. No live GUI verification possible in
+this sandbox (no real X display) -- the wrap/row-height/clearance math
+is worked out algebraically against `ui_text_draw`'s own documented
+y-is-top-of-glyph-box convention (see the Play/Pause button-centering
+fix earlier this session for the same convention biting a different
+panel), not eyeballed against a real window.
+
 #### Scene panel: reference grid + Blender-style MMB orbit/pan, 2026-08-10
 
 **A real ground-aligned reference grid** (`renderer_draw_grid`, new) —
