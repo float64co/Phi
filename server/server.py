@@ -85,6 +85,17 @@ PKT_CHAT_REPLY           = 0x21   # S->C: [len:u16 utf8:bytes]
 PKT_SCENE_STATE_REQUEST  = 0x22   # S->C: [req_id:u32]
 PKT_SCENE_STATE_REPLY    = 0x23   # C->S: [req_id:u32 len:u16 utf8-json:bytes]
 
+# Chat-driven scene MUTATION -- see client/net.h's own comment on these
+# six. Claude's access to lights/render settings is deliberately read-
+# WRITE (unlike get_asset_list/get_scene_state, which stay read-only),
+# per this project's own explicit decision.
+PKT_PROP_SET_REQUEST     = 0x24   # S->C: [req_id:u32 target_len:u8 target:bytes ident_len:u8 ident:bytes is_vec3:u8 v0:f32 v1:f32 v2:f32]
+PKT_PROP_SET_REPLY       = 0x25   # C->S: [req_id:u32 ok:u8]
+PKT_ADD_LIGHT_REQUEST    = 0x26   # S->C: [req_id:u32 type:u8 x:f32 y:f32 z:f32]
+PKT_ADD_LIGHT_REPLY      = 0x27   # C->S: [req_id:u32 ok:u8 light_id:u32]
+PKT_DELETE_LIGHT_REQUEST = 0x28   # S->C: [req_id:u32 light_id:u32]
+PKT_DELETE_LIGHT_REPLY   = 0x29   # C->S: [req_id:u32 ok:u8]
+
 ASSET_NAME_WIRE_MAX = 63
 ASSET_PATH_WIRE_MAX = 127
 ASSET_TAGS_WIRE_MAX = 95
@@ -157,6 +168,44 @@ def _parse_scene_state_reply(payload: bytes):
     slen = struct.unpack_from('<H', payload, 4)[0]
     text = payload[6:6+slen].decode(errors='replace')
     return req_id, text
+
+# ---------------------------------------------------------------------------
+# Chat-driven scene mutation packet encode/decode (see PKT_PROP_SET_*/
+# PKT_ADD_LIGHT_*/PKT_DELETE_LIGHT_* above and client/net.h's matching
+# comment) -- three requests, sharing Client's existing req_id/Event
+# pending-reply machinery (see Client._send_and_wait) rather than each
+# growing its own copy.
+# ---------------------------------------------------------------------------
+def pack_prop_set_request(req_id: int, target: str, identifier: str, is_vec3: bool,
+                           v0: float, v1: float, v2: float) -> bytes:
+    tb = target.encode('utf-8')[:63]
+    ib = identifier.encode('utf-8')[:31]
+    return (bytes([PKT_PROP_SET_REQUEST]) + struct.pack('<I', req_id) +
+            bytes([len(tb)]) + tb + bytes([len(ib)]) + ib +
+            bytes([1 if is_vec3 else 0]) + struct.pack('<fff', v0, v1, v2))
+
+def _parse_prop_set_reply(payload: bytes):
+    if len(payload) < 5: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    return req_id, payload[4] != 0
+
+def pack_add_light_request(req_id: int, light_type: int, x: float, y: float, z: float) -> bytes:
+    return bytes([PKT_ADD_LIGHT_REQUEST]) + struct.pack('<IBfff', req_id, light_type, x, y, z)
+
+def _parse_add_light_reply(payload: bytes):
+    if len(payload) < 9: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    ok = payload[4] != 0
+    light_id = struct.unpack_from('<I', payload, 5)[0]
+    return req_id, ok, light_id
+
+def pack_delete_light_request(req_id: int, light_id: int) -> bytes:
+    return bytes([PKT_DELETE_LIGHT_REQUEST]) + struct.pack('<II', req_id, light_id)
+
+def _parse_delete_light_reply(payload: bytes):
+    if len(payload) < 5: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    return req_id, payload[4] != 0
 
 def _slugify(name: str) -> str:
     s = re.sub(r'[^a-zA-Z0-9]+', '_', name).strip('_').lower()
@@ -259,15 +308,18 @@ class Client:
         self._buf      = bytearray()
         self._lock     = threading.Lock()
 
-        # Pending get_scene_state tool calls (see PKT_SCENE_STATE_REQUEST/
-        # REPLY): a chat-handling thread blocks on an Event here while this
-        # connection's own read loop (a DIFFERENT thread, see run()) waits
-        # for the matching PKT_SCENE_STATE_REPLY and wakes it. req_id
-        # disambiguates in case a second request goes out before the first
-        # is answered.
+        # Pending request/reply tool calls (get_scene_state, and now the
+        # read-write light/render-settings tools too -- see PKT_PROP_SET_*/
+        # PKT_ADD_LIGHT_*/PKT_DELETE_LIGHT_* above): a chat-handling thread
+        # blocks on an Event here while this connection's own read loop (a
+        # DIFFERENT thread, see run()) waits for the matching *_REPLY and
+        # wakes it. req_id disambiguates in case a second request goes out
+        # before the first is answered -- shared across ALL FOUR request
+        # types (one counter, one dict), since req_ids only ever need to be
+        # unique per-client, not per-request-type.
         self._pending_lock    = threading.Lock()
         self._pending_events  = {}   # req_id -> threading.Event
-        self._pending_results = {}   # req_id -> str | None (None = timed out/never arrived)
+        self._pending_results = {}   # req_id -> whatever that request type's reply carries (str/bool/tuple), or None if never arrived
         self._next_req_id     = 1
 
     def send(self, data: bytes):
@@ -315,22 +367,78 @@ class Client:
         except Exception:
             self.alive = False
 
-    def request_scene_state(self, timeout: float = 5.0):
-        """Sends PKT_SCENE_STATE_REQUEST to this client and blocks (this is
-        called from the chat-handling thread, never the read-loop thread)
-        until either the matching PKT_SCENE_STATE_REPLY arrives or timeout
-        elapses. Returns the JSON text, or None on timeout/disconnect."""
+    def _alloc_req_id(self) -> int:
         with self._pending_lock:
             req_id = self._next_req_id
             self._next_req_id += 1
-            ev = threading.Event()
+        return req_id
+
+    def _send_and_wait(self, req_id: int, packet: bytes, timeout: float = 5.0):
+        """Sends an already-packed request (req_id must already be baked
+        into it) and blocks (called from the chat-handling thread, never
+        the read-loop thread) until the matching *_REPLY arrives or timeout
+        elapses. Returns whatever _on_message's handler for that reply type
+        stashed into _pending_results, or None on timeout/disconnect --
+        shared by request_scene_state/set_prop/add_light/delete_light
+        below rather than each hand-rolling this same wait dance."""
+        ev = threading.Event()
+        with self._pending_lock:
             self._pending_events[req_id] = ev
-        self.send(pack_scene_state_request(req_id))
+        self.send(packet)
         got = ev.wait(timeout)
         with self._pending_lock:
             self._pending_events.pop(req_id, None)
             result = self._pending_results.pop(req_id, None)
         return result if got else None
+
+    def _resolve_pending(self, req_id: int, value):
+        """Stashes value for req_id and wakes whichever chat-handling
+        thread is blocked waiting on it in _send_and_wait -- shared by
+        all four *_REPLY handlers in _on_message below rather than each
+        repeating this same lock/set dance."""
+        with self._pending_lock:
+            ev = self._pending_events.get(req_id)
+            if ev:
+                self._pending_results[req_id] = value
+                ev.set()
+
+    def request_scene_state(self, timeout: float = 5.0):
+        """Returns the JSON text, or None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        return self._send_and_wait(req_id, pack_scene_state_request(req_id), timeout)
+
+    _LIGHT_TYPE_TO_WIRE = {'point': 0, 'sun': 1, 'spot': 2, 'area': 3}
+
+    def set_prop(self, target: str, identifier: str, value, timeout: float = 5.0):
+        """target is 'light:<id>' or 'render' (scene_target.c's own
+        resolver strings). value is a float/int for a scalar prop, or a
+        3-element sequence for a VEC3 prop (color/position/direction).
+        Returns True/False (whether the client accepted it -- an unknown
+        target/identifier or a shape mismatch comes back False, not an
+        exception), or None on timeout/disconnect."""
+        is_vec3 = isinstance(value, (list, tuple))
+        if is_vec3:
+            v0, v1, v2 = float(value[0]), float(value[1]), float(value[2])
+        else:
+            v0, v1, v2 = float(value), 0.0, 0.0
+        req_id = self._alloc_req_id()
+        packet = pack_prop_set_request(req_id, target, identifier, is_vec3, v0, v1, v2)
+        return self._send_and_wait(req_id, packet, timeout)
+
+    def add_light(self, light_type: str, x: float, y: float, z: float, timeout: float = 5.0):
+        """Returns (ok, light_id) -- light_id is 0 on failure (registry
+        full) -- or None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        wire_type = self._LIGHT_TYPE_TO_WIRE.get(light_type, 0)
+        packet = pack_add_light_request(req_id, wire_type, x, y, z)
+        return self._send_and_wait(req_id, packet, timeout)
+
+    def delete_light(self, light_id: int, timeout: float = 5.0):
+        """Returns True/False (False if no light with that id exists), or
+        None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        packet = pack_delete_light_request(req_id, light_id)
+        return self._send_and_wait(req_id, packet, timeout)
 
     def _handle_chat(self, user_text: str):
         """Runs on its own thread (spawned by _on_message on PKT_CHAT_MSG)
@@ -354,6 +462,53 @@ class Client:
             if result is None:
                 return '(the client did not respond to the scene-state request in time -- it may be disconnected or busy)'
             return result
+
+        # Read-write light/render-settings tools (Phase 3, see phi.md) --
+        # unlike the two read-only tools above, these actually mutate the
+        # live client's scene. Explicit project decision: Claude's access
+        # to lights/render settings is read-write; it still can never post
+        # a chat message AS the user (PKT_CHAT_MSG only ever originates
+        # from the real human client-side, see chat.c) and has no access
+        # to anything beyond lights/render settings/assets/scene-state --
+        # no object/mesh mutation tool is defined here even though the
+        # underlying wire protocol (scene_target.c's resolver) could
+        # technically carry one.
+        def tool_add_light(input_):
+            light_type = input_.get('type', 'point')
+            if light_type not in ('point', 'sun', 'spot', 'area'):
+                return f"invalid type {light_type!r} -- must be 'point', 'sun', 'spot', or 'area'"
+            x = float(input_.get('x', 0.0)); y = float(input_.get('y', 0.0)); z = float(input_.get('z', 0.0))
+            result = self.add_light(light_type, x, y, z)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            ok, light_id = result
+            return f'created light id={light_id}' if ok else 'failed -- the light registry is full (PHI_MAX_LIGHTS)'
+
+        def tool_set_light_property(input_):
+            light_id = int(input_['light_id'])
+            prop = input_['property']
+            value = input_['value']
+            result = self.set_prop(f'light:{light_id}', prop, value)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            return 'ok' if result else (
+                f'failed -- either no light with id {light_id} exists, {prop!r} is not a real light '
+                'property, or the value shape (single number vs. [r,g,b]) is wrong for that property'
+            )
+
+        def tool_delete_light(input_):
+            light_id = int(input_['light_id'])
+            result = self.delete_light(light_id)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            return 'ok' if result else f'failed -- no light with id {light_id}'
+
+        def tool_set_render_samples(input_):
+            samples = int(input_['samples'])
+            result = self.set_prop('render', 'samples', samples)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            return 'ok' if result else 'failed to set the sample count'
 
         tools = [
             {
@@ -381,10 +536,85 @@ class Client:
                 ),
                 'input_schema': {'type': 'object', 'properties': {}},
             },
+            {
+                'name': 'add_light',
+                'description': (
+                    "Spawn a new Light object (Point, Sun, Spot, or Area -- "
+                    "same four types Blender has) in the running client's "
+                    "live scene, at a given world position. Returns the new "
+                    "light's id, needed for set_light_property/delete_light "
+                    "afterward. The new light gets reasonable per-type "
+                    "defaults (color, energy, etc.) -- use set_light_property "
+                    "to change them."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {
+                        'type': {'type': 'string', 'enum': ['point', 'sun', 'spot', 'area']},
+                        'x': {'type': 'number'}, 'y': {'type': 'number'}, 'z': {'type': 'number'},
+                    },
+                    'required': ['type', 'x', 'y', 'z'],
+                },
+            },
+            {
+                'name': 'set_light_property',
+                'description': (
+                    "Change one property of an existing light in the "
+                    "running client's live scene. Valid property names: "
+                    "'type' (0=point,1=sun,2=spot,3=area -- an integer, "
+                    "changes what kind of light it is), 'position' "
+                    "([x,y,z]), 'direction' ([x,y,z], only meaningful for "
+                    "sun/spot), 'color' ([r,g,b], each usually 0-1), "
+                    "'energy' (a single number, the light's power/"
+                    "strength), 'radius' (point lights only), 'spot_size' "
+                    "and 'spot_blend' (spot lights only, spot_size in "
+                    "radians), 'area_size' (area lights only), 'sun_angle' "
+                    "(sun lights only, radians). Pass a single number for "
+                    "scalar properties or a 3-element list for the vector "
+                    "ones -- get the light's id from add_light or "
+                    "get_scene_state's 'lights' array first."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {
+                        'light_id': {'type': 'integer'},
+                        'property': {'type': 'string'},
+                        'value': {},
+                    },
+                    'required': ['light_id', 'property', 'value'],
+                },
+            },
+            {
+                'name': 'delete_light',
+                'description': "Removes a light from the running client's live scene, by id.",
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {'light_id': {'type': 'integer'}},
+                    'required': ['light_id'],
+                },
+            },
+            {
+                'name': 'set_render_samples',
+                'description': (
+                    "Sets the offline raytracer's sample count (Phase 3) "
+                    "in the running client's live scene -- how many paths "
+                    "are traced per pixel when a render is eventually "
+                    "kicked off. Higher = less noise, slower."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {'samples': {'type': 'integer'}},
+                    'required': ['samples'],
+                },
+            },
         ]
         dispatch = {
             'get_asset_list': tool_get_asset_list,
             'get_scene_state': tool_get_scene_state,
+            'add_light': tool_add_light,
+            'set_light_property': tool_set_light_property,
+            'delete_light': tool_delete_light,
+            'set_render_samples': tool_set_render_samples,
         }
         system = (
             "You are Claude, embedded as a first-class participant inside "
@@ -397,8 +627,14 @@ class Client:
             "introspect the specific running client instance this "
             "conversation is attached to -- use them when the user asks "
             "about the current scene/object state rather than guessing or "
-            "making something up. Keep replies concise: this renders in a "
-            "small in-editor chat box, not a document."
+            "making something up. You can also ACT: add_light/"
+            "set_light_property/delete_light/set_render_samples actually "
+            "change the running client's live scene, not just describe it "
+            "-- use them freely when the user asks you to set up lighting "
+            "or adjust render settings, you don't need to ask permission "
+            "first for these specifically. Everything else (assets, mesh "
+            "objects) is still read-only from here. Keep replies concise: "
+            "this renders in a small in-editor chat box, not a document."
         )
         try:
             reply = model_display_name(DEFAULT_MODEL) + ': ' + run_tool_loop(system, user_text, tools, dispatch)
@@ -473,11 +709,31 @@ class Client:
                 log.info(f'Client {self.pid}: malformed PKT_SCENE_STATE_REPLY')
             else:
                 req_id, text = parsed
-                with self._pending_lock:
-                    ev = self._pending_events.get(req_id)
-                    if ev:
-                        self._pending_results[req_id] = text
-                        ev.set()
+                self._resolve_pending(req_id, text)
+
+        elif t == PKT_PROP_SET_REPLY:
+            parsed = _parse_prop_set_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_PROP_SET_REPLY')
+            else:
+                req_id, ok = parsed
+                self._resolve_pending(req_id, ok)
+
+        elif t == PKT_ADD_LIGHT_REPLY:
+            parsed = _parse_add_light_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_ADD_LIGHT_REPLY')
+            else:
+                req_id, ok, light_id = parsed
+                self._resolve_pending(req_id, (ok, light_id))
+
+        elif t == PKT_DELETE_LIGHT_REPLY:
+            parsed = _parse_delete_light_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_DELETE_LIGHT_REPLY')
+            else:
+                req_id, ok = parsed
+                self._resolve_pending(req_id, ok)
 
         else:
             log.info(f'Client {self.pid}: unknown packet type 0x{t:02x} ({len(data)} bytes)')

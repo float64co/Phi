@@ -2905,6 +2905,119 @@ offline at arbitrary quality, sends them to the server as PNG files, and
 optionally invokes ffmpeg to produce a video. Gives users Blender-style "render
 this animation" output from inside the editor with no external tools required.
 
+### Status: light-source model landed 2026-08-14; the tracer itself not started
+
+The tracer needs SOME light source to trace toward for direct lighting, and
+this project had neither a dedicated Light object type nor any editor-side
+way to designate mesh-face emission (`HEFace.emission` existed as data since
+Phase 1's PBR material work, but had no live-editing path -- see Phase 1's
+status). Checked how Blender/Cycles actually handles this before building
+anything (`blender/` was added this session specifically as reference
+material for exactly this kind of question) -- Cycles unifies BOTH
+mechanisms, any material with emission strength acting as a mesh light PLUS
+dedicated Light objects (Point/Sun/Spot/Area), through one light-sampling
+system. This pass builds the "dedicated Light objects" half for real (see
+below); the actual path-tracing/light-sampling machinery is still entirely
+unbuilt, and mesh emission still only does cosmetic self-glow in the live
+deferred-rasterized preview (`gbuffer.c`'s `lit = ... + emissive`), not real
+light transport -- both need real new work whenever the tracer itself starts.
+
+- **`PhiLight` objects** (new `client/light.h`/`.c`): Point/Sun/Spot/Area,
+  fields mirroring the core of Blender's own `Light` DNA struct
+  (`blender/source/blender/makesdna/DNA_light_types.h`, read directly) --
+  position, direction (Sun/Spot), color, energy, radius (Point), spot_size/
+  spot_blend (Spot), area_size (Area), sun_angle (Sun). Deliberately a real
+  subset, not every EEVEE-specific/deprecated field Blender itself carries
+  (shadow filter radius, cascade shadow-map tuning, etc. -- meaningless
+  without a shadow system for arbitrary lights, which this pass doesn't
+  build). A fixed-capacity registry (`PHI_MAX_LIGHTS` = 16), not a real
+  dynamic scene graph. Selectable in the 3D viewport (`light_ray_pick`,
+  real ray-vs-sphere against a fixed icon radius, "nearest hit wins" same
+  as mesh-face picking) via a new `5000+id` selection range alongside
+  MeshObjects' existing `4000+id` (see `ui.h`'s own comment). Rendered as
+  small color-coded solid-box icons (`renderer_draw_lights`, new in
+  `renderer.c` -- deliberately lives there, not in `light.c`, same split
+  `renderer_draw_mesh_object` already has from `meshobject.c`, which also
+  keeps `light.c` itself completely GL-free). Spawned via new Scene
+  context-menu rows ("Add > Light > Point/Sun/Spot/Area", at the camera's
+  orbit pivot) and deleted via the existing "Delete" row, now mode-aware
+  (deletes whichever of a MeshObject/Light is actually selected).
+- **Editable Properties panel** (`ui.c`) -- a real, first-ever click-to-edit
+  widget for this codebase's Properties panel, not just a read-only
+  registry dump (which is all it was before this pass, see Phase 1's
+  status). One shared focus slot, reusing the DNA/RNA property registry
+  (`phi_prop.h`) generically: click a row, type a new value (VEC3 props as
+  one "x, y, z" line, same convention the old console's `matcolor`/
+  `matemit` commands used), Enter commits through `phi_prop_set_float`/
+  `_vec3`, click elsewhere cancels. BOOL props (`MeshObject.is_static`) and
+  the Light `type` field toggle/cycle immediately on click instead, since a
+  raw typed number is a worse interaction for either. A single shared
+  `properties_panel_walk(..., do_draw, ...)` function serves both the draw
+  pass and the hit-test pass -- the same "one source of truth, not two
+  independently-maintained copies" fix this file's context-menu
+  `items[]`/`actions[]` history already forced once (see `build_ctx_menu_
+  rows`), applied proactively here instead of after the fact. **Found and
+  fixed along the way**: the Outliner's click-to-select hit-test had a real
+  pre-existing off-by-one-row bug (its hit range was a full row below where
+  "MeshObject #N" is actually drawn, confirmed algebraically against
+  `draw_panel_outliner`'s own layout, not guessed) -- discovered because the
+  new Light rows needed correct row math to work at all. A pinned "Render
+  Settings" section (just `samples` so far) shows regardless of selection,
+  Blender's own Render Properties tab being similarly selection-independent
+  (this project has no tab strip, so it's appended at the bottom instead).
+- **`RenderSettings`** (new `client/render_settings.h`): one global instance
+  (`main.c`'s `g_render_settings`), registered with the same DNA/RNA system
+  as everything else -- `samples` (default 128, clamped `[1, 1000000]`) is
+  the only field so far, real enough to grow as Phase 3 itself gets built.
+- **Shared "object"/"face"/"light:\<id\>"/"render" resolver** (new
+  `client/scene_target.h`/`.c`) -- factored out of `mp_port.c`'s own
+  previously-private `resolve_target`, now the ONE place this resolution
+  rule lives, shared by the Python bindings AND the new chat-driven wire
+  protocol below (same "one source of truth" reasoning as
+  `properties_panel_walk` above).
+- **Python API** (`mp_port.c`): `phi.prop_get`/`prop_set` now also accept
+  `"light:<id>"` and `"render"` targets (through the shared resolver above)
+  alongside the existing `"object"`/`"face"`; new `phi.add_light(type, x, y,
+  z)` / `phi.delete_light(id)` / `phi.list_lights()`.
+- **Chat-driven scene mutation, read-write by explicit project decision**
+  (unlike `get_asset_list`/`get_scene_state`, which stay read-only): three
+  new wire-protocol request/reply pairs (`PKT_PROP_SET_REQUEST`/`REPLY`,
+  `PKT_ADD_LIGHT_REQUEST`/`REPLY`, `PKT_DELETE_LIGHT_REQUEST`/`REPLY`, see
+  `client/net.h`), mirroring `PKT_SCENE_STATE_REQUEST`/`REPLY`'s existing
+  "server asks THIS client to act, since the live scene state only exists
+  in the client process" pattern -- `server.py`'s `Client` class
+  generalized its req_id/Event pending-reply machinery
+  (`_send_and_wait`/`_resolve_pending`) to serve all four request types
+  from one shared implementation rather than three more copies of the same
+  wait dance. Four new Anthropic tools (`add_light`/`set_light_property`/
+  `delete_light`/`set_render_samples`) actually mutate the running client's
+  live scene, not just describe it -- `get_scene_state`'s own JSON also
+  grew a `lights` array and `render_settings` object so Claude can see
+  what's already there before changing it. Explicitly scoped: no object/
+  mesh mutation tool exists even though the underlying wire packet could
+  carry one (`server/anthropic_client.py`'s own tool list is what actually
+  gates what Claude can invoke) -- lights and render settings only, per the
+  user's own explicit instruction. Claude still cannot post a chat message
+  AS the user under any of this -- confirmed already structurally
+  impossible before this pass, not something newly built: `PKT_CHAT_MSG`
+  only ever originates client-side from the real human (`chat.c`), and
+  Claude's replies go out over the separate `PKT_CHAT_REPLY`, prefixed with
+  the model's display name.
+
+Verified: new `light_test` standalone harness (spawn/delete/find/get_all,
+registry-full behavior, real ray-vs-sphere pick math checked against the
+actual geometric expectation, and the scene_target resolver's four target
+kinds including its failure paths) plus new sections in `phi_prop_test`
+(PhiLight/RenderSettings props through the real DNA/RNA accessors,
+including range clamping). Native and wasm both rebuilt clean; every
+existing standalone harness re-verified passing. `server/server.py` checked
+with `python3 -m py_compile` (no live end-to-end chat-tool round trip was
+run against a funded API key this pass). No live GL/input verification was
+possible in this sandbox (no real X display) -- the light icon rendering,
+Properties-panel click-to-edit interaction, and Outliner row fix are
+compile-clean-and-reviewed, not click-tested. Win32 remains the user's own
+`build.bat` responsibility, not built from this sandbox.
+
 ### The raytracer
 
 The octree already has `octree_ray_cast()` — the primary intersection primitive is

@@ -3,6 +3,8 @@
 #include "phi_prop_registry.h"
 #include "mp_port.h"
 #include "meshobject.h"
+#include "light.h"
+#include "render_settings.h"
 #include "renderer.h"
 #include "gbuffer.h"
 #include "octree_render.h"
@@ -166,6 +168,22 @@ typedef struct {
      * their panels. Top-anchored (0 = scrolled to the first returned
      * line), same convention as the Asset Browser's list_scroll_offset. */
     int   python_panel_scroll;
+
+    /* Properties panel inline field editing (see draw_prop_row/
+     * ui_on_mouse_button's PROPERTIES-panel hit-test) -- one shared focus
+     * slot across the whole panel, same "single input line" simplicity
+     * the Console/Chat/Asset-Browser text fields already use rather than
+     * per-row state for N simultaneously-editable rows. owner+prop
+     * together identify WHICH field is being edited (a PhiProp* alone
+     * isn't enough -- the same prop identifier can apply to different
+     * owners, e.g. every Light shares g_phi_prop_light). NULL owner =
+     * nothing currently being edited. VEC3 props edit as one combined
+     * "x, y, z" text buffer (matching the old console's matcolor/matemit
+     * "r g b" convention) rather than three separate fields. */
+    void          *prop_edit_owner;
+    const PhiProp *prop_edit_prop;
+    char           prop_edit_buf[64];
+    int            prop_edit_len;
 } UIState;
 
 static UIState g_ui;
@@ -695,89 +713,242 @@ static void draw_panel_outliner(Area *a, const UIRenderContext *ctx) {
     }
     /* Used to also list the octree World Mesh row and every connected
      * Qek Player -- both gone along with that code (see phi.md's Phase 1
-     * status, "Client/server model"). The MeshObject above is the only
-     * scene content that exists right now. */
-}
+     * status, "Client/server model"). */
 
-/* Draws one PhiProp as a labeled row -- the DNA/RNA property registry
- * (phi_prop.h) is the single source of truth this reads through, not a
- * hand-picked field per struct type, so any group registered in
- * phi_prop_registry.c shows up here automatically. Read-only in the C UI
- * for this pass (see phi.md's DNA/RNA status note for why) -- the same
- * registry IS writable, just from Python (phi.prop_set) rather than a
- * click-to-edit widget here yet. */
-static void draw_prop_row(float x, float *y, void *owner, const PhiProp *prop) {
-    char line[128];
-    if (prop->type == PHI_PROP_VEC3) {
-        float v[3];
-        phi_prop_get_vec3(owner, prop, v);
-        snprintf(line, sizeof(line), "%s: %.2f, %.2f, %.2f", prop->display_name, v[0], v[1], v[2]);
-    } else if (prop->type == PHI_PROP_BOOL) {
-        float v;
-        phi_prop_get_float(owner, prop, &v);
-        snprintf(line, sizeof(line), "%s: %s", prop->display_name, v != 0.0f ? "yes" : "no");
-    } else {
-        float v;
-        phi_prop_get_float(owner, prop, &v);
-        snprintf(line, sizeof(line), "%s: %.2f", prop->display_name, v);
+    /* Lights (light.h) -- same accent-highlight-when-selected convention
+     * as the MeshObject row above. Row order matches light_get_all's own
+     * (stable within a session) -- the Outliner click handler below
+     * walks lights in this exact same order/step, so a click can never
+     * land on a different light than the one actually drawn there. */
+    static const char *type_names_outliner[LIGHT_TYPE_COUNT] = {"Point", "Sun", "Spot", "Area"};
+    PhiLight *lights[PHI_MAX_LIGHTS];
+    int n_lights = light_get_all(lights);
+    for (int i = 0; i < n_lights; i++) {
+        int sel = (g_ui.selected_object_id == LIGHT_ID_BASE + (unsigned int)lights[i]->id);
+        if (sel) {
+            ui_rect(a->x + 1.0f, y - 2.0f, a->w - 2.0f, row_h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.35f);
+        } else {
+            outliner_row_bg(a, y, row_h, row_index);
+        }
+        row_index++;
+        snprintf(line, sizeof(line), "%s Light #%d", type_names_outliner[lights[i]->type], lights[i]->id);
+        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+        y += row_h;
     }
-    ui_text_draw(x, *y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-    *y += 20.0f;
 }
 
-static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
-    ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
-    float x = a->x + UI_PANEL_PAD, y = a->y + UI_PANEL_PAD;
-    ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Properties", g_ui.font_bold, 15.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+/* Result of a Properties-panel hit-test pass (properties_panel_walk with
+ * do_draw=0) -- filled in by whichever row the click actually landed on,
+ * left untouched (hit_found stays 0) on a miss. is_light_type marks the
+ * one row that isn't a text-edit field (the Light Type row cycles on
+ * click instead) -- see properties_panel_walk's own comment. */
+typedef struct {
+    int   hit_found;
+    void *hit_owner;
+    const PhiProp *hit_prop;
+    int   hit_is_light_type;
+} PropHitResult;
+
+/* One editable/read-only prop row -- draws (do_draw=1) either the live
+ * edit box (if this exact owner+prop is the one currently focused, see
+ * UIState's own comment) or formatted read-only text, OR hit-tests
+ * (do_draw=0) the same rect against click_x/click_y, recording the
+ * FIRST match into *hit (never overwritten once found, so an earlier
+ * row wins if rects ever overlapped, which they shouldn't). Used for
+ * every prop group (MeshObject/HEFace/PhiLight/RenderSettings) so a row
+ * drawn here is guaranteed to be hit-tested at the exact same position —
+ * one function serving both passes, not two independently-maintained
+ * copies (the same lesson build_ctx_menu_rows's own history already
+ * taught this file, see its comment). */
+static void properties_row(float x, float w, float *y, void *owner, const PhiProp *prop,
+                            int do_draw, float click_x, float click_y, PropHitResult *hit) {
+    const float row_h = 20.0f;
+    int focused = (g_ui.prop_edit_owner == owner && g_ui.prop_edit_prop == prop);
+
+    if (do_draw) {
+        char line[128];
+        if (focused) {
+            snprintf(line, sizeof(line), "%s: %s_", prop->display_name, g_ui.prop_edit_buf);
+            ui_rect(x - 2.0f, *y - 2.0f, w, row_h, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.25f);
+            ui_text_draw(x, *y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+        } else {
+            if (prop->type == PHI_PROP_VEC3) {
+                float v[3]; phi_prop_get_vec3(owner, prop, v);
+                snprintf(line, sizeof(line), "%s: %.2f, %.2f, %.2f", prop->display_name, v[0], v[1], v[2]);
+            } else if (prop->type == PHI_PROP_BOOL) {
+                float v; phi_prop_get_float(owner, prop, &v);
+                snprintf(line, sizeof(line), "%s: %s (click to toggle)", prop->display_name, v != 0.0f ? "yes" : "no");
+            } else {
+                float v; phi_prop_get_float(owner, prop, &v);
+                snprintf(line, sizeof(line), "%s: %.3g", prop->display_name, v);
+            }
+            ui_text_draw(x, *y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        }
+    } else if (hit && !hit->hit_found &&
+               click_x >= x - 2.0f && click_x < x - 2.0f + w &&
+               click_y >= *y - 2.0f && click_y < *y - 2.0f + row_h) {
+        hit->hit_found = 1;
+        hit->hit_owner = owner;
+        hit->hit_prop = prop;
+        hit->hit_is_light_type = 0;
+    }
+    *y += row_h;
+}
+
+/* Single source of truth for the Properties panel's content, in BOTH the
+ * senses build_ctx_menu_rows already established for the context menu:
+ * draw_panel_properties (do_draw=1) and the PANEL_PROPERTIES branch of
+ * hit_test_area (do_draw=0, real click point, *hit filled on a match)
+ * call this SAME function so a row can never be drawn in one place and
+ * hit-tested in another. Shows, in priority order: the selected
+ * MeshObject's props + orientation + selected face's material, OR the
+ * selected Light's props (filtered to the fields that matter for its
+ * current ->type -- see the per-field skips below), OR "nothing
+ * selected"; then always a pinned Render Settings section at the bottom
+ * regardless of selection (Blender's own Render Properties tab is
+ * likewise independent of what object is selected; this project has no
+ * tab strip, so it's appended here instead). */
+static void properties_panel_walk(Area *a, const UIRenderContext *ctx, int do_draw,
+                                   float click_x, float click_y, PropHitResult *hit) {
+    float x = a->x + UI_PANEL_PAD;
+    float y = a->y + UI_PANEL_PAD;
+    float w = a->w - UI_PANEL_PAD * 2.0f;
+    char line[128];
+
+    if (do_draw) {
+        ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A);
+        ui_text_draw(x + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Properties", g_ui.font_bold, 15.0f,
+                     UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    }
     y += 26.0f;
 
-    if (ctx->test_obj_loaded && ctx->test_obj &&
-        g_ui.selected_object_id == 4000u + (unsigned int)ctx->test_obj->id) {
-        char line[96];
-        snprintf(line, sizeof(line), "MeshObject #%d", ctx->test_obj->id);
-        ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    PhiLight *sel_light = NULL;
+    if (g_ui.selected_object_id >= LIGHT_ID_BASE && g_ui.selected_object_id < LIGHT_ID_BASE + 100000u) {
+        sel_light = light_find((int)(g_ui.selected_object_id - LIGHT_ID_BASE));
+    }
+    int mesh_selected = ctx->test_obj_loaded && ctx->test_obj &&
+        g_ui.selected_object_id == 4000u + (unsigned int)ctx->test_obj->id;
+
+    if (mesh_selected) {
+        if (do_draw) {
+            snprintf(line, sizeof(line), "MeshObject #%d", ctx->test_obj->id);
+            ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+        }
         y += 22.0f;
 
         for (int i = 0; i < g_phi_prop_mesh_object.count; i++) {
-            draw_prop_row(x, &y, ctx->test_obj, &g_phi_prop_mesh_object.props[i]);
+            properties_row(x, w, &y, ctx->test_obj, &g_phi_prop_mesh_object.props[i], do_draw, click_x, click_y, hit);
         }
         /* Orientation isn't in the registry -- Quat (4 floats) isn't a
          * PhiPropType this pass (only scalar/bool/vec3 are), so it stays
-         * a direct field read here rather than a registered prop. Real
-         * quaternion editing needs real UI (an axis-angle or Euler
+         * a direct read-only field here rather than a registered prop.
+         * Real quaternion editing needs real UI (an axis-angle or Euler
          * widget, not 4 raw numbers a user would ever want to type) that
          * this pass doesn't build either. */
-        snprintf(line, sizeof(line), "Orientation: %.2f, %.2f, %.2f, %.2f",
-                 ctx->test_obj->orientation.x, ctx->test_obj->orientation.y,
-                 ctx->test_obj->orientation.z, ctx->test_obj->orientation.w);
-        ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        if (do_draw) {
+            snprintf(line, sizeof(line), "Orientation: %.2f, %.2f, %.2f, %.2f",
+                     ctx->test_obj->orientation.x, ctx->test_obj->orientation.y,
+                     ctx->test_obj->orientation.z, ctx->test_obj->orientation.w);
+            ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        }
         y += 24.0f;
 
-        /* Per-face PBR material readout (Phase 1's "PBR material assignment
-         * per face"), now also property-registry-driven. Shows whichever
-         * face was last ray-picked (see main.c's g_edit_face), not
-         * necessarily under the cursor right now. */
+        /* Per-face PBR material readout, editable now like everything
+         * else here. Shows whichever face was last ray-picked (see
+         * main.c's g_edit_face), not necessarily under the cursor now. */
         if (ctx->test_obj->hem && ctx->edit_face >= 0 &&
             ctx->edit_face < ctx->test_obj->hem->face_count &&
             !ctx->test_obj->hem->faces[ctx->edit_face].deleted) {
             HEFace *face = &ctx->test_obj->hem->faces[ctx->edit_face];
-            snprintf(line, sizeof(line), "Face %d material:", ctx->edit_face);
-            ui_text_draw(x, y, line, g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+            if (do_draw) {
+                snprintf(line, sizeof(line), "Face %d material:", ctx->edit_face);
+                ui_text_draw(x, y, line, g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+            }
             y += 20.0f;
             for (int i = 0; i < g_phi_prop_heface.count; i++) {
-                draw_prop_row(x + 8.0f, &y, face, &g_phi_prop_heface.props[i]);
+                properties_row(x + 8.0f, w - 8.0f, &y, face, &g_phi_prop_heface.props[i], do_draw, click_x, click_y, hit);
             }
-            ui_text_draw(x, y, "console: matcolor/matmetal/matrough/matemit, or phi.prop_set(...)", g_ui.font_body, 12.0f,
-                         UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
         } else {
-            ui_text_draw(x, y, "No face selected (click a face)", g_ui.font_body, 13.0f,
-                         UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            if (do_draw) {
+                ui_text_draw(x, y, "No face selected (click a face)", g_ui.font_body, 13.0f,
+                             UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+            }
+            y += 20.0f;
+        }
+    } else if (sel_light) {
+        static const char *type_names[LIGHT_TYPE_COUNT] = {"Point", "Sun", "Spot", "Area"};
+        if (do_draw) {
+            snprintf(line, sizeof(line), "Light #%d", sel_light->id);
+            ui_text_draw(x, y, line, g_ui.font_body, 14.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+        }
+        y += 22.0f;
+
+        /* Type: click-to-cycle widget (Point->Sun->Spot->Area->Point),
+         * not a text-edit field -- a raw integer typed by hand would be
+         * a worse interaction for a 4-way enum. Still the same real,
+         * registered "type" prop underneath (phi.prop_set("light:<id>",
+         * "type", 1) works too, see phi_prop_registry.c's own comment). */
+        {
+            const float row_h = 20.0f;
+            if (do_draw) {
+                snprintf(line, sizeof(line), "Type: %s (click to change)", type_names[sel_light->type]);
+                ui_text_draw(x, y, line, g_ui.font_mono, 13.0f, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
+            } else if (hit && !hit->hit_found &&
+                       click_x >= x - 2.0f && click_x < x - 2.0f + w &&
+                       click_y >= y - 2.0f && click_y < y - 2.0f + row_h) {
+                hit->hit_found = 1;
+                hit->hit_owner = sel_light;
+                hit->hit_prop = phi_prop_find(&g_phi_prop_light, "type");
+                hit->hit_is_light_type = 1;
+            }
+            y += row_h;
+        }
+
+        for (int i = 0; i < g_phi_prop_light.count; i++) {
+            const PhiProp *prop = &g_phi_prop_light.props[i];
+            if (strcmp(prop->identifier, "type") == 0) continue;   /* handled above */
+            /* Only the fields relevant to this light's current type --
+             * see light.h's own per-field comments for which type each
+             * belongs to. */
+            if (strcmp(prop->identifier, "direction") == 0 &&
+                sel_light->type != LIGHT_TYPE_SUN && sel_light->type != LIGHT_TYPE_SPOT) continue;
+            if (strcmp(prop->identifier, "radius") == 0 && sel_light->type != LIGHT_TYPE_POINT) continue;
+            if ((strcmp(prop->identifier, "spot_size") == 0 || strcmp(prop->identifier, "spot_blend") == 0) &&
+                sel_light->type != LIGHT_TYPE_SPOT) continue;
+            if (strcmp(prop->identifier, "area_size") == 0 && sel_light->type != LIGHT_TYPE_AREA) continue;
+            if (strcmp(prop->identifier, "sun_angle") == 0 && sel_light->type != LIGHT_TYPE_SUN) continue;
+            properties_row(x, w, &y, sel_light, prop, do_draw, click_x, click_y, hit);
         }
     } else {
-        ui_text_draw(x, y, "Nothing selected", g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        if (do_draw) {
+            ui_text_draw(x, y, "Nothing selected", g_ui.font_body, 14.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        }
         y += 22.0f;
-        ui_text_draw(x, y, "Click an object in the Scene or Outliner.", g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        if (do_draw) {
+            ui_text_draw(x, y, "Click an object or light in the Scene or Outliner.", g_ui.font_body, 13.0f,
+                         UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        }
+        y += 20.0f;
     }
+
+    /* Render Settings -- pinned section, shown regardless of selection
+     * (see this function's own header comment for why). */
+    y += 10.0f;
+    if (do_draw) {
+        ui_rect(x, y - 4.0f, w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
+        ui_text_draw(x, y + 4.0f, "Render Settings", g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+    }
+    y += 20.0f;
+    if (ctx->render_settings) {
+        for (int i = 0; i < g_phi_prop_render_settings.count; i++) {
+            properties_row(x, w, &y, ctx->render_settings, &g_phi_prop_render_settings.props[i],
+                           do_draw, click_x, click_y, hit);
+        }
+    }
+}
+
+static void draw_panel_properties(Area *a, const UIRenderContext *ctx) {
+    properties_panel_walk(a, ctx, 1, 0.0f, 0.0f, NULL);
 }
 
 #define UI_SCROLL_ROW_H 18.0f
@@ -1469,7 +1640,7 @@ static void draw_leaf(Area *a, const UIRenderContext *ctx) {
     draw_area_chrome(a);
 }
 
-#define CTX_MENU_MAX_ROWS 9
+#define CTX_MENU_MAX_ROWS 13
 
 /* Builds this frame's Scene right-click context-menu row set -- single
  * source of truth for both the draw pass (ui_render) and the hit-test pass
@@ -1491,7 +1662,11 @@ static int build_ctx_menu_rows(const UIRenderContext *ctx, const char *items[CTX
         items[n] = "Loop Cut";        actions[n++] = CTX_ACTION_LOOP_CUT;
         items[n] = "Exit Edit Mode";  actions[n++] = CTX_ACTION_TOGGLE_EDIT_MODE;
     } else {
-        items[n] = "Add > Mesh Object";  actions[n++] = CTX_ACTION_ADD_MESH;
+        items[n] = "Add > Mesh Object";      actions[n++] = CTX_ACTION_ADD_MESH;
+        items[n] = "Add > Light > Point";    actions[n++] = CTX_ACTION_ADD_LIGHT_POINT;
+        items[n] = "Add > Light > Sun";      actions[n++] = CTX_ACTION_ADD_LIGHT_SUN;
+        items[n] = "Add > Light > Spot";     actions[n++] = CTX_ACTION_ADD_LIGHT_SPOT;
+        items[n] = "Add > Light > Area";     actions[n++] = CTX_ACTION_ADD_LIGHT_AREA;
         items[n] = "Delete";             actions[n++] = CTX_ACTION_DELETE;
         items[n] = "Frame Selected";     actions[n++] = CTX_ACTION_FRAME_SELECTED;
         items[n] = "Frame All";          actions[n++] = CTX_ACTION_FRAME_ALL;
@@ -1642,17 +1817,71 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
      * is display-only for now, matching this loop's scoped-down first
      * pass for those panels. */
     if (a->panel_type == PANEL_OUTLINER && button == 0 && pressed &&
-        point_in_rect((float)x, (float)y, a->x, a->y, a->w, a->h) &&
-        ctx->test_obj_loaded && ctx->test_obj) {
-        /* Row math must match draw_panel_outliner's layout exactly (world
-         * mesh row, then the test object's row) -- selects the test
-         * object if the click lands on/after its row. First-pass
-         * approximation (fixed row assumption), not a real hit-list —
-         * fine for two rows, would need real per-row hit rects once
-         * Outliner's content is dynamic. */
-        float row0_y = a->y + UI_PANEL_PAD + 20.0f + 6.0f;
-        if ((float)y >= row0_y + 20.0f && (float)y < row0_y + 40.0f) {
-            g_ui.selected_object_id = 4000u + (unsigned int)ctx->test_obj->id;
+        point_in_rect((float)x, (float)y, a->x, a->y, a->w, a->h)) {
+        /* Row math must match draw_panel_outliner's layout exactly -- a
+         * real off-by-one-row bug found and fixed here while adding
+         * light rows below the MeshObject one: the old range (row0_y+20
+         * .. row0_y+40) was a full row BELOW where "MeshObject #N" is
+         * actually drawn (at row0_y itself, confirmed algebraically
+         * against draw_panel_outliner's own y stepping, not guessed), so
+         * clicking the visible text never actually selected it. First-
+         * pass approximation still (fixed row-height stepping, not a
+         * real per-row hit-list), but now at least at the right rows. */
+        float row_h = 20.0f;
+        float row_y = a->y + UI_PANEL_PAD + row_h + 6.0f;   /* matches draw_panel_outliner's first content row */
+        if (ctx->test_obj_loaded && ctx->test_obj) {
+            if ((float)y >= row_y - 2.0f && (float)y < row_y - 2.0f + row_h) {
+                g_ui.selected_object_id = 4000u + (unsigned int)ctx->test_obj->id;
+                return 1;
+            }
+            row_y += row_h;
+        }
+        PhiLight *lights[PHI_MAX_LIGHTS];
+        int n_lights = light_get_all(lights);
+        for (int i = 0; i < n_lights; i++) {
+            if ((float)y >= row_y - 2.0f && (float)y < row_y - 2.0f + row_h) {
+                g_ui.selected_object_id = LIGHT_ID_BASE + (unsigned int)lights[i]->id;
+                return 1;
+            }
+            row_y += row_h;
+        }
+        return 1;
+    }
+    /* Properties panel: a click on any editable row starts editing it
+     * (or, for the Light Type row / a BOOL prop, acts immediately --
+     * cycle/toggle, no text entry needed for either). Uses the exact
+     * same properties_panel_walk this panel draws through, hit-tested
+     * (do_draw=0) rather than drawn, so a row can never be clickable
+     * somewhere different from where it's actually shown. */
+    if (a->panel_type == PANEL_PROPERTIES && button == 0 && pressed &&
+        point_in_rect((float)x, (float)y, a->x, a->y, a->w, a->h)) {
+        PropHitResult hit = {0};
+        properties_panel_walk(a, ctx, 0, (float)x, (float)y, &hit);
+        if (hit.hit_found) {
+            if (hit.hit_is_light_type) {
+                PhiLight *l = (PhiLight *)hit.hit_owner;
+                l->type = (LightType)((l->type + 1) % LIGHT_TYPE_COUNT);
+            } else if (hit.hit_prop->type == PHI_PROP_BOOL) {
+                float v; phi_prop_get_float(hit.hit_owner, hit.hit_prop, &v);
+                phi_prop_set_float(hit.hit_owner, hit.hit_prop, v != 0.0f ? 0.0f : 1.0f);
+            } else {
+                g_ui.prop_edit_owner = hit.hit_owner;
+                g_ui.prop_edit_prop = hit.hit_prop;
+                if (hit.hit_prop->type == PHI_PROP_VEC3) {
+                    float v[3]; phi_prop_get_vec3(hit.hit_owner, hit.hit_prop, v);
+                    snprintf(g_ui.prop_edit_buf, sizeof(g_ui.prop_edit_buf), "%.3g, %.3g, %.3g", v[0], v[1], v[2]);
+                } else {
+                    float v; phi_prop_get_float(hit.hit_owner, hit.hit_prop, &v);
+                    snprintf(g_ui.prop_edit_buf, sizeof(g_ui.prop_edit_buf), "%.3g", v);
+                }
+                g_ui.prop_edit_len = (int)strlen(g_ui.prop_edit_buf);
+            }
+        } else {
+            /* Clicked inside the panel but not on any row (e.g. a
+             * header/label) -- blurs any in-progress edit, same click-
+             * away-dismisses convention as every other text field here. */
+            g_ui.prop_edit_owner = NULL;
+            g_ui.prop_edit_prop = NULL;
         }
         return 1;
     }
@@ -1828,6 +2057,17 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
         if (!inside) ctx->chat->focus = CHAT_FOCUS_NONE;
     }
 
+    /* Properties-panel field blur: same click-away-dismisses convention
+     * as the two blocks just above -- a click anywhere outside the
+     * Properties panel entirely drops an in-progress edit (a click
+     * INSIDE the panel but off any row is already handled by the
+     * PANEL_PROPERTIES block above, in hit_test_area). */
+    if (button == 0 && pressed && g_ui.prop_edit_owner) {
+        Area *props_area = g_ui.root ? find_area_by_type_r(g_ui.root, PANEL_PROPERTIES) : NULL;
+        int inside = props_area && point_in_rect((float)x, (float)y, props_area->x, props_area->y, props_area->w, props_area->h);
+        if (!inside) { g_ui.prop_edit_owner = NULL; g_ui.prop_edit_prop = NULL; }
+    }
+
     /* Border drag-to-resize starts here (checked before the top-chrome-
      * strip early return below, and before the recursive leaf hit-test,
      * since a border press is a distinct gesture that should win over
@@ -1848,6 +2088,74 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
     if (y < (int)UI_TOP_CHROME_H) return 1;  /* branding bar + menu row claim the whole strip, nothing to route through it yet */
     if (g_ui.root && hit_test_area(g_ui.root, x, y, button, pressed, ctx)) return 1;
     return 0;
+}
+
+/* Parses up to max_count whitespace/comma-separated floats out of buf --
+ * the shared "1, 2, 3"-or-"1 2 3" convention every numeric prop edit box
+ * here uses (same style the old console's matcolor/matemit commands
+ * already established for a 3-number line). Returns how many were
+ * actually parsed (may be less than max_count on a short/malformed
+ * buffer -- callers check this before committing, so a half-typed value
+ * never gets applied). */
+static int parse_floats(const char *buf, float *out, int max_count) {
+    int n = 0;
+    const char *p = buf;
+    while (*p && n < max_count) {
+        char *end;
+        float v = strtof(p, &end);
+        if (end == p) { p++; continue; }
+        out[n++] = v;
+        p = end;
+    }
+    return n;
+}
+
+void ui_update_prop_edit_text(InputState *inp) {
+    if (!g_ui.prop_edit_owner) return;
+
+    int backsp = inp->backspace_edge; inp->backspace_edge = 0;
+    int enter  = inp->enter_edge;     inp->enter_edge      = 0;
+    char chars[TYPED_CHAR_QUEUE_SIZE];
+    int nchars = inp->typed_count;
+    memcpy(chars, inp->typed_chars, (size_t)nchars);
+    inp->typed_count = 0;
+
+    for (int i = 0; i < nchars; i++) {
+        char c = chars[i];
+        /* Only characters that can ever be part of a valid float or
+         * VEC3 buffer are accepted -- anything else silently ignored
+         * rather than accepted then failing to parse on Enter. */
+        if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == ',' || c == ' ') {
+            if (g_ui.prop_edit_len < (int)sizeof(g_ui.prop_edit_buf) - 1) {
+                g_ui.prop_edit_buf[g_ui.prop_edit_len++] = c;
+                g_ui.prop_edit_buf[g_ui.prop_edit_len] = 0;
+            }
+        }
+    }
+    if (backsp && g_ui.prop_edit_len > 0) {
+        g_ui.prop_edit_buf[--g_ui.prop_edit_len] = 0;
+    }
+    if (enter) {
+        const PhiProp *prop = g_ui.prop_edit_prop;
+        void *owner = g_ui.prop_edit_owner;
+        if (prop->type == PHI_PROP_VEC3) {
+            float v[3];
+            if (parse_floats(g_ui.prop_edit_buf, v, 3) == 3) phi_prop_set_vec3(owner, prop, v);
+        } else {
+            float v[1];
+            if (parse_floats(g_ui.prop_edit_buf, v, 1) == 1) phi_prop_set_float(owner, prop, v[0]);
+        }
+        /* A malformed/incomplete value (parse_floats returned too few)
+         * is silently discarded rather than applied -- the field just
+         * closes without changing anything, same as typing garbage into
+         * any other numeric field anywhere and hitting Enter. */
+        g_ui.prop_edit_owner = NULL;
+        g_ui.prop_edit_prop = NULL;
+    }
+}
+
+int ui_is_editing_prop(void) {
+    return g_ui.prop_edit_owner != NULL;
 }
 
 void ui_on_mouse_move(int x, int y) {

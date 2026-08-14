@@ -70,6 +70,8 @@ COMMON_SRCS := \
 	$(SRCDIR)/skinned_mesh.c  \
 	$(SRCDIR)/gizmo.c         \
 	$(SRCDIR)/transform_op.c  \
+	$(SRCDIR)/light.c         \
+	$(SRCDIR)/scene_target.c  \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c            \
@@ -81,7 +83,7 @@ COMMON_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test
 
 all: wasm native
 
@@ -285,6 +287,7 @@ $(OUT_PHI_PHYSICS_MESHOBJ_TEST): $(PHI_PHYSICS_MESHOBJ_TEST_SRCS) | $(BUILDDIR)
 # not just each in isolation.
 MP_PHYSICS_TEST_SRCS := $(SRCDIR)/mp_physics_test_main.c $(SRCDIR)/mp_port.c \
                          $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                         $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                          $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c \
                          $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c \
                          $(MP_EMBED_SRCS) $(BULLET_SRCS)
@@ -309,6 +312,24 @@ fracture_test: $(OUT_FRACTURE_TEST)
 $(OUT_FRACTURE_TEST): $(FRACTURE_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(FRACTURE_TEST_SRCS) -o $(OUT_FRACTURE_TEST) -lm
 	@echo "fracture_test build complete -> $(OUT_FRACTURE_TEST)"
+
+# light.c (Phase 3 Light objects) + scene_target.c (the shared "object"/
+# "face"/"light:<id>"/"render" DNA/RNA resolver) self-test -- same no-GL-
+# dependency rationale as fracture_test above. Needs halfedge/
+# halfedge_gltf for the "object"/"face" resolver checks (a real MeshObject
+# against assets/cube.gltf), and phi_prop.c/phi_prop_registry.c since
+# scene_target.c resolves to PhiPropGroup*s from there.
+LIGHT_TEST_SRCS := $(SRCDIR)/light_test_main.c $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
+                    $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                    $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c
+OUT_LIGHT_TEST   := $(BUILDDIR)/light_test
+
+light_test: $(OUT_LIGHT_TEST)
+	./$(OUT_LIGHT_TEST)
+
+$(OUT_LIGHT_TEST): $(LIGHT_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -Wall -Wextra -I$(SRCDIR) $(LIGHT_TEST_SRCS) -o $(OUT_LIGHT_TEST) -lm
+	@echo "light_test build complete -> $(OUT_LIGHT_TEST)"
 
 # armature.c/animation.c (Phase 4's Clip/Curve/Playback + Armature data
 # layer) self-test -- same no-GL-dependency rationale as mesh_edit_test/
@@ -344,6 +365,7 @@ $(OUT_ANIMATION_TEST): $(ANIMATION_TEST_SRCS) | $(BUILDDIR)
 # ---------------------------------------------------------------
 MP_TEST_SRCS  := $(SRCDIR)/mp_test_main.c $(SRCDIR)/mp_port.c \
                   $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                  $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                   $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c \
                   $(BULLET_SRCS) $(MP_EMBED_SRCS)
 MP_TEST_CFLAGS := -O1 -Wall -Wno-unused-parameter -I$(SRCDIR) $(MP_INCLUDES) $(BULLET_INCLUDES)
@@ -362,6 +384,7 @@ $(OUT_MP_TEST): $(MP_TEST_SRCS) | $(BUILDDIR)
 # interpreter (not a mock).
 MP_PROP_PANEL_TEST_SRCS := $(SRCDIR)/mp_prop_panel_test_main.c $(SRCDIR)/mp_port.c \
                             $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                            $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                             $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(BULLET_SRCS) \
                             $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c $(MP_EMBED_SRCS)
 OUT_MP_PROP_PANEL_TEST := $(BUILDDIR)/mp_prop_panel_test
@@ -380,6 +403,7 @@ $(OUT_MP_PROP_PANEL_TEST): $(MP_PROP_PANEL_TEST_SRCS) | $(BUILDDIR)
 # as mesh_edit_test/fracture_test.
 MP_CONSOLE_TEST_SRCS := $(SRCDIR)/mp_console_test_main.c $(SRCDIR)/mp_port.c \
                          $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                         $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                          $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(BULLET_SRCS) \
                          $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c $(MP_EMBED_SRCS)
 OUT_MP_CONSOLE_TEST   := $(BUILDDIR)/mp_console_test
@@ -421,6 +445,7 @@ $(OUT_MP_TEST_WIN32): $(MP_TEST_SRCS) | $(BUILDDIR)
 
 MP_STRESS_SRCS := $(SRCDIR)/mp_stress_test_main.c $(SRCDIR)/mp_port.c \
                    $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                   $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                    $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c $(BULLET_SRCS) \
                    $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c $(MP_EMBED_SRCS)
 OUT_MP_STRESS  := $(BUILDDIR)/mp_stress

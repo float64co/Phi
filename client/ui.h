@@ -8,6 +8,8 @@
 #include "chat.h"
 #include "renderer.h"
 #include "gbuffer.h"
+#include "render_settings.h"
+#include "input.h"
 
 /* Native UI System — Phase 1 (see phi.md's "Native UI System" section for
  * the design this implements: Blender's recursive area-split model, not
@@ -101,6 +103,17 @@ typedef enum {
      * its logic -- both paths funnel through the same toggle_editor_mode()
      * helper in main.c. */
     CTX_ACTION_TOGGLE_EDIT_MODE,
+    /* Spawns a new Light object at the Scene panel's current pivot (Phase
+     * 3's "Both like Blender does it" light-source model, see light.h) --
+     * always available regardless of what's currently selected, matching
+     * Blender's own Add menu. One row per type rather than a real nested
+     * submenu (this menu has no submenu mechanism, see ui.c's
+     * build_ctx_menu_rows -- "Add > Mesh Object" is the same flat-row-with-
+     * a-">"-in-the-label convention, not real nesting either). */
+    CTX_ACTION_ADD_LIGHT_POINT,
+    CTX_ACTION_ADD_LIGHT_SUN,
+    CTX_ACTION_ADD_LIGHT_SPOT,
+    CTX_ACTION_ADD_LIGHT_AREA,
 } CtxMenuAction;
 
 /* Blender-style Object/Edit mode -- see main.c's g_editor_mode (owns the
@@ -151,6 +164,7 @@ typedef struct {
     GBuffer    *gbuf;
     MeshObject *test_obj;        /* Phase 1's assets/cube.gltf test object, see main.c */
     int         test_obj_loaded;
+    RenderSettings *render_settings;  /* main.c's g_render_settings (Phase 3, see render_settings.h) -- always non-NULL once main.c wires it up, shown as a pinned Properties-panel section regardless of selection. */
     int         edit_face;       /* main.c's g_edit_face -- last ray-picked hem face, -1 if none. Properties reads this for the per-face material readout. */
     EditorMode  editor_mode;     /* main.c's g_editor_mode -- see EditorMode's own comment. Read by the Scene panel's mode label and the right-click context menu's row set. */
     /* Modal G/S/R transform tool's HUD readout (see transform_op.h's
@@ -232,9 +246,10 @@ int  ui_is_context_menu_open(void);
 CtxMenuAction ui_poll_context_menu_action(void);
 
 /* object_id follows the existing scheme (renderer.h/gbuffer.c): wire-box=3,
- * MeshObjects=4000+id. 0xFFFFFFFF = nothing selected. (world=0/ground=1/
- * players=1000+id/rockets=2000+slot belonged to Qek's now-removed world/
- * gameplay draw calls -- those ranges are simply unused now.) */
+ * MeshObjects=4000+id, Lights=5000+id (see main.c's selected_light()).
+ * 0xFFFFFFFF = nothing selected. (world=0/ground=1/players=1000+id/
+ * rockets=2000+slot belonged to Qek's now-removed world/gameplay draw
+ * calls -- those ranges are simply unused now.) */
 void         ui_set_selected_object(unsigned int object_id);
 unsigned int ui_get_selected_object(void);
 
@@ -244,3 +259,22 @@ unsigned int ui_get_selected_object(void);
  * Returns 0 (fields untouched) if no Scene panel exists in the layout
  * right now (the type-switcher lets a user swap it away). */
 int ui_get_scene_rect(float *x, float *y, float *w, float *h);
+
+/* Properties-panel inline field editing (see UIRenderContext-adjacent
+ * PropHitResult/properties_row in ui.c) -- same "no-op when nothing of
+ * this panel's own is focused, so falling through to the console is
+ * always correct" contract asset_browser_update_focused_text/
+ * chat_update_focused_text already establish. Call from main.c's own
+ * focus-priority chain, same level as those two. Drains typed_chars
+ * (digits/'.'/'-'/','/space only -- anything else silently ignored
+ * rather than accepted then failing to parse) and backspace_edge always
+ * when a field is focused; Enter commits the typed value through
+ * phi_prop_set_float/vec3 and clears focus. */
+void ui_update_prop_edit_text(InputState *inp);
+
+/* True while a Properties-panel field is being edited -- main.c checks
+ * this to route typed_chars/backspace_edge/enter_edge to
+ * ui_update_prop_edit_text instead of falling through to the console,
+ * same "which one thing owns keyboard input right now" priority chain
+ * asset_browser/chat focus already slot into. */
+int ui_is_editing_prop(void);

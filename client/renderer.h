@@ -2,6 +2,7 @@
 #include "vec3.h"
 #include "octree_render.h"
 #include "meshobject.h"
+#include "light.h"
 
 typedef struct {
     /* WebGL program */
@@ -107,6 +108,18 @@ void renderer_set_object_id(Renderer *r, unsigned int id);
 /* Phase 1 foundation: draw a single MeshObject at its own position/
  * orientation transform (see meshobject.h). */
 void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj);
+
+/* Draws every live Light object (light.h) as a small solid-box icon
+ * (renderer_draw_solid_box -- TAA-safe solid geometry, same convention
+ * gizmo.c's own handles use, not 1px GL_LINES which this deferred
+ * pipeline's TAA/FXAA suppresses), color-coded by type, plus a short
+ * thin box toward `direction` for Sun/Spot lights so orientation is at
+ * least visible without a real rotation gizmo (out of scope this pass,
+ * see PhiLight's own comment). Lives here rather than in light.c itself,
+ * same split renderer_draw_mesh_object already has from meshobject.c --
+ * entity data/logic in its own GL-free file, drawing it is the
+ * renderer's job. */
+void renderer_draw_lights(Renderer *r);
 
 /* Editor: draw a full-bright wireframe box in world space (hover/selection highlight) */
 void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,

@@ -5,6 +5,8 @@
 #include "phi_prop_registry.h"
 #include "meshobject.h"
 #include "halfedge.h"
+#include "light.h"
+#include "render_settings.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -65,6 +67,39 @@ int main(void) {
     phi_prop_set_vec3(&face, emission, em_in);
     phi_prop_get_vec3(&face, emission, em_out);
     check(em_out[0] == 2.0f && em_out[1] == 0.0f && em_out[2] == 0.0f, "emission round-trips exactly, including a >1.0 value used for bloom");
+
+    printf("[phi_prop_test] === 7: PhiLight props (Phase 3 -- Point/Sun/Spot/Area light objects) ===\n");
+    PhiLight light = {0};
+    light.type = LIGHT_TYPE_SPOT;
+    const PhiProp *l_type = phi_prop_find(&g_phi_prop_light, "type");
+    check(l_type != NULL, "PhiLight.type is registered");
+    float type_v;
+    check(phi_prop_get_float(&light, l_type, &type_v) == 1 && type_v == (float)LIGHT_TYPE_SPOT,
+          "type reads through the float accessor (it's a real C enum, PHI_PROP_INT)");
+    check(phi_prop_set_float(&light, l_type, (float)LIGHT_TYPE_SUN) == 1 && light.type == LIGHT_TYPE_SUN,
+          "type is genuinely settable, not read-only despite the UI showing it as a click-to-cycle widget");
+
+    const PhiProp *l_color = phi_prop_find(&g_phi_prop_light, "color");
+    float color_in[3] = {2.0f, 0.5f, 0.1f}, color_out[3];
+    phi_prop_set_vec3(&light, l_color, color_in);
+    phi_prop_get_vec3(&light, l_color, color_out);
+    check(color_out[0] == 2.0f && color_out[1] == 0.5f && color_out[2] == 0.1f,
+          "color round-trips exactly (and unclamped -- a >1.0 value survives, same as HEFace.emission)");
+
+    const PhiProp *l_spot_size = phi_prop_find(&g_phi_prop_light, "spot_size");
+    check(l_spot_size != NULL && l_spot_size->range[0] == 0.0f && l_spot_size->range[1] > 3.0f,
+          "spot_size registered with a real [0, ~pi] range");
+    phi_prop_set_float(&light, l_spot_size, 99.0f);
+    check(light.spot_size < 4.0f, "spot_size clamps above its range max (can't exceed a real cone angle)");
+
+    printf("[phi_prop_test] === 8: RenderSettings.samples (Phase 3 -- offline raytracer sample count) ===\n");
+    RenderSettings rs = {0};
+    const PhiProp *samples = phi_prop_find(&g_phi_prop_render_settings, "samples");
+    check(samples != NULL, "RenderSettings.samples is registered");
+    check(phi_prop_set_float(&rs, samples, 256.0f) == 1 && rs.samples == 256,
+          "samples is a real settable int field, offsetof-based write lands correctly");
+    phi_prop_set_float(&rs, samples, 0.0f);
+    check(rs.samples >= 1, "samples clamps below its range min -- zero/negative sample counts make no sense for a path tracer");
 
     if (g_fail) printf("\n[phi_prop_test] RESULT: FAIL\n");
     else printf("\n[phi_prop_test] RESULT: PASS (all checks passed)\n");

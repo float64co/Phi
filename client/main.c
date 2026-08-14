@@ -12,6 +12,9 @@
 #include "mp_port.h"
 #include "gizmo.h"
 #include "transform_op.h"
+#include "light.h"
+#include "render_settings.h"
+#include "scene_target.h"
 #include "font.h"
 #include "svg_icon.h"
 #include "asset_browser.h"
@@ -68,6 +71,12 @@ static Vec3f        g_edit_hit_local = {0, 0, 0};  /* local-space hit point pair
  * (see try_pick_object), and toggle_editor_mode() clears it on every
  * transition too, so it can never carry a stale face across a mode switch. */
 static EditorMode   g_editor_mode = EDITOR_MODE_OBJECT;
+/* Offline-raytracer render settings (Phase 3, see phi.md and
+ * render_settings.h) -- just sample count so far. Owned here like every
+ * other piece of scene state; registered with the DNA/RNA property
+ * system (scene_target_register below) so the Properties panel and
+ * phi.prop_get/set("render", ...) both read/write this exact struct. */
+static RenderSettings g_render_settings = { 128 };
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
 static PyConsoleState g_cs     = {0};
@@ -251,6 +260,7 @@ static void scene_content_cb(void *userdata) {
     draw_scene_grid();
     if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
     if (selected_is_test_mesh()) gizmo_draw(g_renderer, g_test_mesh_object.position);
+    renderer_draw_lights(g_renderer);
 }
 
 /* fwd/right/up basis matched EXACTLY against compute_scene_ray/
@@ -387,6 +397,22 @@ static int selected_is_test_mesh(void) {
            ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id;
 }
 
+/* Light objects share the same ui_get_selected_object() selection slot
+ * MeshObjects use, in a separate id range (5000+id vs. MeshObjects'
+ * 4000+id -- see ui.h's own comment on the convention) so there's still
+ * only ever one "currently selected thing" in the whole editor, same as
+ * before lights existed. Returns the real PhiLight* (not just a bool)
+ * since most callers need more than yes/no -- Properties panel, Delete,
+ * and prop-set all need the actual light to act on. NULL both when the
+ * selection isn't in the light range at all AND when it is but that
+ * light was since deleted (light_find's own NULL-on-miss, not a second
+ * check here). */
+static PhiLight *selected_light(void) {
+    unsigned int sel = ui_get_selected_object();
+    if (sel < LIGHT_ID_BASE || sel >= LIGHT_ID_BASE + 100000u) return NULL;
+    return light_find((int)(sel - LIGHT_ID_BASE));
+}
+
 /* Shared by both the Tab-key shortcut and the Scene context menu's Enter/
  * Exit Edit Mode row -- Blender only allows entering Edit mode with a mesh
  * object selected (a no-op, not silently ignored -- see the printf), and
@@ -445,10 +471,21 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
         }
     }
 
-    float t; int face;
+    /* Whole-object select: tests both the mesh and every live light,
+     * nearest hit wins (compares real ray t, same "nearest hit wins"
+     * contract meshobject_ray_pick_face and light_ray_pick both already
+     * follow) -- a light in front of the mesh from this angle should win
+     * the pick, and vice versa, not "mesh always checked first". */
+    float mesh_t; int face;
+    int mesh_hit = g_test_mesh_loaded && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &mesh_t, &face);
+    float light_t;
+    PhiLight *hit_light = light_ray_pick(origin, dir, &light_t);
+
     g_edit_face = -1;
-    if (g_test_mesh_loaded && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
+    if (mesh_hit && (!hit_light || mesh_t <= light_t)) {
         ui_set_selected_object(4000u + (unsigned int)g_test_mesh_object.id);
+    } else if (hit_light) {
+        ui_set_selected_object(LIGHT_ID_BASE + (unsigned int)hit_light->id);
     } else {
         ui_set_selected_object(0xFFFFFFFFu);
     }
@@ -614,6 +651,7 @@ static void main_loop(void *userdata) {
     ui_ctx.test_obj = &g_test_mesh_object;
     ui_ctx.test_obj_loaded = g_test_mesh_loaded;
     ui_ctx.edit_face = g_edit_face;
+    ui_ctx.render_settings = &g_render_settings;
     ui_ctx.editor_mode = g_editor_mode;
     ui_ctx.xform_hud = xform_hud;
     ui_ctx.console = &g_cs;
@@ -751,11 +789,15 @@ static void main_loop(void *userdata) {
     ui_update_area_drag(g_inp.mouse_x, g_inp.mouse_y, g_inp.lmb_down);
 
     /* Scene context-menu action, drained once per frame like the click
-     * flags above. Only Add Mesh Object / Delete / Extrude / Inset / Loop
-     * Cut / Fracture are wired to real behavior — Frame Selected/Frame
-     * All/Deselect All are still placeholder rows (see
+     * flags above (captured into a local since it's a one-shot poll --
+     * the switch itself needs the specific action more than once when
+     * it's one of the four Add Light rows, which all fall into the same
+     * case block). Only Add Mesh Object / Add Light / Delete / Extrude /
+     * Inset / Loop Cut / Fracture are wired to real behavior — Frame
+     * Selected/Frame All/Deselect All are still placeholder rows (see
      * ui_poll_context_menu_action's own comment). */
-    switch (ui_poll_context_menu_action()) {
+    CtxMenuAction ctx_action = ui_poll_context_menu_action();
+    switch (ctx_action) {
         case CTX_ACTION_ADD_MESH:
             if (g_test_mesh_loaded) {
                 printf("[main] context menu Add > Mesh Object: already exists "
@@ -764,13 +806,42 @@ static void main_loop(void *userdata) {
                 spawn_test_mesh_object();
             }
             break;
-        case CTX_ACTION_DELETE:
-            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
-                delete_test_mesh_object();
+        case CTX_ACTION_ADD_LIGHT_POINT:
+        case CTX_ACTION_ADD_LIGHT_SUN:
+        case CTX_ACTION_ADD_LIGHT_SPOT:
+        case CTX_ACTION_ADD_LIGHT_AREA: {
+            /* Spawns at the camera's own orbit pivot -- roughly "the
+             * point the user is currently looking at", the closest thing
+             * this engine has to Blender's 3D cursor (which doesn't
+             * exist here) as a sensible default spawn point. */
+            LightType lt = (ctx_action == CTX_ACTION_ADD_LIGHT_POINT) ? LIGHT_TYPE_POINT
+                          : (ctx_action == CTX_ACTION_ADD_LIGHT_SUN)   ? LIGHT_TYPE_SUN
+                          : (ctx_action == CTX_ACTION_ADD_LIGHT_SPOT)  ? LIGHT_TYPE_SPOT
+                          :                                              LIGHT_TYPE_AREA;
+            PhiLight *l = light_spawn(lt, g_cam_pivot);
+            if (l) {
+                ui_set_selected_object(LIGHT_ID_BASE + (unsigned int)l->id);
+                printf("[main] context menu Add Light: spawned #%d at pivot (%.1f, %.1f, %.1f)\n",
+                       l->id, g_cam_pivot.x, g_cam_pivot.y, g_cam_pivot.z);
             } else {
-                printf("[main] context menu Delete: no MeshObject selected\n");
+                printf("[main] context menu Add Light: light registry is full (PHI_MAX_LIGHTS)\n");
             }
             break;
+        }
+        case CTX_ACTION_DELETE: {
+            PhiLight *sel_light = selected_light();
+            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
+                delete_test_mesh_object();
+            } else if (sel_light) {
+                int id = sel_light->id;
+                light_delete(id);
+                ui_set_selected_object(0xFFFFFFFFu);
+                printf("[main] context menu Delete: removed Light #%d\n", id);
+            } else {
+                printf("[main] context menu Delete: nothing selected\n");
+            }
+            break;
+        }
         case CTX_ACTION_EXTRUDE_FACE:
             if (g_test_mesh_loaded && g_edit_face >= 0) {
                 int before = g_test_mesh_object.render_mesh->count / 3;
@@ -925,6 +996,8 @@ static void main_loop(void *userdata) {
             asset_browser_update_focused_text(&g_ab, &g_inp);
         } else if (g_chat.focus != CHAT_FOCUS_NONE) {
             chat_update_focused_text(&g_chat, &g_inp);
+        } else if (ui_is_editing_prop()) {
+            ui_update_prop_edit_text(&g_inp);
         } else {
             pyconsole_update(&g_cs, &g_inp);
         }
@@ -1116,6 +1189,48 @@ static void main_loop(void *userdata) {
  * library anywhere in this C codebase) rather than a bespoke text format,
  * since every value here is either a bool/number or a small fixed nested
  * object -- no free text, so no escaping to get right. */
+/* Chat-driven scene mutation handlers (see net.h's PKT_PROP_SET_REQUEST
+ * comment) -- registered with net.c below, same "net.c parses the wire
+ * payload, main.c owns and mutates the actual live state" division of
+ * labor scene_state_handler already established for the read-only
+ * counterpart. Claude's access here is deliberately read-WRITE per this
+ * project's own explicit decision (unlike get_asset_list/get_scene_state,
+ * which stay read-only) -- these three are the entire write surface: set
+ * an existing light/render-settings prop, spawn a light, delete a light.
+ * No object/face mutation exposed to chat (scene_resolve_target's
+ * "object"/"face" targets still work here mechanically, but
+ * server/anthropic_client.py's own tool list is what actually gates what
+ * Claude can invoke, and it only defines light/render tools -- see
+ * phi.md's Phase 3 status). */
+static void prop_set_handler(uint32_t req_id, const char *target, const char *identifier,
+                              int is_vec3, float v0, float v1, float v2) {
+    const PhiPropGroup *group; void *owner;
+    int ok = 0;
+    if (scene_resolve_target(target, &group, &owner)) {
+        const PhiProp *prop = phi_prop_find(group, identifier);
+        if (prop) {
+            if (is_vec3 && prop->type == PHI_PROP_VEC3) {
+                float v[3] = {v0, v1, v2};
+                ok = phi_prop_set_vec3(owner, prop, v);
+            } else if (!is_vec3 && prop->type != PHI_PROP_VEC3) {
+                ok = phi_prop_set_float(owner, prop, v0);
+            }
+        }
+    }
+    net_send_prop_set_reply(&g_ns, req_id, ok);
+}
+
+static void add_light_handler(uint32_t req_id, int type, float x, float y, float z) {
+    LightType lt = (type >= 0 && type < LIGHT_TYPE_COUNT) ? (LightType)type : LIGHT_TYPE_POINT;
+    PhiLight *l = light_spawn(lt, (Vec3f){x, y, z});
+    net_send_add_light_reply(&g_ns, req_id, l != NULL, l ? (uint32_t)l->id : 0u);
+}
+
+static void delete_light_handler(uint32_t req_id, uint32_t light_id) {
+    int ok = light_delete((int)light_id);
+    net_send_delete_light_reply(&g_ns, req_id, ok);
+}
+
 static void scene_state_handler(uint32_t req_id) {
     Vec3f vel = {0.0f, 0.0f, 0.0f};
     int has_physics = (g_test_mesh_loaded && g_test_mesh_object.phys_body != NULL);
@@ -1141,7 +1256,35 @@ static void scene_state_handler(uint32_t req_id) {
         snprintf(face_json, sizeof(face_json), "null");
     }
 
-    char json[1024];
+    /* Lights + render settings (Phase 3, see light.h/render_settings.h)
+     * -- read-only here (this is get_scene_state); the write side is
+     * prop_set_handler/add_light_handler/delete_light_handler above. */
+    char lights_json[3072];
+    {
+        static const char *type_names[LIGHT_TYPE_COUNT] = {"point", "sun", "spot", "area"};
+        PhiLight *lights[PHI_MAX_LIGHTS];
+        int n = light_get_all(lights);
+        char *lp = lights_json;
+        size_t remaining = sizeof(lights_json);
+        int written = snprintf(lp, remaining, "[");
+        lp += written; remaining -= (size_t)written;
+        for (int i = 0; i < n && remaining > 128; i++) {
+            written = snprintf(lp, remaining,
+                "%s{\"id\":%d,\"type\":\"%s\",\"position\":[%.3f,%.3f,%.3f],\"direction\":[%.3f,%.3f,%.3f],"
+                "\"color\":[%.3f,%.3f,%.3f],\"energy\":%.3f,\"radius\":%.3f,\"spot_size\":%.4f,"
+                "\"spot_blend\":%.3f,\"area_size\":%.3f,\"sun_angle\":%.5f}",
+                i > 0 ? "," : "", lights[i]->id, type_names[lights[i]->type],
+                lights[i]->position.x, lights[i]->position.y, lights[i]->position.z,
+                lights[i]->direction.x, lights[i]->direction.y, lights[i]->direction.z,
+                lights[i]->color.x, lights[i]->color.y, lights[i]->color.z,
+                lights[i]->energy, lights[i]->radius, lights[i]->spot_size,
+                lights[i]->spot_blend, lights[i]->area_size, lights[i]->sun_angle);
+            lp += written; remaining -= (size_t)written;
+        }
+        snprintf(lp, remaining, "]");
+    }
+
+    char json[4096];
     snprintf(json, sizeof(json),
         "{"
         "\"mesh_loaded\":%s,"
@@ -1153,7 +1296,9 @@ static void scene_state_handler(uint32_t req_id) {
         "\"has_physics\":%s,"
         "\"velocity\":[%.3f,%.3f,%.3f],"
         "\"physics_gravity\":[0.0,-9.81,0.0],"
-        "\"selected_face\":%s"
+        "\"selected_face\":%s,"
+        "\"lights\":%s,"
+        "\"render_settings\":{\"samples\":%d}"
         "}",
         g_test_mesh_loaded ? "true" : "false",
         g_test_mesh_object.position.x, g_test_mesh_object.position.y, g_test_mesh_object.position.z,
@@ -1163,7 +1308,9 @@ static void scene_state_handler(uint32_t req_id) {
         vert_count, face_count,
         has_physics ? "true" : "false",
         vel.x, vel.y, vel.z,
-        face_json);
+        face_json,
+        lights_json,
+        g_render_settings.samples);
 
     net_send_scene_state_reply(&g_ns, req_id, json);
 }
@@ -1247,6 +1394,16 @@ int main(void) {
      * are passed by address (not by value) since they change every frame
      * and phi_mp_register_targets only runs once, here. */
     phi_mp_register_targets(&g_test_mesh_object, &g_test_mesh_loaded, &g_edit_face, g_phys_world);
+    /* Shared "object"/"face"/"light:<id>"/"render" resolver (scene_target.h)
+     * -- same underlying pointers phi_mp_register_targets just got, plus
+     * g_render_settings (light:<id> needs no registration, see light.h's
+     * own self-contained registry). Used by phi.prop_get/set AND, once
+     * wired, chat-driven scene mutation. */
+    scene_target_register(&g_test_mesh_object, &g_test_mesh_loaded, &g_edit_face, &g_render_settings);
+
+    /* Light objects (Phase 3's "Both like Blender does it" light-source
+     * model, see light.h) -- a fixed-capacity registry, cleared once here. */
+    light_system_init();
 
     /* Asset Browser -- see phi.md's "Asset tracking and the Asset Browser
      * panel". net.c requests the initial asset list itself, right after
@@ -1259,6 +1416,9 @@ int main(void) {
     asset_browser_init(&g_ab);
     asset_browser_set_target(&g_ab);
     net_set_scene_state_handler(scene_state_handler);
+    net_set_prop_set_handler(prop_set_handler);
+    net_set_add_light_handler(add_light_handler);
+    net_set_delete_light_handler(delete_light_handler);
 
     /* Network -- see phi.md's Phase 1 status, "Client/server model": this
      * is Qek's connection/transport machinery, repurposed rather than

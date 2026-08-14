@@ -686,6 +686,63 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     glDisableVertexAttribArray(5);
 }
 
+/* ---- Vector helpers (file-static, matching gizmo.c's/light.c's own
+ * vec3_* naming convention rather than a shared header) -- only needed
+ * by renderer_draw_lights below. ---- */
+static inline Vec3f vec3_add(Vec3f a, Vec3f b) { return (Vec3f){a.x+b.x, a.y+b.y, a.z+b.z}; }
+static inline Vec3f vec3_scale(Vec3f a, float s) { return (Vec3f){a.x*s, a.y*s, a.z*s}; }
+static inline float vec3_dot(Vec3f a, Vec3f b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+static inline float vec3_len(Vec3f v) { return sqrtf(vec3_dot(v, v)); }
+static inline Vec3f vec3_norm(Vec3f v) {
+    float l = vec3_len(v);
+    if (l < 1e-6f) return (Vec3f){0,0,0};
+    return vec3_scale(v, 1.0f / l);
+}
+
+static void light_icon_color_for_type(LightType type, float *r, float *g, float *b) {
+    switch (type) {
+        case LIGHT_TYPE_POINT: *r = 1.0f; *g = 0.85f; *b = 0.3f; break;   /* warm yellow */
+        case LIGHT_TYPE_SUN:   *r = 1.0f; *g = 0.95f; *b = 0.8f; break;   /* near-white */
+        case LIGHT_TYPE_SPOT:  *r = 0.4f; *g = 0.8f;  *b = 1.0f; break;   /* cyan-ish */
+        case LIGHT_TYPE_AREA:  *r = 0.85f; *g = 0.5f; *b = 1.0f; break;   /* violet */
+        default:                *r = 1.0f; *g = 1.0f; *b = 1.0f; break;
+    }
+}
+
+void renderer_draw_lights(Renderer *r) {
+    PhiLight *lights[PHI_MAX_LIGHTS];
+    int n = light_get_all(lights);
+    for (int i = 0; i < n; i++) {
+        const PhiLight *l = lights[i];
+        float cr, cg, cb;
+        light_icon_color_for_type(l->type, &cr, &cg, &cb);
+
+        float ir = LIGHT_ICON_RADIUS * 0.5f;
+        Vec3f bmin = { l->position.x - ir, l->position.y - ir, l->position.z - ir };
+        Vec3f bmax = { l->position.x + ir, l->position.y + ir, l->position.z + ir };
+        renderer_draw_solid_box(r, bmin, bmax, cr, cg, cb);
+
+        if (l->type == LIGHT_TYPE_SUN || l->type == LIGHT_TYPE_SPOT) {
+            /* A short thin box from the light toward `direction` -- the
+             * same "solid geometry, not GL_LINES" rule this project's
+             * grid/gizmo already established (1px lines get suppressed
+             * by this deferred pipeline's TAA/FXAA). */
+            Vec3f dir = vec3_norm(l->direction);
+            if (vec3_len(dir) > 0.0f) {
+                Vec3f tip = vec3_add(l->position, vec3_scale(dir, LIGHT_ICON_RADIUS * 3.0f));
+                float pad = ir * 0.3f;
+                Vec3f smin = {
+                    fminf(l->position.x, tip.x) - pad, fminf(l->position.y, tip.y) - pad, fminf(l->position.z, tip.z) - pad
+                };
+                Vec3f smax = {
+                    fmaxf(l->position.x, tip.x) + pad, fmaxf(l->position.y, tip.y) + pad, fmaxf(l->position.z, tip.z) + pad
+                };
+                renderer_draw_solid_box(r, smin, smax, cr, cg, cb);
+            }
+        }
+    }
+}
+
 static unsigned int s_wire_vbo = 0;
 
 void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,

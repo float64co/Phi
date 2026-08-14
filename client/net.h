@@ -46,6 +46,24 @@
 #define PKT_SCENE_STATE_REQUEST  0x22   /* S->C: [req_id:u32] -- "report your live scene/engine state" */
 #define PKT_SCENE_STATE_REPLY    0x23   /* C->S: [req_id:u32 len:u16 utf8-json:bytes] -- reply to a PKT_SCENE_STATE_REQUEST */
 
+/* Chat-driven scene MUTATION (see phi.md's Phase 3 status/"Where AI
+ * fits") -- same "server asks THIS client to act, since the live scene
+ * state only exists in the client process" reasoning PKT_SCENE_STATE_*
+ * already established, just for a write instead of a read. Wired to
+ * three of the Anthropic tool-use loop's real tools (server/
+ * anthropic_client.py's add_light/set_light_property/set_render_samples/
+ * delete_light) -- Claude's access to lights/render settings is
+ * explicitly read-WRITE per this project's own decision, unlike the
+ * read-only get_asset_list/get_scene_state tools. req_id round-trips the
+ * same way PKT_SCENE_STATE_REQUEST/REPLY's already does, for the same
+ * reason (matching a reply to the specific pending tool call). */
+#define PKT_PROP_SET_REQUEST     0x24   /* S->C: [req_id:u32 target_len:u8 target:bytes ident_len:u8 ident:bytes is_vec3:u8 v0:f32 v1:f32 v2:f32] -- target is "light:<id>" or "render", same strings scene_resolve_target() already accepts */
+#define PKT_PROP_SET_REPLY       0x25   /* C->S: [req_id:u32 ok:u8] */
+#define PKT_ADD_LIGHT_REQUEST    0x26   /* S->C: [req_id:u32 type:u8 x:f32 y:f32 z:f32] -- type: 0=point 1=sun 2=spot 3=area */
+#define PKT_ADD_LIGHT_REPLY      0x27   /* C->S: [req_id:u32 ok:u8 light_id:u32] -- light_id is 0 (never a real id) on failure */
+#define PKT_DELETE_LIGHT_REQUEST 0x28   /* S->C: [req_id:u32 light_id:u32] */
+#define PKT_DELETE_LIGHT_REPLY   0x29   /* C->S: [req_id:u32 ok:u8] */
+
 typedef struct {
     int  connected;
     int  local_id;
@@ -68,6 +86,9 @@ void net_send_asset_delete(NetState *ns, uint32_t id);
 
 void net_send_chat_msg(NetState *ns, const char *text);
 void net_send_scene_state_reply(NetState *ns, uint32_t req_id, const char *json);
+void net_send_prop_set_reply(NetState *ns, uint32_t req_id, int ok);
+void net_send_add_light_reply(NetState *ns, uint32_t req_id, int ok, uint32_t light_id);
+void net_send_delete_light_reply(NetState *ns, uint32_t req_id, int ok);
 
 /* Registers a callback net_on_message invokes on PKT_SCENE_STATE_REQUEST --
  * net.c has no access to MeshObject/physics-world state itself (that's
@@ -76,6 +97,15 @@ void net_send_scene_state_reply(NetState *ns, uint32_t req_id, const char *json)
  * building the reply itself, the same division of labor console.c/
  * asset_browser.c already have for parsing-vs-owning-the-data. */
 void net_set_scene_state_handler(void (*handler)(uint32_t req_id));
+
+/* Same division of labor, for the three chat-driven mutation requests
+ * (see PKT_PROP_SET_REQUEST's own comment) -- main.c owns the actual
+ * light registry/render settings, net.c just parses the wire payload and
+ * hands the pieces off. */
+void net_set_prop_set_handler(void (*handler)(uint32_t req_id, const char *target, const char *identifier,
+                                               int is_vec3, float v0, float v1, float v2));
+void net_set_add_light_handler(void (*handler)(uint32_t req_id, int type, float x, float y, float z));
+void net_set_delete_light_handler(void (*handler)(uint32_t req_id, uint32_t light_id));
 
 #ifndef __EMSCRIPTEN__
 /* Native only: pumps the WebSocket socket (non-blocking) once per frame.

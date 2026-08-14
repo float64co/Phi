@@ -11,6 +11,22 @@ void net_set_scene_state_handler(void (*handler)(uint32_t req_id)) {
     s_scene_state_handler = handler;
 }
 
+static void (*s_prop_set_handler)(uint32_t req_id, const char *target, const char *identifier,
+                                   int is_vec3, float v0, float v1, float v2) = NULL;
+static void (*s_add_light_handler)(uint32_t req_id, int type, float x, float y, float z) = NULL;
+static void (*s_delete_light_handler)(uint32_t req_id, uint32_t light_id) = NULL;
+
+void net_set_prop_set_handler(void (*handler)(uint32_t req_id, const char *target, const char *identifier,
+                                               int is_vec3, float v0, float v1, float v2)) {
+    s_prop_set_handler = handler;
+}
+void net_set_add_light_handler(void (*handler)(uint32_t req_id, int type, float x, float y, float z)) {
+    s_add_light_handler = handler;
+}
+void net_set_delete_light_handler(void (*handler)(uint32_t req_id, uint32_t light_id)) {
+    s_delete_light_handler = handler;
+}
+
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/websocket.h>
@@ -227,11 +243,42 @@ void net_send_chat_msg(NetState *ns, const char *text) {
 
 void net_send_scene_state_reply(NetState *ns, uint32_t req_id, const char *json) {
     (void)ns;
-    uint8_t pkt[1 + 4 + 2 + 1024];
+    uint8_t pkt[1 + 4 + 2 + 3072];
     uint8_t *p = pkt;
     p = w_u8(p, PKT_SCENE_STATE_REPLY);
     memcpy(p, &req_id, 4); p += 4;
     p = w_lenprefixed16(p, json);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_prop_set_reply(NetState *ns, uint32_t req_id, int ok) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_PROP_SET_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_add_light_reply(NetState *ns, uint32_t req_id, int ok, uint32_t light_id) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1 + 4];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_ADD_LIGHT_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    memcpy(p, &light_id, 4); p += 4;
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_delete_light_reply(NetState *ns, uint32_t req_id, int ok) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_DELETE_LIGHT_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
     ws_send_binary(pkt, (int)(p - pkt));
 }
 
@@ -288,6 +335,53 @@ void net_on_message(NetState *ns, const uint8_t *data, int len) {
         if (len < 5) break;
         uint32_t req_id; memcpy(&req_id, p, 4);
         if (s_scene_state_handler) s_scene_state_handler(req_id);
+        break;
+    }
+
+    case PKT_PROP_SET_REQUEST: {
+        /* [req_id:u32 target_len:u8 target:bytes ident_len:u8 ident:bytes is_vec3:u8 v0:f32 v1:f32 v2:f32] */
+        if (len < 6) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint8_t target_len = *p++;
+        if (p + target_len > data + len) break;
+        char target[64];
+        int tn = (int)(target_len < sizeof(target) - 1 ? target_len : sizeof(target) - 1);
+        memcpy(target, p, (size_t)tn); target[tn] = 0;
+        p += target_len;
+        if (p + 1 > data + len) break;
+        uint8_t ident_len = *p++;
+        if (p + ident_len > data + len) break;
+        char identifier[32];
+        int in_ = (int)(ident_len < sizeof(identifier) - 1 ? ident_len : sizeof(identifier) - 1);
+        memcpy(identifier, p, (size_t)in_); identifier[in_] = 0;
+        p += ident_len;
+        if (p + 1 + 12 > data + len) break;
+        uint8_t is_vec3 = *p++;
+        float v0, v1, v2;
+        memcpy(&v0, p, 4); p += 4;
+        memcpy(&v1, p, 4); p += 4;
+        memcpy(&v2, p, 4); p += 4;
+        if (s_prop_set_handler) s_prop_set_handler(req_id, target, identifier, is_vec3 != 0, v0, v1, v2);
+        break;
+    }
+
+    case PKT_ADD_LIGHT_REQUEST: {
+        if (len < 1 + 4 + 1 + 12) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint8_t type = *p++;
+        float x, y, z;
+        memcpy(&x, p, 4); p += 4;
+        memcpy(&y, p, 4); p += 4;
+        memcpy(&z, p, 4); p += 4;
+        if (s_add_light_handler) s_add_light_handler(req_id, type, x, y, z);
+        break;
+    }
+
+    case PKT_DELETE_LIGHT_REQUEST: {
+        if (len < 1 + 4 + 4) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint32_t light_id; memcpy(&light_id, p, 4); p += 4;
+        if (s_delete_light_handler) s_delete_light_handler(req_id, light_id);
         break;
     }
 

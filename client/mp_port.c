@@ -34,6 +34,8 @@
 #include "port/micropython_embed.h"
 #include "mp_port.h"
 #include "phi_prop_registry.h"
+#include "scene_target.h"
+#include "light.h"
 #include "halfedge.h"
 
 mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
@@ -86,38 +88,21 @@ void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, c
     s_phys_world = phys_world;
 }
 
-/* Resolves target="object"/"face" to the live PhiPropGroup+owner pointer
- * to read/write through -- returns 0 (out params untouched) if that
- * target isn't currently available (nothing loaded / no face selected),
- * which native_prop_get/set turn into a real raised Python exception
- * rather than a silent wrong read. */
-static int resolve_target(const char *target, const PhiPropGroup **out_group, void **out_owner) {
-    if (strcmp(target, "object") == 0) {
-        if (!s_target_obj || !s_target_obj_loaded || !*s_target_obj_loaded) return 0;
-        *out_group = &g_phi_prop_mesh_object;
-        *out_owner = s_target_obj;
-        return 1;
-    }
-    if (strcmp(target, "face") == 0) {
-        if (!s_target_obj || !s_target_obj_loaded || !*s_target_obj_loaded || !s_target_obj->hem ||
-            !s_target_edit_face || *s_target_edit_face < 0 ||
-            *s_target_edit_face >= s_target_obj->hem->face_count ||
-            s_target_obj->hem->faces[*s_target_edit_face].deleted) {
-            return 0;
-        }
-        *out_group = &g_phi_prop_heface;
-        *out_owner = &s_target_obj->hem->faces[*s_target_edit_face];
-        return 1;
-    }
-    return 0;
-}
+/* Target resolution ("object"/"face"/"light:<id>"/"render") now lives in
+ * scene_target.c, shared with chat-driven scene mutation (main.c's
+ * PKT_PROP_SET_REQUEST handler) rather than being duplicated here -- see
+ * its own comment for why. phi_mp_register_targets below still registers
+ * this file's OWN physics-specific pointers (s_target_obj etc., used
+ * directly by enable_physics/apply_impulse/get_velocity/set_velocity,
+ * which need more than just prop get/set); main.c calls
+ * scene_target_register alongside it with the same underlying pointers. */
 
 static mp_obj_t native_prop_get(mp_obj_t target_obj, mp_obj_t identifier_obj) {
     const char *target = mp_obj_str_get_str(target_obj);
     const char *identifier = mp_obj_str_get_str(identifier_obj);
     const PhiPropGroup *group; void *owner;
-    if (!resolve_target(target, &group, &owner)) {
-        mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_get: target not currently available ('object' needs a loaded MeshObject, 'face' needs a selected face)"));
+    if (!scene_resolve_target(target, &group, &owner)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_get: target not currently available ('object' needs a loaded MeshObject, 'face' needs a selected face, 'light:<id>' needs that light to exist, 'render' is always available)"));
     }
     const PhiProp *prop = phi_prop_find(group, identifier);
     if (!prop) mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_get: unknown property identifier"));
@@ -137,8 +122,8 @@ static mp_obj_t native_prop_set(mp_obj_t target_obj, mp_obj_t identifier_obj, mp
     const char *target = mp_obj_str_get_str(target_obj);
     const char *identifier = mp_obj_str_get_str(identifier_obj);
     const PhiPropGroup *group; void *owner;
-    if (!resolve_target(target, &group, &owner)) {
-        mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_set: target not currently available ('object' needs a loaded MeshObject, 'face' needs a selected face)"));
+    if (!scene_resolve_target(target, &group, &owner)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_set: target not currently available ('object' needs a loaded MeshObject, 'face' needs a selected face, 'light:<id>' needs that light to exist, 'render' is always available)"));
     }
     const PhiProp *prop = phi_prop_find(group, identifier);
     if (!prop) mp_raise_ValueError(MP_ERROR_TEXT("phi.prop_set: unknown property identifier"));
@@ -244,6 +229,46 @@ static mp_obj_t native_set_velocity(mp_obj_t v_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(native_set_velocity_obj, native_set_velocity);
 
+/* ---- Light objects, exposed to Python (light.h) -- spawn/delete/list
+ * live outside the generic phi.prop_get/set surface since they add or
+ * remove a whole light rather than reading/writing one of an existing
+ * light's fields (phi.prop_get/set("light:<id>", ...) still covers that
+ * part, via scene_target.c's resolver). ---- */
+
+static mp_obj_t native_add_light(size_t n_args, const mp_obj_t *args) {
+    const char *type_str = mp_obj_str_get_str(args[0]);
+    LightType type;
+    if (strcmp(type_str, "point") == 0) type = LIGHT_TYPE_POINT;
+    else if (strcmp(type_str, "sun") == 0) type = LIGHT_TYPE_SUN;
+    else if (strcmp(type_str, "spot") == 0) type = LIGHT_TYPE_SPOT;
+    else if (strcmp(type_str, "area") == 0) type = LIGHT_TYPE_AREA;
+    else mp_raise_ValueError(MP_ERROR_TEXT("phi.add_light: type must be 'point', 'sun', 'spot', or 'area'"));
+
+    Vec3f pos = {
+        (float)mp_obj_get_float(args[1]), (float)mp_obj_get_float(args[2]), (float)mp_obj_get_float(args[3])
+    };
+    PhiLight *l = light_spawn(type, pos);
+    if (!l) mp_raise_ValueError(MP_ERROR_TEXT("phi.add_light: light registry is full"));
+    return mp_obj_new_int(l->id);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_add_light_obj, 4, 4, native_add_light);
+
+static mp_obj_t native_delete_light(mp_obj_t id_obj) {
+    int id = mp_obj_get_int(id_obj);
+    if (!light_delete(id)) mp_raise_ValueError(MP_ERROR_TEXT("phi.delete_light: no light with that id"));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_delete_light_obj, native_delete_light);
+
+static mp_obj_t native_list_lights(void) {
+    PhiLight *lights[PHI_MAX_LIGHTS];
+    int n = light_get_all(lights);
+    mp_obj_t items[PHI_MAX_LIGHTS];
+    for (int i = 0; i < n; i++) items[i] = mp_obj_new_int(lights[i]->id);
+    return mp_obj_new_tuple((size_t)n, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_list_lights_obj, native_list_lights);
+
 /* ---- @phi.panel registry (C side) --
  * Captured eagerly the moment a panel's decorator runs (see
  * native_panel_registered below, called from PHI_BOOTSTRAP's @panel
@@ -318,7 +343,10 @@ static const char *PHI_BOOTSTRAP =
     "phi.enable_physics = _native_enable_physics\n"
     "phi.apply_impulse = _native_apply_impulse\n"
     "phi.get_velocity = _native_get_velocity\n"
-    "phi.set_velocity = _native_set_velocity\n";
+    "phi.set_velocity = _native_set_velocity\n"
+    "phi.add_light = _native_add_light\n"
+    "phi.delete_light = _native_delete_light\n"
+    "phi.list_lights = _native_list_lights\n";
 
 int phi_mp_panel_count(void) { return s_panel_count; }
 
@@ -372,6 +400,9 @@ static void phi_mp_install_bindings(void) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_apply_impulse")), MP_OBJ_FROM_PTR(&native_apply_impulse_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_velocity")), MP_OBJ_FROM_PTR(&native_get_velocity_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_velocity")), MP_OBJ_FROM_PTR(&native_set_velocity_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_add_light")), MP_OBJ_FROM_PTR(&native_add_light_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_delete_light")), MP_OBJ_FROM_PTR(&native_delete_light_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_list_lights")), MP_OBJ_FROM_PTR(&native_list_lights_obj));
 
     nlr_buf_t nlr;
     if (nlr_push(&nlr) == 0) {
