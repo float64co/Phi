@@ -562,6 +562,7 @@ static int build_top_menu_dropdown_rows(TopMenu which, const char *items[TOP_MEN
         case TOP_MENU_FILE:
             items[n] = "Save"; actions[n] = TOP_ACTION_FILE_SAVE; kinds[n] = TOP_ROW_ACTION; n++;
             items[n] = "Load"; actions[n] = TOP_ACTION_FILE_LOAD; kinds[n] = TOP_ROW_ACTION; n++;
+            items[n] = "Render Still Frame"; actions[n] = TOP_ACTION_FILE_RENDER; kinds[n] = TOP_ROW_ACTION; n++;
             break;
         case TOP_MENU_EDIT:
         case TOP_MENU_VIEW:

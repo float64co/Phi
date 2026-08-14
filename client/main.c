@@ -16,6 +16,7 @@
 #include "render_settings.h"
 #include "scene_target.h"
 #include "fracture_body.h"
+#include "path_tracer.h"
 #include "font.h"
 #include "svg_icon.h"
 #include "asset_browser.h"
@@ -291,6 +292,71 @@ static void scene_content_cb(void *userdata) {
     if (selected_is_test_mesh() && !g_fracture_active) gizmo_draw(g_renderer, g_test_mesh_object.position);
     renderer_draw_lights(g_renderer);
     fracture_body_sync_and_draw_all(g_renderer);
+}
+
+/* Fixed output resolution for Phase 3's offline path tracer (see path_
+ * tracer.h) -- only samples was ever asked to be user-configurable (via
+ * the Properties panel / phi.prop_set("render", "samples", N), see
+ * g_render_settings below); resolution stays a real, honest constant
+ * for this pass rather than inventing an unrequested UI control for it. */
+#define PT_RENDER_WIDTH  640
+#define PT_RENDER_HEIGHT 480
+
+/* File > Render Still Frame (see ui.h's TOP_ACTION_FILE_RENDER) and
+ * phi.render() (mp_port.c) both funnel through here -- builds a PTScene
+ * from whatever's actually visible right now (the live test object, or
+ * its fracture fragments once activated, the SAME set scene_content_cb
+ * above draws) and every live Light, renders one still frame from the
+ * Scene panel's own current camera (g_cam_pos/g_cam_yaw/g_cam_pitch, the
+ * exact state cam_recompute_pos below already maintains) at g_render_
+ * settings.samples, and writes a real PNG to disk. Synchronous -- this
+ * pass has no background-thread/progress-bar UI, so the editor visibly
+ * hangs for the render's duration; a real, honestly flagged scope limit
+ * (fine for a still frame at modest sample counts, not fine for
+ * anything longer). Returns 1 and fills out_path on success, 0 on
+ * failure (nothing in the scene to render, or pt_render/pt_write_png
+ * themselves failing) -- printed to stdout either way so both the top-
+ * menu action and the Python binding get real user-visible feedback. */
+static int render_still_frame_to_disk(char *out_path, size_t out_path_cap) {
+    const MeshObject *objs[1 + PHI_MAX_FRACTURE_BODIES];
+    int n_objs = 0;
+    if (g_fracture_active) {
+        int fc = fracture_body_count();
+        for (int i = 0; i < fc && n_objs < (int)(sizeof(objs) / sizeof(objs[0])); i++) {
+            const MeshObject *o = fracture_body_get_object(i);
+            if (o) objs[n_objs++] = o;
+        }
+    } else if (g_test_mesh_loaded) {
+        objs[n_objs++] = &g_test_mesh_object;
+    }
+
+    PhiLight *lights[PHI_MAX_LIGHTS];
+    int n_lights = light_get_all(lights);
+
+    PTScene scene = pt_scene_build(objs, n_objs);
+    if (scene.tri_count == 0) {
+        printf("[main] Render Still Frame: scene is empty, nothing to render\n");
+        pt_scene_destroy(&scene);
+        return 0;
+    }
+    int tri_count = scene.tri_count;
+
+    PTRenderParams params = { PT_RENDER_WIDTH, PT_RENDER_HEIGHT, g_render_settings.samples, 6 };
+    float *img = pt_render(&scene, lights, n_lights, g_cam_pos, g_cam_yaw, g_cam_pitch, g_renderer->fov_y, &params);
+    pt_scene_destroy(&scene);
+    if (!img) {
+        printf("[main] Render Still Frame: pt_render failed (invalid render settings?)\n");
+        return 0;
+    }
+
+    char path[256];
+    snprintf(path, sizeof(path), "assets/render_%u.png", (unsigned int)phi_platform_now());
+    int ok = pt_write_png(path, img, params.width, params.height);
+    free(img);
+    printf("[main] Render Still Frame: %s -- %s (samples=%d, %d light(s), %d triangles)\n",
+           ok ? path : "FAILED to write PNG", ok ? "done" : "", params.samples, n_lights, tri_count);
+    if (ok && out_path) snprintf(out_path, out_path_cap, "%s", path);
+    return ok;
 }
 
 /* fwd/right/up basis matched EXACTLY against compute_scene_ray/
@@ -1064,6 +1130,9 @@ static void main_loop(void *userdata) {
                 printf("[main] File > Load: no asset selected in the Asset Browser panel\n");
             }
             break;
+        case TOP_ACTION_FILE_RENDER:
+            render_still_frame_to_disk(NULL, 0);
+            break;
         default:
             break;
     }
@@ -1492,6 +1561,10 @@ int main(void) {
      * own self-contained registry). Used by phi.prop_get/set AND, once
      * wired, chat-driven scene mutation. */
     scene_target_register(&g_test_mesh_object, &g_test_mesh_loaded, &g_edit_face, &g_render_settings);
+    /* phi.render() -- Phase 3's real path tracer (path_tracer.h), same
+     * "give mp_port.c a function pointer to main.c's own logic" shape as
+     * the registration calls just above. */
+    phi_mp_register_render_callback(render_still_frame_to_disk);
 
     /* Light objects (Phase 3's "Both like Blender does it" light-source
      * model, see light.h) -- a fixed-capacity registry, cleared once here. */

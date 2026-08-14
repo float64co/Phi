@@ -3033,7 +3033,7 @@ offline at arbitrary quality, sends them to the server as PNG files, and
 optionally invokes ffmpeg to produce a video. Gives users Blender-style "render
 this animation" output from inside the editor with no external tools required.
 
-### Status: light-source model landed 2026-08-14; the tracer itself not started
+### Status: light-source model landed 2026-08-14; the real path tracer itself landed 2026-08-14 (see dated note below) — single-still-frame rendering, triggered from the editor and from Python, is real and verified; the animation-sequence/ffmpeg video-export half described later in this section (`phi.OfflineRenderer`, the `/render/*` server endpoints) remains explicit deferred future work, not attempted this pass
 
 The tracer needs SOME light source to trace toward for direct lighting, and
 this project had neither a dedicated Light object type nor any editor-side
@@ -3146,12 +3146,117 @@ Properties-panel click-to-edit interaction, and Outliner row fix are
 compile-clean-and-reviewed, not click-tested. Win32 remains the user's own
 `build.bat` responsibility, not built from this sandbox.
 
-### The raytracer
+#### The real path tracer, 2026-08-14
 
-The octree already has `octree_ray_cast()` — the primary intersection primitive is
-written. A unidirectional path tracer in C builds on top of it:
+A genuine BVH-accelerated Monte Carlo path tracer (new `client/path_
+tracer.h`/`.c`), not a toy/approximation and not the octree-based sketch
+the rest of this section originally described below (that sketch predates
+this project's own removal of Qek's octree world, see Phase 1's status --
+`octree_ray_cast` no longer exists; this implementation builds its own BVH
+over the live scene's actual mesh triangles instead, the correct approach
+now that geometry means `MeshObject`s, not a voxel octree).
 
-- **Octree geometry**: uses existing traversal, free
+- **Scene**: `pt_scene_build` flattens whatever's actually on screen right
+  now (the live test object, or its fracture fragments once Phase 2's
+  `fracture_body_activate` has run -- the SAME set `scene_content_cb`
+  draws) into world-space triangles, transformed with the identical T*R*S
+  model matrix `renderer_draw_mesh_object` uses (position, quaternion
+  rotation, then component-wise scale) -- not the scale-ignoring transform
+  `meshobject_ray_pick` uses for picking, a real, deliberate divergence
+  from that (buggy, already-flagged-elsewhere) approximation, since this
+  code's job is to match what's actually rendered.
+- **BVH**: real median-split binary tree (longest-axis split, leaf
+  threshold 4 triangles), not SAH-optimized -- an honest scope choice for
+  this engine's current scene sizes (one live object slot plus its
+  fracture fragments), not silently pretended to be SAH. Iterative
+  traversal via an explicit stack, slab-tested AABBs bounded by the best
+  hit found so far.
+- **BSDF**: real microfacet math -- Lambertian diffuse + Cook-Torrance GGX
+  specular (`D*G*F/(4 NdotV NdotL)`, Smith-Schlick visibility with Karis'
+  UE4 analytic-light `k` remap, Schlick Fresnel), driven by the exact same
+  `base_color`/`metallic`/`roughness` fields the Properties panel and live
+  rasterizer already read/write (`HEFace`'s material, see Phase 1's PBR
+  work) -- not a separate, disconnected "renderer-only" material model.
+  Stochastic lobe selection (diffuse via cosine-weighted hemisphere
+  sampling, specular via GGX half-vector importance sampling per Walter et
+  al. 2007) with a metallic-driven selection probability, each branch
+  correctly divided by its own selection probability so the combination
+  stays unbiased.
+- **Next-event estimation**: every live `PhiLight` is sampled directly
+  every bounce (real closed-form radiometry per type -- Point/Spot use
+  power->intensity->inverse-square-irradiance, Sun uses Blender's own
+  "Strength is already an irradiance" convention with no distance
+  falloff, Area approximates its emitting face with a single
+  representative-point sample rather than full stratified-area sampling,
+  a real, honestly flagged scope limit: correct mean energy, no
+  area-driven soft-shadow penumbra), tested against the BVH with a real
+  shadow ray. Emissive `HEFace` materials contribute only via BSDF-sampled
+  hits (never double-counted against NEE, since NEE never targets
+  emissive geometry, only dedicated Light objects -- no MIS bookkeeping
+  needed as a result).
+- **Integrator**: real path tracing, not a single-bounce direct-lighting-
+  only approximation -- Russian-roulette-terminated after 3 bounces
+  (probability = max throughput channel, clamped `[0.05, 0.95]`), jittered
+  per-pixel supersampling (`render_settings.h`'s `samples`, the exact
+  field the Properties panel/`phi.prop_set("render", "samples", N)`
+  already exposed on 2026-08-10, now finally consumed by something real).
+  Camera ray generation matches `main.c`'s own `cam_basis`/
+  `compute_scene_ray` formula exactly (verified against it directly, not
+  re-derived), so a rendered frame lines up with whatever the live
+  rasterizer shows from the same camera state.
+- **Output**: real PNG via a newly-vendored `client/stb_image_write.h`
+  (same "vendor a small, proven single-header library" precedent as
+  `stb_truetype.h`/`cgltf.h`) -- Reinhard tonemap + gamma 2.2, not a raw
+  HDR-to-8-bit clamp.
+- **Reachable two ways**: a new File > "Render Still Frame" menu row
+  (`TOP_ACTION_FILE_RENDER`, `ui.h`/`ui.c`) and a new `phi.render()`
+  Python binding (`mp_port.c`, registered via a plain function-pointer
+  callback from `main.c`'s `render_still_frame_to_disk`, same shape
+  `phi_mp_register_targets` already uses for cross-file state) -- both
+  paths share the exact same rendering logic, matching "Claude has real
+  read-write access to this stuff" the same way lights/render-settings
+  already do. Fixed 640x480 output resolution this pass (only `samples`
+  was ever asked to be user-configurable); synchronous, so the editor
+  visibly hangs for the render's duration -- no background-thread/
+  progress-bar UI yet, a real, honestly flagged scope limit, fine for a
+  still frame at modest sample counts.
+
+Verified with a new standalone no-GL harness (`path_tracer_test`, `make
+path_tracer_test`) -- no stub functions needed at all (unlike `fracture_
+body_test`), since this module never touches the renderer or GL: 500
+random rays checked against an independently re-derived brute-force
+ray/triangle scan (BVH traversal matches exactly, hit/miss and t); a real
+BSDF furnace test (mean sampled importance-sampling weight over 20,000
+samples stays within a real energy-conservation bound for both a
+dielectric and a metal, not just "did it run"); closed-form NEE checks
+with no Monte Carlo noise involved (point light: doubling distance cuts
+contribution to exactly 1/4, doubling power exactly doubles it, a light
+below the horizon contributes exactly zero; sun light: linear in
+strength, exactly zero when it points away from the surface); and a full
+end-to-end render (BVH+BSDF+NEE+camera all together) checked for
+finite-only pixels and real image variation (not a flat sky-only miss),
+plus a real PNG signature check on the written file. Native and wasm both
+rebuilt clean from a forced-clean state; every other standalone harness
+in the project re-run and re-verified passing, since `main.c`/`ui.c`/
+`mp_port.c`/the `Makefile` all changed. Live GUI verification (clicking
+File > Render Still Frame and looking at the resulting PNG) is still not
+possible in this sandbox -- same `XOpenDisplay()` limitation as everywhere
+else in this doc a real window is needed; the rendered image's actual
+visual quality (framing, exposure, noise level at the default sample
+count) is therefore compile-clean-and-numerically-verified, not eyeballed.
+
+### The raytracer (original design sketch, largely superseded by the dated note above)
+
+The paragraphs below predate this project's real implementation and
+describe an octree-based approach this codebase no longer has (`octree_
+ray_cast` was part of Qek's now-removed voxel world, see Phase 1's
+status) -- kept for the still-relevant parts (materials/integrator intent,
+`stb_image_write.h` choice, the async/progress-bar idea for a FUTURE
+multi-frame render) but the geometry/BVH description is stale; see the
+dated note above for what's actually built.
+
+- **Octree geometry**: ~~uses existing traversal, free~~ -- N/A, this
+  codebase has no octree anymore; superseded by the real triangle BVH above.
 - **Discrete mesh objects**: BVH over convex hulls (from Phase 2)
 - **Materials**: full PBR material structs (baseColor, metallic, roughness,
   emission, IOR) stored in a UBO — no 256-slot palette constraint
@@ -3161,6 +3266,9 @@ written. A unidirectional path tracer in C builds on top of it:
 
 Rendering runs via `emscripten_async_call` so it does not block the editor UI.
 Progress events fire to JavaScript as each frame completes, driving a progress bar.
+(Both of the above -- async execution and a progress bar -- are FUTURE work
+for a real multi-frame animation render; the single-still-frame render
+landed 2026-08-14 is synchronous, see the dated note above.)
 
 ### Python API
 

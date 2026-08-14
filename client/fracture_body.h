@@ -61,6 +61,16 @@ void fracture_body_clear(PhiPhysicsWorld *world);
 
 int fracture_body_count(void);
 
+/* Read-only access to the index'th live fragment's own MeshObject
+ * (render_mesh + current transform) -- for the Phase 3 path tracer
+ * (path_tracer.h's pt_scene_build), which needs real triangle+material
+ * data for whatever's actually on screen, fragments included. Still not
+ * a first-class Python-addressable object (this file's own header
+ * comment) -- just a read path for systems (rendering, offline tracing)
+ * that operate on whatever's visible rather than needing to address a
+ * specific object by id. Returns NULL if index is out of range. */
+const MeshObject *fracture_body_get_object(int index);
+
 /* Reads the index'th live fragment's current position/orientation
  * (whatever fracture_body_sync_and_draw_all last synced from its real
  * PhiRigidBody, or the spawn-time transform if that hasn't run yet this

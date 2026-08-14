@@ -269,6 +269,27 @@ static mp_obj_t native_list_lights(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(native_list_lights_obj, native_list_lights);
 
+/* Phase 3's real offline path tracer (path_tracer.h), triggered from
+ * Python -- main.c owns the actual scene-collection/pt_render/pt_write_
+ * png logic (render_still_frame_to_disk), registered here as a plain
+ * function pointer rather than duplicated, same shape phi_mp_register_
+ * targets already established for cross-file state main.c owns. */
+static int (*s_render_still_frame)(char *out_path, size_t cap) = NULL;
+
+void phi_mp_register_render_callback(int (*cb)(char *out_path, size_t cap)) {
+    s_render_still_frame = cb;
+}
+
+static mp_obj_t native_render(void) {
+    if (!s_render_still_frame) mp_raise_ValueError(MP_ERROR_TEXT("phi.render: not available yet"));
+    char path[256];
+    if (!s_render_still_frame(path, sizeof(path))) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.render: render failed (empty scene, or the PNG write failed)"));
+    }
+    return mp_obj_new_str(path, strlen(path));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_render_obj, native_render);
+
 /* ---- @phi.panel registry (C side) --
  * Captured eagerly the moment a panel's decorator runs (see
  * native_panel_registered below, called from PHI_BOOTSTRAP's @panel
@@ -346,7 +367,8 @@ static const char *PHI_BOOTSTRAP =
     "phi.set_velocity = _native_set_velocity\n"
     "phi.add_light = _native_add_light\n"
     "phi.delete_light = _native_delete_light\n"
-    "phi.list_lights = _native_list_lights\n";
+    "phi.list_lights = _native_list_lights\n"
+    "phi.render = _native_render\n";
 
 int phi_mp_panel_count(void) { return s_panel_count; }
 
@@ -403,6 +425,7 @@ static void phi_mp_install_bindings(void) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_add_light")), MP_OBJ_FROM_PTR(&native_add_light_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_delete_light")), MP_OBJ_FROM_PTR(&native_delete_light_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_list_lights")), MP_OBJ_FROM_PTR(&native_list_lights_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_render")), MP_OBJ_FROM_PTR(&native_render_obj));
 
     nlr_buf_t nlr;
     if (nlr_push(&nlr) == 0) {

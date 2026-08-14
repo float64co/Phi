@@ -159,6 +159,11 @@ void fracture_body_clear(PhiPhysicsWorld *world) {
 
 int fracture_body_count(void) { return s_fragment_count; }
 
+const MeshObject *fracture_body_get_object(int index) {
+    if (index < 0 || index >= s_fragment_count || !s_fragments[index].in_use) return NULL;
+    return &s_fragments[index].obj;
+}
+
 int fracture_body_get(int index, Vec3f *out_position, Quat *out_orientation) {
     if (index < 0 || index >= s_fragment_count || !s_fragments[index].in_use) return 0;
     if (out_position) *out_position = s_fragments[index].obj.position;

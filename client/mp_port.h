@@ -66,6 +66,17 @@ char *phi_mp_exec(const char *code);
 void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, const int *edit_face,
                               PhiPhysicsWorld *phys_world);
 
+/* Registers the real render-a-still-frame callback phi.render() calls
+ * (see mp_port.c's native_render) -- main.c passes its own render_
+ * still_frame_to_disk (Phase 3's real path tracer, see path_tracer.h),
+ * same "give mp_port.c a function pointer to main.c's own logic rather
+ * than duplicating it" shape phi_mp_register_targets already uses for
+ * data pointers. cb must write a NUL-terminated path into out_path (cap
+ * bytes) and return 1 on success, 0 on failure (empty scene, write
+ * error) -- native_render raises ValueError on a 0 return rather than
+ * returning a sentinel Python could silently ignore. */
+void phi_mp_register_render_callback(int (*cb)(char *out_path, size_t cap));
+
 /* Number of currently-registered @phi.panel classes. Panels are captured
  * (name + a freshly instantiated, cached instance) the moment their
  * decorator runs, via a native callback the bootstrap's @phi.panel

@@ -73,6 +73,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/light.c         \
 	$(SRCDIR)/scene_target.c  \
 	$(SRCDIR)/fracture_body.c \
+	$(SRCDIR)/path_tracer.c   \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c            \
@@ -84,7 +85,7 @@ COMMON_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test
 
 all: wasm native
 
@@ -284,6 +285,22 @@ fracture_body_test: $(OUT_FRACTURE_BODY_TEST)
 $(OUT_FRACTURE_BODY_TEST): $(FRACTURE_BODY_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(BULLET_INCLUDES) $(FRACTURE_BODY_TEST_SRCS) -o $(OUT_FRACTURE_BODY_TEST) -lstdc++ -lm
 	@echo "fracture_body_test build complete -> $(OUT_FRACTURE_BODY_TEST)"
+
+# path_tracer.c (Phase 3's real offline path tracer -- BVH, GGX/Lambertian
+# BSDF, next-event estimation against Light objects, PNG output via the
+# vendored stb_image_write.h) self-test -- entirely no-GL on its own (see
+# path_tracer.h's own header comment), needs no stub functions the way
+# fracture_body_test above does.
+PATH_TRACER_TEST_SRCS := $(SRCDIR)/path_tracer_test_main.c $(SRCDIR)/path_tracer.c \
+                          $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c $(SRCDIR)/meshobject.c
+OUT_PATH_TRACER_TEST   := $(BUILDDIR)/path_tracer_test
+
+path_tracer_test: $(OUT_PATH_TRACER_TEST)
+	./$(OUT_PATH_TRACER_TEST)
+
+$(OUT_PATH_TRACER_TEST): $(PATH_TRACER_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(PATH_TRACER_TEST_SRCS) -o $(OUT_PATH_TRACER_TEST) -lm
+	@echo "path_tracer_test build complete -> $(OUT_PATH_TRACER_TEST)"
 
 # Same, but exercising the actual MeshObject integration (AABB-from-mesh,
 # the exact create/step/sync sequence main.c's CTX_ACTION_ENABLE_PHYSICS

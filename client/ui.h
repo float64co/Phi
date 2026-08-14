@@ -255,6 +255,15 @@ typedef enum {
     TOP_ACTION_NONE = 0,
     TOP_ACTION_FILE_SAVE,   /* same "begin the Asset Browser's create flow for the selected MeshObject" as the Scene context menu's existing Save as Asset row */
     TOP_ACTION_FILE_LOAD,   /* same as the Asset Browser panel's own per-row Load button, for whichever asset is currently selected there */
+    /* Phase 3's real offline path tracer (see path_tracer.h/phi.md) --
+     * renders one still frame of whatever's currently in the scene from
+     * the Scene panel's own current camera, using render_settings.h's
+     * samples count, and writes a real PNG to disk. Synchronous (this
+     * pass has no background-thread/progress-bar UI, a real, honestly
+     * flagged scope limit -- see main.c's handler), so the editor will
+     * visibly hang for the render's duration; fine for this pass's
+     * single-still-frame scope, not fine for anything longer. */
+    TOP_ACTION_FILE_RENDER,
 } TopMenuAction;
 TopMenuAction ui_poll_top_menu_action(void);
 
