@@ -290,6 +290,20 @@ static mp_obj_t native_render(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(native_render_obj, native_render);
 
+/* Phase 4's Armature -> Bullet ragdoll handoff (ragdoll.h), same function-
+ * pointer-registration shape as phi.render() just above. */
+static int (*s_activate_ragdoll)(void) = NULL;
+
+void phi_mp_register_ragdoll_callback(int (*cb)(void)) {
+    s_activate_ragdoll = cb;
+}
+
+static mp_obj_t native_activate_ragdoll(void) {
+    if (!s_activate_ragdoll) mp_raise_ValueError(MP_ERROR_TEXT("phi.activate_ragdoll: not available yet"));
+    return mp_obj_new_int(s_activate_ragdoll());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_activate_ragdoll_obj, native_activate_ragdoll);
+
 /* ---- @phi.panel registry (C side) --
  * Captured eagerly the moment a panel's decorator runs (see
  * native_panel_registered below, called from PHI_BOOTSTRAP's @panel
@@ -368,7 +382,8 @@ static const char *PHI_BOOTSTRAP =
     "phi.add_light = _native_add_light\n"
     "phi.delete_light = _native_delete_light\n"
     "phi.list_lights = _native_list_lights\n"
-    "phi.render = _native_render\n";
+    "phi.render = _native_render\n"
+    "phi.activate_ragdoll = _native_activate_ragdoll\n";
 
 int phi_mp_panel_count(void) { return s_panel_count; }
 
@@ -426,6 +441,7 @@ static void phi_mp_install_bindings(void) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_delete_light")), MP_OBJ_FROM_PTR(&native_delete_light_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_list_lights")), MP_OBJ_FROM_PTR(&native_list_lights_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_render")), MP_OBJ_FROM_PTR(&native_render_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_activate_ragdoll")), MP_OBJ_FROM_PTR(&native_activate_ragdoll_obj));
 
     nlr_buf_t nlr;
     if (nlr_push(&nlr) == 0) {

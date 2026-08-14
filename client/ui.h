@@ -10,6 +10,7 @@
 #include "gbuffer.h"
 #include "render_settings.h"
 #include "input.h"
+#include "skinned_mesh_object.h"
 
 /* Native UI System — Phase 1 (see phi.md's "Native UI System" section for
  * the design this implements: Blender's recursive area-split model, not
@@ -53,9 +54,15 @@ typedef enum {
     PANEL_CONSOLE,
     PANEL_CHAT,
     PANEL_NODE_EDITOR,   /* stub -- Phase 6 not started */
-    PANEL_CURVE_EDITOR,  /* stub -- Phase 4 not started */
+    PANEL_CURVE_EDITOR,  /* stub -- Phase 4's OTHER animation panel (bezier curve editing), still not started; see PANEL_TIMELINE below for the real one that IS */
     PANEL_ASSET_BROWSER, /* see asset_browser.h / phi.md's "Asset tracking and the Asset Browser panel" */
     PANEL_PYTHON,        /* @phi.panel-registered content, see mp_port.h / phi.md's "Python-extensible panels" */
+    /* Phase 4's real scrub/play/pause panel (see phi.md's "Animation
+     * Editor") -- operates on UIRenderContext::skinned_obj (main.c's one
+     * skinned-test-object slot, see skinned_mesh_object.h), NOT the
+     * bezier-curve-editing PANEL_CURVE_EDITOR above (a genuinely separate,
+     * still-unstarted piece of Phase 4's UI). */
+    PANEL_TIMELINE,
     PANEL_TYPE_COUNT
 } PanelType;
 
@@ -165,6 +172,18 @@ typedef struct {
     MeshObject *test_obj;        /* Phase 1's assets/cube.gltf test object, see main.c */
     int         test_obj_loaded;
     RenderSettings *render_settings;  /* main.c's g_render_settings (Phase 3, see render_settings.h) -- always non-NULL once main.c wires it up, shown as a pinned Properties-panel section regardless of selection. */
+    /* main.c's one skinned-test-object slot (Phase 4, see skinned_mesh_
+     * object.h) -- NULL until main.c has successfully loaded one (same
+     * "NULL means nothing to show yet" convention test_obj_loaded's own
+     * flag uses above, just via a pointer instead of a separate bool
+     * since this slot's existence and its loadedness are the same
+     * question). Read-only from ui.c's side -- the Timeline panel only
+     * ever mutates it indirectly, through ui_poll_timeline_scrub/_play_
+     * toggle below, which main.c drains and applies itself, same "UI
+     * raises intent, main.c executes" split every other panel action in
+     * this codebase already uses (context menu, top menu, Asset Browser
+     * flags, ...). */
+    SkinnedMeshObject *skinned_obj;
     int         edit_face;       /* main.c's g_edit_face -- last ray-picked hem face, -1 if none. Properties reads this for the per-face material readout. */
     EditorMode  editor_mode;     /* main.c's g_editor_mode -- see EditorMode's own comment. Read by the Scene panel's mode label and the right-click context menu's row set. */
     /* Modal G/S/R transform tool's HUD readout (see transform_op.h's
@@ -266,6 +285,24 @@ typedef enum {
     TOP_ACTION_FILE_RENDER,
 } TopMenuAction;
 TopMenuAction ui_poll_top_menu_action(void);
+
+/* Phase 4's Timeline panel (PANEL_TIMELINE) -- scrub bar + Play/Pause
+ * button, same one-shot "drain it once per frame" convention as
+ * ui_poll_top_menu_action/ui_poll_context_menu_action above (main.c owns
+ * skinned_obj->playback, ui.c only ever raises intent, never mutates it
+ * directly -- see UIRenderContext::skinned_obj's own comment).
+ *
+ * ui_poll_timeline_scrub: returns 1 and sets *out_fraction ([0,1], where
+ * the click landed along the scrub bar) if the scrub bar was clicked/
+ * dragged this frame, 0 otherwise (leaving *out_fraction untouched). */
+int ui_poll_timeline_scrub(float *out_fraction);
+
+/* Returns 1 once (drained, same one-shot convention) if the Play/Pause
+ * button was clicked this frame, 0 otherwise -- main.c flips its own
+ * playback.playing in response, this doesn't carry the new state itself
+ * (ui.c doesn't own that state to know which direction "toggle" even
+ * means without asking main.c first). */
+int ui_poll_timeline_play_toggle(void);
 
 /* object_id follows the existing scheme (renderer.h/gbuffer.c): wire-box=3,
  * MeshObjects=4000+id, Lights=5000+id (see main.c's selected_light()).

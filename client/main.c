@@ -17,6 +17,8 @@
 #include "scene_target.h"
 #include "fracture_body.h"
 #include "path_tracer.h"
+#include "skinned_mesh_object.h"
+#include "ragdoll.h"
 #include "font.h"
 #include "svg_icon.h"
 #include "asset_browser.h"
@@ -89,6 +91,20 @@ static EditorMode   g_editor_mode = EDITOR_MODE_OBJECT;
  * system (scene_target_register below) so the Properties panel and
  * phi.prop_get/set("render", ...) both read/write this exact struct. */
 static RenderSettings g_render_settings = { 128 };
+/* Phase 4's GPU-skinning + Timeline demonstration object (see skinned_
+ * mesh_object.h/renderer.h's renderer_draw_skinned_mesh) -- a SEPARATE,
+ * dedicated slot from g_test_mesh_object, same "own small bounded thing
+ * alongside the one general test-object slot" pattern light.c/fracture_
+ * body.c already established, not a rework of the halfedge/PBR-material
+ * MeshObject pipeline that entity type is structurally incompatible
+ * with (SkinnedVertex carries bone indices/weights, no per-face
+ * material). Loaded once at startup from the same real fixture animation_
+ * test/ragdoll_test/skinned_mesh_object_test already verify (assets/
+ * test/armature_test.gltf) -- not user-spawnable this pass (no context-
+ * menu "Add > Skinned Character" row), a real, honest scope limit. */
+static SkinnedMeshObject g_skinned_test_obj = {0};
+static int                g_skinned_test_loaded = 0;
+#define SKINNED_TEST_ID_BASE 6000u   /* alongside MeshObjects=4000+id, Lights=5000+id, see ui.h's own comment on this convention */
 static NetState     g_ns       = {0};
 static InputState   g_inp      = {0};
 static PyConsoleState g_cs     = {0};
@@ -292,6 +308,7 @@ static void scene_content_cb(void *userdata) {
     if (selected_is_test_mesh() && !g_fracture_active) gizmo_draw(g_renderer, g_test_mesh_object.position);
     renderer_draw_lights(g_renderer);
     fracture_body_sync_and_draw_all(g_renderer);
+    if (g_skinned_test_loaded) renderer_draw_skinned_mesh(g_renderer, &g_skinned_test_obj, SKINNED_TEST_ID_BASE + 1u);
 }
 
 /* Fixed output resolution for Phase 3's offline path tracer (see path_
@@ -357,6 +374,20 @@ static int render_still_frame_to_disk(char *out_path, size_t out_path_cap) {
            ok ? path : "FAILED to write PNG", ok ? "done" : "", params.samples, n_lights, tri_count);
     if (ok && out_path) snprintf(out_path, out_path_cap, "%s", path);
     return ok;
+}
+
+/* phi.activate_ragdoll()'s real callback (see mp_port.h's phi_mp_
+ * register_ragdoll_callback) -- activates a ragdoll from the skinned
+ * test object's CURRENT pose (whatever skinned_mesh_object_update last
+ * computed this frame, mid-animation or not), same "real capability,
+ * triggerable from Python" pattern render_still_frame_to_disk above
+ * already established for phi.render(). Returns 0 (no-op) if the
+ * skinned test object never loaded. */
+static int activate_ragdoll_on_test_object(void) {
+    if (!g_skinned_test_loaded) return 0;
+    int spawned = ragdoll_activate(g_phys_world, &g_skinned_test_obj, 1.0f, 0.2f);
+    printf("[main] phi.activate_ragdoll(): spawned %d capsule bodies\n", spawned);
+    return spawned;
 }
 
 /* fwd/right/up basis matched EXACTLY against compute_scene_ray/
@@ -614,6 +645,13 @@ static void main_loop(void *userdata) {
      * body -- most objects don't (phys_body is NULL by default, see
      * meshobject.h), so this is a no-op for the common case. */
     phi_physics_world_step(g_phys_world, dt);
+    /* Phase 4's skinned test object -- advances its own playback and
+     * recomputes world[]/skin[] every frame (pure CPU, see skinned_mesh_
+     * object_update's own doc), independent of the physics step above
+     * (this object has no physics body of its own outside of ragdoll
+     * activation, which spawns SEPARATE capsule bodies -- see ragdoll.h --
+     * rather than attaching one to this object directly). */
+    if (g_skinned_test_loaded) skinned_mesh_object_update(&g_skinned_test_obj, dt);
     if (g_test_mesh_loaded && g_test_mesh_object.phys_body) {
         float orientation[4];
         phi_physics_get_transform(g_test_mesh_object.phys_body, &g_test_mesh_object.position, orientation);
@@ -755,6 +793,7 @@ static void main_loop(void *userdata) {
     ui_ctx.test_obj_loaded = g_test_mesh_loaded;
     ui_ctx.edit_face = g_edit_face;
     ui_ctx.render_settings = &g_render_settings;
+    ui_ctx.skinned_obj = g_skinned_test_loaded ? &g_skinned_test_obj : NULL;
     ui_ctx.editor_mode = g_editor_mode;
     ui_ctx.xform_hud = xform_hud;
     ui_ctx.console = &g_cs;
@@ -1135,6 +1174,21 @@ static void main_loop(void *userdata) {
             break;
         default:
             break;
+    }
+
+    /* Timeline panel one-shot intent (Play/Pause, scrub) -- drained here,
+     * same "poll once per frame, mutate the real state main.c owns"
+     * pattern the top-menu/context-menu actions just above already use.
+     * ui.c never touches g_skinned_test_obj.playback directly (see
+     * UIRenderContext::skinned_obj's own comment). */
+    if (g_skinned_test_loaded && g_skinned_test_obj.playback.clip) {
+        if (ui_poll_timeline_play_toggle()) {
+            g_skinned_test_obj.playback.playing = !g_skinned_test_obj.playback.playing;
+        }
+        float frac;
+        if (ui_poll_timeline_scrub(&frac)) {
+            g_skinned_test_obj.playback.time = frac * g_skinned_test_obj.playback.clip->duration;
+        }
     }
 
     /* Exactly one text field gets this frame's keystrokes: whichever of
@@ -1565,6 +1619,7 @@ int main(void) {
      * "give mp_port.c a function pointer to main.c's own logic" shape as
      * the registration calls just above. */
     phi_mp_register_render_callback(render_still_frame_to_disk);
+    phi_mp_register_ragdoll_callback(activate_ragdoll_on_test_object);
 
     /* Light objects (Phase 3's "Both like Blender does it" light-source
      * model, see light.h) -- a fixed-capacity registry, cleared once here. */
@@ -1573,6 +1628,17 @@ int main(void) {
     /* Runtime fracture-activation registry (Phase 2's "shatter on
      * impact" completion, see fracture_body.h) -- cleared once here. */
     fracture_body_system_init();
+
+    /* Phase 4's Armature -> Bullet ragdoll registry (see ragdoll.h) --
+     * cleared once here, same convention as the two systems above. */
+    ragdoll_system_init();
+
+    /* Phase 4's GPU-skinning + Timeline demonstration object (see
+     * g_skinned_test_obj's own comment) -- loaded once at startup, same
+     * "auto-load a real fixture" precedent spawn_test_mesh_object()
+     * already established for g_test_mesh_object, just a separate slot. */
+    g_skinned_test_loaded = skinned_mesh_object_load("assets/test/armature_test.gltf", (Vec3f){170.0f, 55.0f, 90.0f}, &g_skinned_test_obj);
+    printf("[main] skinned test object: %s\n", g_skinned_test_loaded ? "loaded" : "FAILED to load");
 
     /* Asset Browser -- see phi.md's "Asset tracking and the Asset Browser
      * panel". net.c requests the initial asset list itself, right after

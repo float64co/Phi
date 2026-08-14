@@ -3341,7 +3341,7 @@ once those are built in Phase 6.
 
 ## Phase 4 — Animation Editor
 
-### Status: Armature + Clip/Curve/Playback data foundation landed, 2026-08-10; GPU skinning, timeline UI, and ragdoll handoff not started
+### Status: Armature + Clip/Curve/Playback data foundation landed, 2026-08-10; skin-weight loading landed, 2026-08-10; GPU skinning, Timeline panel, and Bullet ragdoll handoff all landed, 2026-08-14 (see dated note below) — real code across every one of those three pieces, verified where this sandbox's no-live-GL limitation allows and honestly flagged where it doesn't. The bezier-curve-editing "Curve Editor" panel (a genuinely separate piece from the Timeline panel that landed) remains unstarted.
 
 A real, verified first slice of this phase's "Architecture" section below
 (Clip/Curve/Playback) plus the Armature half of "Armatures and skinning" —
@@ -3500,14 +3500,122 @@ to the correct `root`/`tip` bone indices DESPITE the file's scrambled
 `v3`'s real 60/40 blend across `mid`/`tip` reads back exactly. ASan-clean.
 Native/wasm/win32 all rebuilt clean.
 
-Next real steps for this phase, in the order the "Architecture"/"Editor
-operations" sections above already imply: a real GPU skinning shader
-(bone matrices in a UBO, per this phase's own original sketch) — real
-code this environment cannot verify beyond "it compiles/links" (no live
-GL context is possible here, same `XOpenDisplay()` limitation as
-everything else this session touching rendering, flagged now rather
-than discovered as a surprise gap later) — then the timeline/curve-editor
-UI, then the Bullet ragdoll handoff.
+#### GPU skinning + Timeline panel + ragdoll handoff, 2026-08-14
+
+Closes this phase's three remaining real pieces, per explicit request
+("complete phases 2, 3, 4"). Built in dependency order: a real entity
+layer wrapping the already-verified data layer, then the GL draw path
+that consumes it, then the UI that drives it, then physics on top.
+
+- **`client/skinned_mesh_object.h`/`.c`** (new): `SkinnedMeshObject` --
+  wraps `SkinnedMesh`/`Armature`/`AnimClip[]`/`AnimPlayback` (all
+  deliberately GL-free, see their own headers) with a real transform
+  (position/orientation/scale) and the per-frame CPU pipeline every GPU
+  skinning implementation needs: `skinned_mesh_object_update` advances
+  playback, samples the current clip, and runs `armature_compute_world_
+  transforms`/`_compute_skinning_matrices` (both already existed and were
+  verified 2026-08-10) into `world[]`/`skin[]`. Pure CPU, no GL -- same
+  "entity data/logic in its own file, GL drawing lives in renderer.c"
+  split `meshobject.c`/`renderer.c` already established. A SEPARATE
+  bounded slot from `g_test_mesh_object` (main.c's `g_skinned_test_obj`),
+  not a rework of the halfedge/PBR-material `MeshObject` pipeline that
+  entity type is structurally incompatible with (no per-face material,
+  bone indices/weights instead) -- same "own small thing alongside the
+  one general object slot" pattern `light.c`/`fracture_body.c` already
+  used.
+- **Real GPU vertex skinning** (`renderer.c`/`.h`): a THIRD shader
+  program (`skinned_program`, alongside `program`/`pbr_program`) --
+  vertex shader blends up to 4 bone matrices per vertex
+  (`u_bones[SKINNED_SHADER_MAX_BONES]`, capped at 64 -- generous headroom
+  over this project's real 3-bone test rig, chosen to stay safely under
+  GLES3's guaranteed-minimum per-stage uniform budget rather than
+  matching Armature's own 256-bone CPU-side cap 1:1) using bone indices
+  read as raw unnormalized `GL_UNSIGNED_BYTE` vertex attributes (arrives
+  in-shader as a plain float holding the byte's own integer value,
+  exactly what `SkinnedVertex::bone_idx`'s `uint8_t`s need, no remapping
+  step). Writes the SAME G-buffer MRT outputs `PBR_FRAG_SRC` does
+  (albedo/normal/material/emissive/velocity/object-id), so a skinned
+  mesh is lit by the existing deferred pipeline, not a disconnected
+  forward-lit oddity -- one fixed per-object uniform material (no
+  per-face material data exists for `SkinnedVertex`, a real, honest
+  scope limit). Real `glDrawElements` indexed draw (this engine's other
+  entity types are all non-indexed/vertex-duplicated -- `SkinnedMesh`
+  keeps its glTF-native shared-vertex index buffer instead, a better fit
+  since shared vertices carry one set of bone weights each). Object-id
+  range `6000+id`, alongside MeshObjects' `4000+id` and Lights' `5000+id`.
+- **Timeline panel** (`ui.h`/`ui.c`, new `PANEL_TIMELINE`): a real clip
+  name/time readout, a Play/Pause button, and a click-to-scrub progress
+  bar -- `timeline_layout` is the one function driving both the draw pass
+  and the hit-test pass (`ui_on_mouse_button`'s new `PANEL_TIMELINE`
+  case), same discipline `build_ctx_menu_rows`/`properties_panel_walk`
+  already established in this file. ui.c never mutates playback state
+  directly -- clicks raise one-shot intent (`ui_poll_timeline_scrub`/
+  `_play_toggle`, same convention `ui_poll_top_menu_action` already
+  uses), main.c drains it each frame and mutates `g_skinned_test_obj.
+  playback` itself. Genuinely separate from the still-unstarted
+  bezier-curve-editing `PANEL_CURVE_EDITOR` stub -- reuses that panel's
+  own icon (no dedicated Timeline SVG exists yet, an honest simplification).
+- **Ragdoll handoff** (new `client/ragdoll.h`/`.c` + `phi_physics_add_
+  capsule_body`/`_add_point2point_constraint`, new in `phi_physics.h`/
+  `.cpp`): one real `btCapsuleShape` body per bone, spanning that bone's
+  own head->tail (its own world position to its first child's, or a
+  length-matched fallback along the bone's local +Y for a leaf bone with
+  no child -- the same real fallback Blender's own ragdoll generator
+  uses), connected to its parent's body with a real `btPoint2Point
+  Constraint` ball-socket joint at their shared world point (each side's
+  pivot correctly expressed in ITS OWN body's local space, not a shared
+  world-space frame -- `btPoint2PointConstraint`'s own native
+  parameterization). `PhiConstraint`'s internal field widened from
+  `btFixedConstraint*` to the `btTypedConstraint*` base class so the
+  same wrapper struct correctly serves both this and the existing
+  breaking-threshold fixed constraint, a real generalization verified to
+  change no existing behavior (every operation either call site performs
+  -- add/removeConstraint, `setBreakingImpulseThreshold`, `isEnabled` --
+  is already a base-class method). Same bounded-registry pattern as
+  `fracture_body.c`. Triggerable from Python (`phi.activate_ragdoll()`,
+  same function-pointer-callback registration shape `phi.render()`
+  already uses) -- not wired to any UI control this pass (the skinned
+  test object isn't selectable/pickable yet), a real, honestly flagged
+  scope limit. NOT wired into any visual rendering either -- no capsule-
+  mesh draw path exists, ragdoll bodies simulate but aren't drawn.
+
+Verified with two new standalone no-GL harnesses. `skinned_mesh_object_
+test`: rest-pose skin matrices are exactly identity (the same invariant
+verified 2026-08-10, now checked through the new wrapper); playback
+actually changes the pose mid-clip; a paused/scrubbed pose is checked
+for exact determinism (re-sampling the identical scrubbed time twice
+produces bit-identical matrices); a looping clip's time wraps into
+`[0, duration)` rather than running past the end. `ragdoll_test`: real
+Bullet physics, not mocked -- defensive NULL/empty-armature cases; real
+activation spawns one capsule per bone at the correct rest-pose
+positions (independently re-derived, not read back from the module
+under test); and the real load-bearing check -- after 1.5s of tumbling
+freefall under gravity, each joint's world position is reconstructed
+FROM BOTH SIDES of its constraint (parent body's local pivot and child
+body's local pivot, each rotated through that body's own CURRENT live
+orientation) and checked to still coincide, the actual invariant a
+point2point constraint guarantees (raw body-center-to-body-center
+distance is NOT the same thing, since capsules can rotate about a
+shared pivot without it ever coming apart) -- gap measured at 0.0000
+after the full freefall in this session's run. Native and wasm both
+rebuilt clean from a forced-clean state; every other standalone harness
+in the project re-run and re-verified passing, since `main.c`/`ui.c`/
+`mp_port.c`/`phi_physics.h`/`.cpp`/the `Makefile` all changed.
+
+**Honestly flagged, not silently glossed over:** live GUI/GPU
+verification (actually seeing a skinned character on screen, clicking
+Play in the Timeline panel and watching it animate, watching a ragdoll
+tumble) is not possible in this sandbox -- same `XOpenDisplay()`
+limitation noted everywhere else in this doc a real window is needed.
+The skinned-mesh shader code compiles and links clean (confirmed via a
+full native+wasm rebuild) but its actual on-screen visual correctness
+(is the skinning math *visually* right, does the Timeline scrub bar feel
+right to actually click) is unverified beyond the CPU-side matrix math
+`skinned_mesh_object_test` checks numerically. The skinned test object
+also isn't selectable/pickable, has no Properties-panel material
+editing, and isn't reachable via any "Add" context-menu row (auto-loaded
+once at startup instead) -- real, deliberate scope cuts for this pass,
+not oversights.
 
 ### What it is
 

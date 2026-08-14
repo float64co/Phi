@@ -74,6 +74,8 @@ COMMON_SRCS := \
 	$(SRCDIR)/scene_target.c  \
 	$(SRCDIR)/fracture_body.c \
 	$(SRCDIR)/path_tracer.c   \
+	$(SRCDIR)/skinned_mesh_object.c \
+	$(SRCDIR)/ragdoll.c       \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c            \
@@ -85,7 +87,7 @@ COMMON_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test
 
 all: wasm native
 
@@ -301,6 +303,38 @@ path_tracer_test: $(OUT_PATH_TRACER_TEST)
 $(OUT_PATH_TRACER_TEST): $(PATH_TRACER_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(PATH_TRACER_TEST_SRCS) -o $(OUT_PATH_TRACER_TEST) -lm
 	@echo "path_tracer_test build complete -> $(OUT_PATH_TRACER_TEST)"
+
+# skinned_mesh_object.c (Phase 4's pose->world->skin-matrix CPU pipeline,
+# see skinned_mesh_object.h) self-test -- no GL dependency at all, same
+# as path_tracer_test above.
+SKINNED_MESH_OBJECT_TEST_SRCS := $(SRCDIR)/skinned_mesh_object_test_main.c $(SRCDIR)/skinned_mesh_object.c \
+                                  $(SRCDIR)/skinned_mesh.c $(SRCDIR)/armature.c $(SRCDIR)/animation.c \
+                                  $(SRCDIR)/meshobject.c $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c
+OUT_SKINNED_MESH_OBJECT_TEST   := $(BUILDDIR)/skinned_mesh_object_test
+
+skinned_mesh_object_test: $(OUT_SKINNED_MESH_OBJECT_TEST)
+	./$(OUT_SKINNED_MESH_OBJECT_TEST)
+
+$(OUT_SKINNED_MESH_OBJECT_TEST): $(SKINNED_MESH_OBJECT_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(SKINNED_MESH_OBJECT_TEST_SRCS) -o $(OUT_SKINNED_MESH_OBJECT_TEST) -lm
+	@echo "skinned_mesh_object_test build complete -> $(OUT_SKINNED_MESH_OBJECT_TEST)"
+
+# ragdoll.c (Phase 4's Armature -> Bullet ragdoll handoff, see ragdoll.h)
+# self-test -- real Bullet physics (capsule bodies + point2point joints),
+# no GL dependency (neither ragdoll.c nor skinned_mesh_object.c ever
+# touches GL).
+RAGDOLL_TEST_SRCS := $(SRCDIR)/ragdoll_test_main.c $(SRCDIR)/ragdoll.c $(SRCDIR)/skinned_mesh_object.c \
+                      $(SRCDIR)/skinned_mesh.c $(SRCDIR)/armature.c $(SRCDIR)/animation.c \
+                      $(SRCDIR)/meshobject.c $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c \
+                      $(SRCDIR)/phi_physics.cpp $(BULLET_SRCS)
+OUT_RAGDOLL_TEST   := $(BUILDDIR)/ragdoll_test
+
+ragdoll_test: $(OUT_RAGDOLL_TEST)
+	./$(OUT_RAGDOLL_TEST)
+
+$(OUT_RAGDOLL_TEST): $(RAGDOLL_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(BULLET_INCLUDES) $(RAGDOLL_TEST_SRCS) -o $(OUT_RAGDOLL_TEST) -lstdc++ -lm
+	@echo "ragdoll_test build complete -> $(OUT_RAGDOLL_TEST)"
 
 # Same, but exercising the actual MeshObject integration (AABB-from-mesh,
 # the exact create/step/sync sequence main.c's CTX_ACTION_ENABLE_PHYSICS

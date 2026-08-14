@@ -77,6 +77,17 @@ void phi_mp_register_targets(MeshObject *test_obj, const int *test_obj_loaded, c
  * returning a sentinel Python could silently ignore. */
 void phi_mp_register_render_callback(int (*cb)(char *out_path, size_t cap));
 
+/* Registers the real ragdoll-activation callback phi.activate_ragdoll()
+ * calls (Phase 4, see ragdoll.h) -- main.c passes a small wrapper that
+ * calls ragdoll_activate against its own g_skinned_test_obj/g_phys_world,
+ * same function-pointer-handoff shape phi_mp_register_render_callback
+ * just above already uses. cb returns the number of ragdoll bodies
+ * actually spawned (0 = nothing to activate, e.g. the skinned test
+ * object never loaded) -- native_activate_ragdoll returns that count to
+ * Python directly rather than raising on 0, since "nothing loaded yet"
+ * is a real, unsurprising outcome, not a usage error. */
+void phi_mp_register_ragdoll_callback(int (*cb)(void));
+
 /* Number of currently-registered @phi.panel classes. Panels are captured
  * (name + a freshly instantiated, cached instance) the moment their
  * decorator runs, via a native callback the bootstrap's @phi.panel

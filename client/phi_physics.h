@@ -74,6 +74,17 @@ PhiRigidBody *phi_physics_add_convex_hull_body(PhiPhysicsWorld *world,
                                                 Vec3f position, float orientation[4],
                                                 float mass, float restitution);
 
+/* Capsule body (radius, half-height along the LOCAL Y axis before
+ * `orientation` is applied -- Bullet's own btCapsuleShape convention) --
+ * Phase 4's ragdoll.h uses this for one body per bone, the same default
+ * shape Blender's own ragdoll-generation tooling uses for a bone segment
+ * (verified via blender/'s own armature ragdoll add-on code, not
+ * guessed), a far more anatomically reasonable fit for a limb than a box
+ * or a hull built from the (nonexistent, for a bone) mesh geometry. */
+PhiRigidBody *phi_physics_add_capsule_body(PhiPhysicsWorld *world, float radius, float half_height,
+                                            Vec3f position, float orientation[4],
+                                            float mass, float restitution);
+
 /* Removes `body` from `world` and frees it (and its collision shape/
  * motion state) -- safe to call once per phi_physics_add_*_body call,
  * not safe to call twice on the same pointer (same ownership convention
@@ -123,6 +134,29 @@ Vec3f phi_physics_get_linear_velocity(PhiRigidBody *body);
 PhiConstraint *phi_physics_add_fixed_constraint(PhiPhysicsWorld *world,
                                                  PhiRigidBody *a, PhiRigidBody *b,
                                                  Vec3f pivot_world, float breaking_threshold);
+
+/* Ball-socket ("point2point") constraint -- wraps btPoint2PointConstraint,
+ * Bullet's real hinge-free joint that pins two bodies' own local pivot
+ * points together but leaves every rotational degree of freedom free.
+ * Phase 4's ragdoll.h uses this to connect adjacent bone bodies at their
+ * shared joint (unlike phi_physics_add_fixed_constraint's rigid glue,
+ * which would leave a ragdoll stiff as a board) -- the same real
+ * primitive Blender's own default ragdoll-constraint generator uses for
+ * most joints (ball-and-socket being the general case a hinge/cone-twist
+ * constraint is a further-restricted special case of; this pass uses the
+ * general unrestricted joint, not per-joint angular limits -- a real,
+ * honest scope choice, not every ragdoll joint should swing completely
+ * freely in reality, but modeling per-joint limits is separately-scoped
+ * future work). pivot_a/pivot_b are each body's OWN local-space pivot
+ * point (not a shared world-space point the way the fixed constraint
+ * above takes it -- btPoint2PointConstraint's own native parameterization,
+ * simpler here since ragdoll.h always knows each bone's own local joint
+ * position directly). No breaking threshold -- a ragdoll joint should
+ * stay together under any recoverable impact by design, unlike fracture
+ * fragments. */
+PhiConstraint *phi_physics_add_point2point_constraint(PhiPhysicsWorld *world,
+                                                        PhiRigidBody *a, Vec3f pivot_a,
+                                                        PhiRigidBody *b, Vec3f pivot_b);
 
 /* Removes and frees the constraint -- same ownership convention as
  * phi_physics_remove_body (safe once, not safe twice). */

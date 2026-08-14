@@ -5,6 +5,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#include <stddef.h>   /* offsetof -- renderer_draw_skinned_mesh's SkinnedVertex attrib pointers */
 
 #ifdef __EMSCRIPTEN__
 #include <GLES3/gl3.h>   /* not GLES2/gl2.h — need glUniform1ui, MRT outputs (GLES2/WebGL1 had neither) */
@@ -298,6 +299,131 @@ static const char *PBR_FRAG_SRC =
     "}\n";
 #endif
 
+/* Phase 4's GPU vertex-skinning shader (see renderer_draw_skinned_mesh,
+ * skinned_mesh_object.h) -- %d is SKINNED_SHADER_MAX_BONES, substituted
+ * at link time (link_skinned_program) rather than hardcoded twice, so
+ * the array-size literal in GLSL can never drift out of sync with the
+ * C-side upload code's own bound. a_bone_idx arrives as raw unnormalized
+ * GL_UNSIGNED_BYTE values (see renderer_draw_skinned_mesh's
+ * glVertexAttribPointer call) -- read here as plain floats (0..255) and
+ * cast to int for the u_bones[] index, exactly SkinnedVertex::bone_idx's
+ * own uint8_t values, no remapping needed. Normal transform uses only
+ * the skin matrix's rotational 3x3 part (mat3(skin)) -- the standard
+ * real-time-skinning simplification (ignores the inverse-transpose
+ * correction a non-uniformly-scaled skin matrix would strictly need),
+ * which every mainstream real-time engine's basic GPU skinning path
+ * also uses, not a shortcut invented here. */
+#ifdef __EMSCRIPTEN__
+static const char *SKINNED_VERT_SRC_FMT =
+    "#version 300 es\n"
+    "in vec3 a_pos;\n"
+    "in vec3 a_normal;\n"
+    "in vec4 a_bone_idx;\n"
+    "in vec4 a_bone_wgt;\n"
+    "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_prev_mvp;\n"
+    "uniform mat4 u_bones[%d];\n"
+    "out vec3 v_normal;\n"
+    "out vec3 v_clip_curr;\n"
+    "out vec3 v_clip_prev;\n"
+    "void main() {\n"
+    "  mat4 skin = a_bone_wgt.x * u_bones[int(a_bone_idx.x)]\n"
+    "            + a_bone_wgt.y * u_bones[int(a_bone_idx.y)]\n"
+    "            + a_bone_wgt.z * u_bones[int(a_bone_idx.z)]\n"
+    "            + a_bone_wgt.w * u_bones[int(a_bone_idx.w)];\n"
+    "  vec4 skinned_pos = skin * vec4(a_pos, 1.0);\n"
+    "  vec4 clip = u_mvp * skinned_pos;\n"
+    "  gl_Position = clip;\n"
+    "  v_clip_curr = vec3(clip.xy, clip.w);\n"
+    "  vec4 clip_prev = u_prev_mvp * skinned_pos;\n"
+    "  v_clip_prev = vec3(clip_prev.xy, clip_prev.w);\n"
+    "  v_normal = mat3(skin) * a_normal;\n"
+    "}\n";
+
+static const char *SKINNED_FRAG_SRC =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "in vec3 v_normal;\n"
+    "in vec3 v_clip_curr;\n"
+    "in vec3 v_clip_prev;\n"
+    "uniform vec3  u_base_color;\n"
+    "uniform float u_metallic;\n"
+    "uniform float u_roughness;\n"
+    "uniform vec3  u_emission;\n"
+    "uniform uint  u_object_id;\n"
+    "layout(location=0) out vec4 out_albedo;\n"
+    "layout(location=1) out vec4 out_normal;\n"
+    "layout(location=2) out vec4 out_material;\n"
+    "layout(location=3) out vec4 out_emissive;\n"
+    "layout(location=4) out vec4 out_velocity;\n"
+    "layout(location=5) out uint out_object_id;\n"
+    "void main() {\n"
+    "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
+    "  out_albedo    = vec4(u_base_color, 1.0);\n"
+    "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
+    "  out_material  = vec4(u_metallic, u_roughness, 0.0, 0.0);\n"
+    "  out_emissive  = vec4(u_emission, 0.0);\n"
+    "  vec2 ndc_curr = v_clip_curr.xy / v_clip_curr.z;\n"
+    "  vec2 ndc_prev = v_clip_prev.xy / v_clip_prev.z;\n"
+    "  out_velocity  = vec4((ndc_curr - ndc_prev) * 0.5, 0.0, 0.0);\n"
+    "  out_object_id = u_object_id;\n"
+    "}\n";
+#else
+static const char *SKINNED_VERT_SRC_FMT =
+    "#version 330 core\n"
+    "in vec3 a_pos;\n"
+    "in vec3 a_normal;\n"
+    "in vec4 a_bone_idx;\n"
+    "in vec4 a_bone_wgt;\n"
+    "uniform mat4 u_mvp;\n"
+    "uniform mat4 u_prev_mvp;\n"
+    "uniform mat4 u_bones[%d];\n"
+    "out vec3 v_normal;\n"
+    "out vec3 v_clip_curr;\n"
+    "out vec3 v_clip_prev;\n"
+    "void main() {\n"
+    "  mat4 skin = a_bone_wgt.x * u_bones[int(a_bone_idx.x)]\n"
+    "            + a_bone_wgt.y * u_bones[int(a_bone_idx.y)]\n"
+    "            + a_bone_wgt.z * u_bones[int(a_bone_idx.z)]\n"
+    "            + a_bone_wgt.w * u_bones[int(a_bone_idx.w)];\n"
+    "  vec4 skinned_pos = skin * vec4(a_pos, 1.0);\n"
+    "  vec4 clip = u_mvp * skinned_pos;\n"
+    "  gl_Position = clip;\n"
+    "  v_clip_curr = vec3(clip.xy, clip.w);\n"
+    "  vec4 clip_prev = u_prev_mvp * skinned_pos;\n"
+    "  v_clip_prev = vec3(clip_prev.xy, clip_prev.w);\n"
+    "  v_normal = mat3(skin) * a_normal;\n"
+    "}\n";
+
+static const char *SKINNED_FRAG_SRC =
+    "#version 330 core\n"
+    "in vec3 v_normal;\n"
+    "in vec3 v_clip_curr;\n"
+    "in vec3 v_clip_prev;\n"
+    "uniform vec3  u_base_color;\n"
+    "uniform float u_metallic;\n"
+    "uniform float u_roughness;\n"
+    "uniform vec3  u_emission;\n"
+    "uniform uint  u_object_id;\n"
+    "layout(location=0) out vec4 out_albedo;\n"
+    "layout(location=1) out vec4 out_normal;\n"
+    "layout(location=2) out vec4 out_material;\n"
+    "layout(location=3) out vec4 out_emissive;\n"
+    "layout(location=4) out vec4 out_velocity;\n"
+    "layout(location=5) out uint out_object_id;\n"
+    "void main() {\n"
+    "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
+    "  out_albedo    = vec4(u_base_color, 1.0);\n"
+    "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
+    "  out_material  = vec4(u_metallic, u_roughness, 0.0, 0.0);\n"
+    "  out_emissive  = vec4(u_emission, 0.0);\n"
+    "  vec2 ndc_curr = v_clip_curr.xy / v_clip_curr.z;\n"
+    "  vec2 ndc_prev = v_clip_prev.xy / v_clip_prev.z;\n"
+    "  out_velocity  = vec4((ndc_curr - ndc_prev) * 0.5, 0.0, 0.0);\n"
+    "  out_object_id = u_object_id;\n"
+    "}\n";
+#endif
+
 /* Mirrors whatever was last passed to glClearColor by renderer_create /
  * renderer_set_sky_color — glClearColor itself is opaque GL state with no
  * getter, but gbuffer.c's lighting pass needs the actual current sky color
@@ -470,6 +596,34 @@ static unsigned int link_pbr_program(const char *vsrc, const char *fsrc) {
     return p;
 }
 
+/* Same shape again, for Phase 4's skinned-mesh program -- formats
+ * SKINNED_VERT_SRC_FMT's "%d" bone-count placeholder with SKINNED_
+ * SHADER_MAX_BONES first (see that macro's own comment on why this is
+ * templated rather than hardcoded in the GLSL source twice). */
+static unsigned int link_skinned_program(const char *vsrc_fmt, const char *fsrc) {
+    char vsrc[4096];
+    snprintf(vsrc, sizeof(vsrc), vsrc_fmt, SKINNED_SHADER_MAX_BONES);
+    unsigned int vs = compile_shader(GL_VERTEX_SHADER,   vsrc);
+    unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fsrc);
+    unsigned int p  = glCreateProgram();
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glBindAttribLocation(p, 0, "a_pos");
+    glBindAttribLocation(p, 1, "a_normal");
+    glBindAttribLocation(p, 2, "a_bone_idx");
+    glBindAttribLocation(p, 3, "a_bone_wgt");
+    glLinkProgram(p);
+    int ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512]; glGetProgramInfoLog(p, 512, NULL, log);
+        printf("[renderer] Skinned program link error: %s\n", log);
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    gl_check("link_skinned_program");
+    return p;
+}
+
 static void build_vp(const Renderer *r, float *vp);  /* defined below, needed by renderer_create/renderer_end_frame */
 
 /* ================================================================
@@ -527,6 +681,18 @@ Renderer *renderer_create(int width, int height) {
     printf("[renderer] pbr_prog=%u pbr_mvp=%d pbr_prev_mvp=%d\n",
            r->pbr_program, r->pbr_u_mvp, r->pbr_u_prev_mvp);
 
+    r->skinned_program      = link_skinned_program(SKINNED_VERT_SRC_FMT, SKINNED_FRAG_SRC);
+    r->skinned_u_mvp        = glGetUniformLocation(r->skinned_program, "u_mvp");
+    r->skinned_u_prev_mvp   = glGetUniformLocation(r->skinned_program, "u_prev_mvp");
+    r->skinned_u_object_id  = glGetUniformLocation(r->skinned_program, "u_object_id");
+    r->skinned_u_base_color = glGetUniformLocation(r->skinned_program, "u_base_color");
+    r->skinned_u_metallic   = glGetUniformLocation(r->skinned_program, "u_metallic");
+    r->skinned_u_roughness  = glGetUniformLocation(r->skinned_program, "u_roughness");
+    r->skinned_u_emission   = glGetUniformLocation(r->skinned_program, "u_emission");
+    r->skinned_u_bones      = glGetUniformLocation(r->skinned_program, "u_bones");
+    printf("[renderer] skinned_prog=%u skinned_mvp=%d skinned_bones=%d\n",
+           r->skinned_program, r->skinned_u_mvp, r->skinned_u_bones);
+
     renderer_resize(r, width, height);
     /* Seed prev_vp with this frame's own vp — gives exactly zero velocity
      * on the very first frame (nothing to compare against yet) rather than
@@ -541,6 +707,8 @@ void renderer_end_frame(Renderer *r) {
 
 void renderer_destroy(Renderer *r) {
     glDeleteProgram(r->program);
+    glDeleteProgram(r->pbr_program);
+    glDeleteProgram(r->skinned_program);
     free(r);
 }
 
@@ -684,6 +852,79 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     glDisableVertexAttribArray(3);
     glDisableVertexAttribArray(4);
     glDisableVertexAttribArray(5);
+}
+
+/* Phase 4's real GPU vertex skinning (see skinned_mesh_object.h,
+ * renderer.h's own comment on this function). Real EBO-indexed draw
+ * (glDrawElements) -- unlike MeshObject's non-indexed/vertex-duplicated
+ * convention, SkinnedMesh keeps its glTF-native shared-vertex index
+ * buffer (skinned_mesh.h), a better fit for skinning (shared vertices
+ * carry a single set of bone weights each, not duplicated per triangle). */
+void renderer_draw_skinned_mesh(Renderer *r, SkinnedMeshObject *obj, unsigned int object_id) {
+    if (!obj->mesh.index_count) return;
+
+    if (!obj->gpu_uploaded) {
+        glGenBuffers(1, &obj->vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, obj->vbo);
+        glBufferData(GL_ARRAY_BUFFER, (long)obj->mesh.vert_count * (long)sizeof(SkinnedVertex),
+                     obj->mesh.verts, GL_STATIC_DRAW);
+        glGenBuffers(1, &obj->ebo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, obj->ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (long)obj->mesh.index_count * (long)sizeof(uint16_t),
+                     obj->mesh.indices, GL_STATIC_DRAW);
+        obj->gpu_uploaded = 1;
+        gl_check("renderer_draw_skinned_mesh upload");
+    }
+
+    float vp[16]; build_vp(r, vp);
+    float rot[16], t[16], s[16], rs[16], model[16], mvp[16], prev_mvp[16];
+    quat_to_mat4(&obj->orientation, rot);
+    mat4_translate(t, obj->position.x, obj->position.y, obj->position.z);
+    mat4_scale(s, obj->scale.x, obj->scale.y, obj->scale.z);
+    mat4_mul(rs, rot, s);
+    mat4_mul(model, t, rs);
+    mat4_mul(mvp, vp, model);
+    mat4_mul(prev_mvp, r->prev_vp, model);   /* camera-motion-only, same scope note as renderer_draw_mesh_object */
+
+    r->cur_object_id = object_id;
+
+    glUseProgram(r->skinned_program);
+    bind_renderer_vao(r);
+    glUniformMatrix4fv(r->skinned_u_mvp, 1, GL_FALSE, mvp);
+    glUniformMatrix4fv(r->skinned_u_prev_mvp, 1, GL_FALSE, prev_mvp);
+    glUniform1ui(r->skinned_u_object_id, r->cur_object_id);
+    glUniform3f(r->skinned_u_base_color, obj->base_color.x, obj->base_color.y, obj->base_color.z);
+    glUniform1f(r->skinned_u_metallic, obj->metallic);
+    glUniform1f(r->skinned_u_roughness, obj->roughness);
+    glUniform3f(r->skinned_u_emission, obj->emission.x, obj->emission.y, obj->emission.z);
+    int n_bones = obj->arm.bone_count < SKINNED_SHADER_MAX_BONES ? obj->arm.bone_count : SKINNED_SHADER_MAX_BONES;
+    glUniformMatrix4fv(r->skinned_u_bones, n_bones, GL_FALSE, &obj->skin[0][0]);
+
+    glBindBuffer(GL_ARRAY_BUFFER, obj->vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, obj->ebo);
+    int stride = (int)sizeof(SkinnedVertex);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, pos));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, normal));
+    glEnableVertexAttribArray(2);
+    /* Raw, UNNORMALIZED unsigned bytes -- arrives in the shader as plain
+     * floats holding the byte's own integer value (5 -> 5.0), exactly
+     * what SKINNED_VERT_SRC_FMT's int(a_bone_idx.x) expects; GL_TRUE
+     * here would instead rescale to [0,1], which is NOT what a bone
+     * index needs. */
+    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, bone_idx));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, bone_wgt));
+
+    glDrawElements(GL_TRIANGLES, obj->mesh.index_count, GL_UNSIGNED_SHORT, (void*)0);
+    gl_check("draw_skinned_mesh");
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 /* ---- Vector helpers (file-static, matching gizmo.c's/light.c's own

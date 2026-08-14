@@ -203,6 +203,14 @@ typedef struct {
     TopMenu top_menu_open;
     TopMenuAction top_menu_pending_action;  /* see ui_poll_top_menu_action() */
 
+    /* Timeline panel one-shot flags (see ui_poll_timeline_scrub/_play_
+     * toggle) -- same shape as ctx_menu_pending_action/top_menu_pending_
+     * action above, just two separate flags instead of one enum since a
+     * scrub carries a float payload the others don't need. */
+    int   timeline_scrub_requested;
+    float timeline_scrub_fraction;
+    int   timeline_play_toggle_requested;
+
     /* Modal dialogs (Keyboard Shortcuts, About -- see ui_open_modal) --
      * centered, dimmed-overlay, drawn last so they sit above literally
      * everything else including the top menu bar itself. Only one can be
@@ -214,7 +222,7 @@ typedef struct {
 static UIState g_ui;
 
 static const char *PANEL_NAMES[PANEL_TYPE_COUNT] = {
-    "Scene", "Outliner", "Properties", "Python Console", "Chat", "Node Editor (not implemented yet)", "Curve Editor (not implemented yet)", "Asset Browser", "Python Panel"
+    "Scene", "Outliner", "Properties", "Python Console", "Chat", "Node Editor (not implemented yet)", "Curve Editor (not implemented yet)", "Asset Browser", "Python Panel", "Timeline"
 };
 
 /* ---- Draw primitives ---- */
@@ -436,6 +444,7 @@ static SvgIcon *icon_for_panel(PanelType t) {
         case PANEL_CHAT: return &g_ui.icon_chat;
         case PANEL_NODE_EDITOR: return &g_ui.icon_node_editor;
         case PANEL_CURVE_EDITOR: return &g_ui.icon_curve_editor;
+        case PANEL_TIMELINE: return &g_ui.icon_curve_editor;   /* no dedicated Timeline icon exists yet -- reuses the animation-adjacent Curve Editor icon rather than authoring a new SVG asset for this pass, a real, honestly-noted simplification, not a bug */
         case PANEL_ASSET_BROWSER: return &g_ui.icon_asset_browser;
         case PANEL_PYTHON: return &g_ui.icon_python_panel;
         default: return NULL;
@@ -1614,6 +1623,65 @@ static void draw_panel_chat(Area *a, const UIRenderContext *ctx) {
     }
 }
 
+/* Shared rect layout for the Timeline panel's Play/Pause button + scrub
+ * bar -- ONE function drives both the draw pass (draw_panel_timeline)
+ * and the hit-test pass (ui_on_mouse_button's own PANEL_TIMELINE case),
+ * same "one source of truth" discipline build_ctx_menu_rows/properties_
+ * panel_walk already established in this file (see their own comments
+ * for the real bug that discipline was adopted to prevent). */
+static void timeline_layout(const Area *a, float *btn_x, float *btn_y, float *btn_w, float *btn_h,
+                             float *scrub_x, float *scrub_y, float *scrub_w, float *scrub_h) {
+    float top = a->y + UI_PANEL_PAD + 30.0f;
+    *btn_w = 70.0f; *btn_h = 26.0f;
+    *btn_x = a->x + UI_PANEL_PAD;
+    *btn_y = top;
+    *scrub_x = a->x + UI_PANEL_PAD + *btn_w + 12.0f;
+    *scrub_y = top + *btn_h * 0.5f - 4.0f;
+    *scrub_w = a->w - UI_PANEL_PAD * 2.0f - *btn_w - 12.0f;
+    if (*scrub_w < 10.0f) *scrub_w = 10.0f;
+    *scrub_h = 8.0f;
+}
+
+/* Phase 4's Timeline panel (see ui.h's PANEL_TIMELINE / phi.md's
+ * "Animation Editor") -- operates on ctx->skinned_obj (main.c's one
+ * skinned-test-object slot), draws its currently-playing clip's name,
+ * a Play/Pause button, and a click-to-scrub progress bar. Click handling
+ * lives in ui_on_mouse_button (this function only draws), sharing
+ * timeline_layout's rects so the clickable region always matches what's
+ * actually drawn. */
+static void draw_panel_timeline(Area *a, const UIRenderContext *ctx) {
+    ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, "Timeline", g_ui.font_bold, 15.0f,
+                 UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+
+    SkinnedMeshObject *obj = ctx->skinned_obj;
+    if (!obj || obj->clip_count == 0 || !obj->playback.clip) {
+        ui_text_draw(a->x + UI_PANEL_PAD, a->y + UI_PANEL_PAD + 24.0f, "No animated object loaded.",
+                     g_ui.font_body, 13.0f, UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        return;
+    }
+
+    float bx, by, bw, bh, sx, sy, sw, sh;
+    timeline_layout(a, &bx, &by, &bw, &bh, &sx, &sy, &sw, &sh);
+
+    ui_rect(bx, by, bw, bh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
+    const char *btn_label = obj->playback.playing ? "Pause" : "Play";
+    float label_w = font_text_width(g_ui.font_body, btn_label, 13.0f);
+    ui_text_draw(bx + (bw - label_w) * 0.5f, by + bh * 0.5f + 4.0f, btn_label, g_ui.font_body, 13.0f,
+                 UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+
+    ui_rect(sx, sy, sw, sh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
+    float dur = obj->playback.clip->duration;
+    float frac = dur > 0.0f ? obj->playback.time / dur : 0.0f;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    ui_rect(sx, sy, sw * frac, sh, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
+
+    char readout[128];
+    snprintf(readout, sizeof(readout), "%s -- %.2fs / %.2fs", obj->playback.clip->name, obj->playback.time, dur);
+    ui_text_draw(a->x + UI_PANEL_PAD, sy + sh + 18.0f, readout, g_ui.font_body, 13.0f,
+                 UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+}
+
 static void draw_panel_stub(Area *a, const char *name) {
     ui_text_draw(a->x + UI_PANEL_PAD + UI_TYPE_ICON_SIZE + 6.0f, a->y + 4.0f, name, g_ui.font_bold, 15.0f,
                  UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
@@ -1702,6 +1770,7 @@ static void draw_leaf(Area *a, const UIRenderContext *ctx) {
         case PANEL_PYTHON:     draw_panel_python(a, ctx); break;
         case PANEL_NODE_EDITOR:  ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Node Editor"); break;
         case PANEL_CURVE_EDITOR: ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_stub(a, "Curve Editor"); break;
+        case PANEL_TIMELINE: ui_rect(a->x, a->y, a->w, a->h, UI_ZEN_PANEL_BG_R, UI_ZEN_PANEL_BG_G, UI_ZEN_PANEL_BG_B, UI_ZEN_PANEL_BG_A); draw_panel_timeline(a, ctx); break;
         default: break;
     }
     /* draw_panel_scene's G-buffer FXAA blit leaves the GL viewport set to
@@ -2070,6 +2139,36 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
              * away-dismisses convention as every other text field here. */
             g_ui.prop_edit_owner = NULL;
             g_ui.prop_edit_prop = NULL;
+        }
+        return 1;
+    }
+    /* Timeline panel: Play/Pause button toggles playback, the scrub bar
+     * sets an absolute time fraction -- both raised as one-shot intent
+     * (g_ui.timeline_*), drained by main.c via ui_poll_timeline_scrub/
+     * _play_toggle, same "ui.c never mutates ctx->skinned_obj directly"
+     * split UIRenderContext::skinned_obj's own comment documents. Uses
+     * the exact same timeline_layout rects draw_panel_timeline draws,
+     * so the clickable region can never drift from what's shown. */
+    if (a->panel_type == PANEL_TIMELINE && button == 0 && pressed && ctx->skinned_obj &&
+        ctx->skinned_obj->clip_count > 0 && ctx->skinned_obj->playback.clip &&
+        point_in_rect((float)x, (float)y, a->x, a->y, a->w, a->h)) {
+        float bx, by, bw, bh, sx, sy, sw, sh;
+        timeline_layout(a, &bx, &by, &bw, &bh, &sx, &sy, &sw, &sh);
+        if (point_in_rect((float)x, (float)y, bx, by, bw, bh)) {
+            g_ui.timeline_play_toggle_requested = 1;
+            return 1;
+        }
+        /* A generous vertical hit margin around the thin scrub track
+         * (sh is only 8px -- a pixel-exact hitbox would be needlessly
+         * fussy to actually click) rather than growing the drawn bar
+         * itself just to make it easier to hit. */
+        if ((float)x >= sx && (float)x < sx + sw && (float)y >= by - 6.0f && (float)y < by + bh + 6.0f) {
+            float frac = ((float)x - sx) / sw;
+            if (frac < 0.0f) frac = 0.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            g_ui.timeline_scrub_requested = 1;
+            g_ui.timeline_scrub_fraction = frac;
+            return 1;
         }
         return 1;
     }
@@ -2483,6 +2582,19 @@ TopMenuAction ui_poll_top_menu_action(void) {
     TopMenuAction a = g_ui.top_menu_pending_action;
     g_ui.top_menu_pending_action = TOP_ACTION_NONE;
     return a;
+}
+
+int ui_poll_timeline_scrub(float *out_fraction) {
+    if (!g_ui.timeline_scrub_requested) return 0;
+    g_ui.timeline_scrub_requested = 0;
+    if (out_fraction) *out_fraction = g_ui.timeline_scrub_fraction;
+    return 1;
+}
+
+int ui_poll_timeline_play_toggle(void) {
+    if (!g_ui.timeline_play_toggle_requested) return 0;
+    g_ui.timeline_play_toggle_requested = 0;
+    return 1;
 }
 
 void ui_set_selected_object(unsigned int object_id) { g_ui.selected_object_id = object_id; }

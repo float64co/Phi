@@ -3,6 +3,20 @@
 #include "octree_render.h"
 #include "meshobject.h"
 #include "light.h"
+#include "skinned_mesh_object.h"
+
+/* GPU vertex-skinning uniform bone-matrix array cap (Phase 4, see
+ * renderer_draw_skinned_mesh) -- deliberately smaller than Armature's own
+ * CPU-side ARMATURE_MAX_BONES=256 cap: a real GLSL uniform array of 256
+ * mat4 (1024 vec4-equivalents) risks exceeding GLES3's guaranteed-minimum
+ * per-stage uniform budget on some real hardware, where 64 (256
+ * vec4-equivalents) comfortably does not. This project's actual test/
+ * character content (assets/test/armature_test.gltf) uses 3 bones --
+ * 64 is generous headroom over that, not a tight-fitting number. An
+ * armature with MORE than 64 bones simply has its excess bones' skinning
+ * silently ignored (renderer_draw_skinned_mesh clamps the upload count),
+ * a real, honestly flagged scope limit, not a crash. */
+#define SKINNED_SHADER_MAX_BONES 64
 
 typedef struct {
     /* WebGL program */
@@ -49,6 +63,26 @@ typedef struct {
     int pbr_u_mvp;
     int pbr_u_prev_mvp;
     int pbr_u_object_id;
+
+    /* Phase 4's GPU skinning shader/program (see renderer_draw_skinned_
+     * mesh, skinned_mesh_object.h) -- a THIRD program alongside program/
+     * pbr_program, since this entity type's vertex format (pos+normal+
+     * bone_idx+bone_wgt, no per-face material) and vertex-shader job
+     * (apply a per-bone skin matrix before the MVP transform) are both
+     * genuinely different from either existing one, same "separate
+     * program for a genuinely different vertex format/job" reasoning
+     * meshobject.h's own comment already gives for pbr_program existing
+     * alongside program. Attribute locations (0=a_pos, 1=a_normal,
+     * 2=a_bone_idx, 3=a_bone_wgt) bound in link_skinned_program. */
+    unsigned int skinned_program;
+    int skinned_u_mvp;
+    int skinned_u_prev_mvp;
+    int skinned_u_object_id;
+    int skinned_u_base_color;
+    int skinned_u_metallic;
+    int skinned_u_roughness;
+    int skinned_u_emission;
+    int skinned_u_bones;   /* uniform mat4 u_bones[SKINNED_SHADER_MAX_BONES] -- glGetUniformLocation of element [0], see renderer_draw_skinned_mesh's glUniformMatrix4fv count argument */
 
     /* Camera */
     float cam_pos[3];
@@ -108,6 +142,20 @@ void renderer_set_object_id(Renderer *r, unsigned int id);
 /* Phase 1 foundation: draw a single MeshObject at its own position/
  * orientation transform (see meshobject.h). */
 void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj);
+
+/* Phase 4's real GPU vertex skinning draw path (see skinned_mesh_
+ * object.h) -- uploads obj->mesh to a real VBO+EBO on first call
+ * (obj->gpu_uploaded, mutated here -- same "entity struct owns a GPU
+ * handle + dirty/uploaded flag, renderer.c is what actually calls GL"
+ * split RenderMesh::vbo/dirty already established for MeshObject), then
+ * draws obj->mesh.index_count indices with obj->skin[] uploaded as the
+ * u_bones[] uniform array (clamped to SKINNED_SHADER_MAX_BONES) -- the
+ * GPU applies the per-vertex weighted blend of those already-computed
+ * matrices in the vertex shader, real vertex skinning, not a CPU-side
+ * mesh deformation. Object-id range 6000+id, alongside MeshObjects'
+ * 4000+id and Lights' 5000+id (see ui.h's own comment on this
+ * convention). No-op if obj->mesh.index_count is 0. */
+void renderer_draw_skinned_mesh(Renderer *r, SkinnedMeshObject *obj, unsigned int object_id);
 
 /* Draws every live Light object (light.h) as a small solid-box icon
  * (renderer_draw_solid_box -- TAA-safe solid geometry, same convention

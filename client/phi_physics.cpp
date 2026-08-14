@@ -17,7 +17,15 @@ struct PhiRigidBody {
 };
 
 struct PhiConstraint {
-    btFixedConstraint *constraint;   /* owned */
+    /* btTypedConstraint, not the specific btFixedConstraint -- widened
+     * (was btFixedConstraint*) so this same wrapper struct also covers
+     * phi_physics_add_point2point_constraint's btPoint2PointConstraint
+     * below, since every operation this file actually performs on it
+     * (addConstraint/removeConstraint/setBreakingImpulseThreshold/
+     * isEnabled) is a btTypedConstraint base-class method -- a real
+     * generalization, not a behavior change for the existing fixed-
+     * constraint call sites. */
+    btTypedConstraint *constraint;   /* owned */
 };
 
 extern "C" {
@@ -116,6 +124,28 @@ PhiRigidBody *phi_physics_add_convex_hull_body(PhiPhysicsWorld *world,
     return rb;
 }
 
+PhiRigidBody *phi_physics_add_capsule_body(PhiPhysicsWorld *world, float radius, float half_height,
+                                            Vec3f position, float orientation[4],
+                                            float mass, float restitution) {
+    PhiRigidBody *rb = new PhiRigidBody();
+    rb->shape = new btCapsuleShape(radius, 2.0f * half_height);   /* btCapsuleShape's 2nd param is full height, not half */
+
+    btTransform transform;
+    transform.setIdentity();
+    transform.setOrigin(btVector3(position.x, position.y, position.z));
+    transform.setRotation(btQuaternion(orientation[0], orientation[1], orientation[2], orientation[3]));
+    rb->motion_state = new btDefaultMotionState(transform);
+
+    btVector3 local_inertia(0.0f, 0.0f, 0.0f);
+    if (mass != 0.0f) rb->shape->calculateLocalInertia(mass, local_inertia);
+
+    btRigidBody::btRigidBodyConstructionInfo rb_info(mass, rb->motion_state, rb->shape, local_inertia);
+    rb_info.m_restitution = restitution;
+    rb->body = new btRigidBody(rb_info);
+    world->world->addRigidBody(rb->body);
+    return rb;
+}
+
 void phi_physics_remove_body(PhiPhysicsWorld *world, PhiRigidBody *body) {
     if (!body) return;
     world->world->removeRigidBody(body->body);
@@ -189,6 +219,20 @@ PhiConstraint *phi_physics_add_fixed_constraint(PhiPhysicsWorld *world,
     /* disableCollisionsBetweenLinkedBodies=true -- matches Blender's own
      * rigid body constraint default, so two glued fragments don't also
      * jitter against each other's collision shapes while intact. */
+    world->world->addConstraint(c->constraint, true);
+    return c;
+}
+
+PhiConstraint *phi_physics_add_point2point_constraint(PhiPhysicsWorld *world,
+                                                        PhiRigidBody *a, Vec3f pivot_a,
+                                                        PhiRigidBody *b, Vec3f pivot_b) {
+    PhiConstraint *c = new PhiConstraint();
+    c->constraint = new btPoint2PointConstraint(*a->body, *b->body,
+                                                 btVector3(pivot_a.x, pivot_a.y, pivot_a.z),
+                                                 btVector3(pivot_b.x, pivot_b.y, pivot_b.z));
+    /* disableCollisionsBetweenLinkedBodies=true -- same reasoning as the
+     * fixed constraint above: adjacent bone capsules shouldn't also
+     * collide against each other at the joint they're pinned at. */
     world->world->addConstraint(c->constraint, true);
     return c;
 }
