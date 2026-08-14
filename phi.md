@@ -3793,6 +3793,21 @@ editing, and isn't reachable via any "Add" context-menu row (auto-loaded
 once at startup instead) -- real, deliberate scope cuts for this pass,
 not oversights.
 
+**Fix, 2026-08-14: started up mid-animation.** `skinned_mesh_object_
+load` deliberately auto-starts playback looped (a real, tested library
+default -- `skinned_mesh_object_test`'s own "first clip auto-starts
+playing" check), the right behavior for a freshly-loaded object in
+general. Startup specifically shouldn't begin mid-animation though, per
+explicit request ("the app needs to start up with it paused") -- `main.c`
+now sets `g_skinned_test_obj.playback.playing = 0` right after the
+startup load call, a one-line UX override at the call site rather than
+changing what the library function itself does for every caller (which
+would have broken the already-passing auto-play test and any other
+future caller that legitimately wants immediate playback). The Timeline
+panel's Play/Pause button already reads `playback.playing` directly, so
+it correctly shows "Play" from the very first frame with no further
+change needed.
+
 ### What it is
 
 A timeline-based editor for authoring animation clips that drive mesh object

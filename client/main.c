@@ -1843,6 +1843,20 @@ int main(void) {
      * "auto-load a real fixture" precedent spawn_test_mesh_object()
      * already established for g_test_mesh_object, just a separate slot. */
     g_skinned_test_loaded = skinned_mesh_object_load("assets/test/armature_test.gltf", (Vec3f){170.0f, 55.0f, 90.0f}, &g_skinned_test_obj);
+    /* skinned_mesh_object_load itself deliberately auto-starts playback
+     * (looped) -- a real, tested library-level default (skinned_mesh_
+     * object_test's own "first clip auto-starts playing" check), the
+     * right behavior for e.g. a freshly-created/loaded object in
+     * general. Startup specifically should NOT begin mid-animation
+     * though, per explicit request ("the app needs to start up with it
+     * paused") -- a main.c/UX decision, not a library default, so it's
+     * overridden right here rather than changing what skinned_mesh_
+     * object_load itself does for every caller. Pausing here (not
+     * skipping playback.time back to 0 too) means the FIRST frame drawn
+     * still shows the clip's real rest-pose-adjacent starting frame
+     * (time is already 0 from anim_playback_play), just held rather
+     * than advancing until Play is pressed in the Timeline panel. */
+    if (g_skinned_test_loaded) g_skinned_test_obj.playback.playing = 0;
     printf("[main] skinned test object: %s\n", g_skinned_test_loaded ? "loaded" : "FAILED to load");
 
     /* Asset Browser -- see phi.md's "Asset tracking and the Asset Browser
