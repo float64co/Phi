@@ -72,6 +72,7 @@ COMMON_SRCS := \
 	$(SRCDIR)/transform_op.c  \
 	$(SRCDIR)/light.c         \
 	$(SRCDIR)/scene_target.c  \
+	$(SRCDIR)/fracture_body.c \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
 	$(SRCDIR)/ui.c            \
@@ -83,7 +84,7 @@ COMMON_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test
+.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test
 
 all: wasm native
 
@@ -264,6 +265,25 @@ phi_physics_test: $(OUT_PHI_PHYSICS_TEST)
 $(OUT_PHI_PHYSICS_TEST): $(PHI_PHYSICS_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(BULLET_INCLUDES) $(PHI_PHYSICS_TEST_SRCS) -o $(OUT_PHI_PHYSICS_TEST) -lstdc++ -lm
 	@echo "phi_physics_test build complete -> $(OUT_PHI_PHYSICS_TEST)"
+
+# fracture_body.c (Phase 2's runtime "shatter on impact" completion --
+# real convex-hull fragments + breaking-threshold constraints, spawned
+# from fracture.c's existing precompute) self-test -- same no-GL
+# rationale as phi_physics_test above; renderer_draw_mesh_object is
+# stubbed in the test main itself (see its own comment) so this doesn't
+# need to link renderer.c/gl_native.c/gbuffer.c at all.
+FRACTURE_BODY_TEST_SRCS := $(SRCDIR)/fracture_body_test_main.c $(SRCDIR)/fracture_body.c \
+                            $(SRCDIR)/fracture.c $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c \
+                            $(SRCDIR)/meshobject.c \
+                            $(SRCDIR)/phi_physics.cpp $(BULLET_SRCS)
+OUT_FRACTURE_BODY_TEST   := $(BUILDDIR)/fracture_body_test
+
+fracture_body_test: $(OUT_FRACTURE_BODY_TEST)
+	./$(OUT_FRACTURE_BODY_TEST)
+
+$(OUT_FRACTURE_BODY_TEST): $(FRACTURE_BODY_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(BULLET_INCLUDES) $(FRACTURE_BODY_TEST_SRCS) -o $(OUT_FRACTURE_BODY_TEST) -lstdc++ -lm
+	@echo "fracture_body_test build complete -> $(OUT_FRACTURE_BODY_TEST)"
 
 # Same, but exercising the actual MeshObject integration (AABB-from-mesh,
 # the exact create/step/sync sequence main.c's CTX_ACTION_ENABLE_PHYSICS

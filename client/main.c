@@ -15,6 +15,7 @@
 #include "light.h"
 #include "render_settings.h"
 #include "scene_target.h"
+#include "fracture_body.h"
 #include "font.h"
 #include "svg_icon.h"
 #include "asset_browser.h"
@@ -54,6 +55,16 @@ static GBuffer      *g_gbuf     = NULL;  /* deferred renderer, see gbuffer.h —
  * interaction, UI, or physics yet; see phi.md's Phase 1 section. */
 static MeshObject   g_test_mesh_object = {0};
 static int          g_test_mesh_loaded = 0;
+/* True once fracture_body_activate has produced at least one live
+ * fragment (see fracture_body.h) -- the ORIGINAL g_test_mesh_object
+ * still exists (its hem/render_mesh are untouched, so nothing else that
+ * assumes g_test_mesh_loaded breaks), it just stops being drawn/picked
+ * while its shattered fragments are what's actually simulated and
+ * visible instead. Cleared back to 0 by CTX_ACTION_DELETE (deleting the
+ * fracture-source object also clears its fragments) -- there's no
+ * "un-shatter" action, fracture is one-way once activated, matching
+ * this pass's own "real but not Blender-grade polish" scope. */
+static int          g_fracture_active = 0;
 /* Which hem face (see meshobject_ray_pick_face) was under the cursor the
  * moment the Scene context menu was last opened with the test object
  * selected -- -1 if none/not applicable. Extrude/Inset/Loop Cut menu rows
@@ -154,6 +165,14 @@ static int load_mesh_object_from_path(const char *path, float scale) {
             phi_physics_remove_body(g_phys_world, g_test_mesh_object.phys_body);
             g_test_mesh_object.phys_body = NULL;
         }
+        /* Loading a new mesh over the slot replaces whatever fracture
+         * fragments the OLD one might have been shattered into (see
+         * g_fracture_active's own comment) -- same reasoning
+         * delete_test_mesh_object clears them too. */
+        if (g_fracture_active) {
+            fracture_body_clear(g_phys_world);
+            g_fracture_active = 0;
+        }
     }
     g_test_mesh_object.id = 1;
     g_test_mesh_object.position = (Vec3f){128.0f, 100.0f, 90.0f};
@@ -208,6 +227,13 @@ static void delete_test_mesh_object(void) {
         phi_physics_remove_body(g_phys_world, g_test_mesh_object.phys_body);
         g_test_mesh_object.phys_body = NULL;
     }
+    /* Deleting the fracture SOURCE object also clears whatever it was
+     * shattered into (fracture_body.h) -- there's no meaning to keeping
+     * a fragment swarm alive once the object it came from is gone. */
+    if (g_fracture_active) {
+        fracture_body_clear(g_phys_world);
+        g_fracture_active = 0;
+    }
     g_test_mesh_loaded = 0;
     g_edit_face = -1;
     printf("[main] deleted MeshObject\n");
@@ -258,9 +284,13 @@ static void draw_scene_grid(void) {
 static void scene_content_cb(void *userdata) {
     (void)userdata;
     draw_scene_grid();
-    if (g_test_mesh_loaded) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
-    if (selected_is_test_mesh()) gizmo_draw(g_renderer, g_test_mesh_object.position);
+    /* Once fractured, the fragments (drawn below) ARE the object visually
+     * -- drawing the still-intact original on top would just show a
+     * whole cube overlapping its own shattered pieces. */
+    if (g_test_mesh_loaded && !g_fracture_active) renderer_draw_mesh_object(g_renderer, &g_test_mesh_object);
+    if (selected_is_test_mesh() && !g_fracture_active) gizmo_draw(g_renderer, g_test_mesh_object.position);
     renderer_draw_lights(g_renderer);
+    fracture_body_sync_and_draw_all(g_renderer);
 }
 
 /* fwd/right/up basis matched EXACTLY against compute_scene_ray/
@@ -452,7 +482,7 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
          * as clicking empty space in Blender's edit mode (does NOT kick
          * back to Object mode or deselect the object). */
         float t; int face;
-        if (g_test_mesh_loaded && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
+        if (g_test_mesh_loaded && !g_fracture_active && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &t, &face)) {
             g_edit_face = face;
         } else {
             g_edit_face = -1;
@@ -462,8 +492,14 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
 
     /* Object mode: gizmo handle priority, then whole-object select/
      * deselect -- no face-level state (g_edit_face is Edit-mode-only from
-     * here on, see its own comment). */
-    if (selected_is_test_mesh()) {
+     * here on, see its own comment). Once fractured, the original
+     * object's own hem/render_mesh still exist (see g_fracture_active's
+     * own comment) but are no longer meant to be pickable -- its
+     * fragments aren't first-class pickable objects either (see
+     * fracture_body.h's own scope note), so a click where the shattered
+     * object used to be simply misses/deselects, same as clicking any
+     * other empty space. */
+    if (!g_fracture_active && selected_is_test_mesh()) {
         GizmoAxis axis = gizmo_pick_handle(g_test_mesh_object.position, origin, dir);
         if (axis != GIZMO_AXIS_NONE) {
             gizmo_begin_drag(axis, g_test_mesh_object.position, origin, dir);
@@ -477,7 +513,8 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
      * follow) -- a light in front of the mesh from this angle should win
      * the pick, and vice versa, not "mesh always checked first". */
     float mesh_t; int face;
-    int mesh_hit = g_test_mesh_loaded && meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &mesh_t, &face);
+    int mesh_hit = g_test_mesh_loaded && !g_fracture_active &&
+                   meshobject_ray_pick_face(&g_test_mesh_object, origin, dir, &mesh_t, &face);
     float light_t;
     PhiLight *hit_light = light_ray_pick(origin, dir, &light_t);
 
@@ -891,18 +928,31 @@ static void main_loop(void *userdata) {
             }
             break;
         case CTX_ACTION_FRACTURE:
-            /* Editor-only precompute (see fracture.h) -- acts on the whole
-             * selected MeshObject, not g_edit_face. Fixed 8-fragment count
-             * and a real time-based seed (not a fixed test seed -- this is
-             * the actual editor action, mesh_edit_test.c's fixed seed=42 is
-             * what makes THAT reproducible/testable, this is the real
-             * thing) for this pass; no interactive fragment-count picker
-             * UI, matching this task's precompute-tool scope. Does NOT
-             * mutate g_test_mesh_object itself or activate anything at
-             * runtime -- purely writes the fragments to disk. */
+            /* Computes Voronoi fragments (fracture.h) and now does BOTH
+             * things that capability was always meant to support: saves
+             * them to disk (fracture_save_glb, real asset-pipeline value
+             * independent of runtime activation) AND activates them live
+             * in the running physics world (fracture_body_activate --
+             * Phase 2's "shatter on impact" completion, see fracture_
+             * body.h) -- the SAME seed drives both, so they're the
+             * identical fragmentation rather than two independent random
+             * splits. Fixed 8-fragment count and a real time-based seed,
+             * no interactive fragment-count/threshold picker UI, matching
+             * this codebase's established "real but not Blender-grade
+             * polish" bar for editor actions (see e.g. Extrude's own
+             * fixed 4-unit offset). breaking_threshold is a reasoned
+             * starting point (well above the ~50-unit threshold
+             * phi_physics_test verified breaks/holds correctly at, since
+             * this object is larger/heavier and may fall before
+             * shattering) but genuinely UNVERIFIED live -- this sandbox
+             * can't open a real GL window to watch it actually shatter
+             * and tune the feel, flagged honestly rather than claimed
+             * correct by construction. */
             if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
                 const int n_frag = 8;
+                const float breaking_threshold = 200.0f;
                 unsigned int seed = (unsigned int)phi_platform_now();
+
                 FractureFragment *frags = fracture_voronoi(&g_test_mesh_object, n_frag, seed);
                 if (frags) {
                     int ok = fracture_save_glb(frags, n_frag, "assets/fracture_output.gltf");
@@ -912,7 +962,19 @@ static void main_loop(void *userdata) {
                            non_empty, n_frag, ok ? "saved" : "SAVE FAILED");
                     fracture_free_fragments(frags, n_frag);
                 } else {
-                    printf("[main] context menu Fracture: operation failed (no hem?)\n");
+                    printf("[main] context menu Fracture: precompute failed (no hem?)\n");
+                }
+
+                int spawned = fracture_body_activate(g_phys_world, g_test_mesh_object.hem,
+                                                      g_test_mesh_object.position, g_test_mesh_object.orientation,
+                                                      n_frag, seed, breaking_threshold);
+                if (spawned > 0) {
+                    g_fracture_active = 1;
+                    ui_set_selected_object(0xFFFFFFFFu);
+                    g_edit_face = -1;
+                    printf("[main] context menu Fracture: activated %d live fragment bodies\n", spawned);
+                } else {
+                    printf("[main] context menu Fracture: activation produced no live fragments\n");
                 }
             } else {
                 printf("[main] context menu Fracture: no MeshObject selected\n");
@@ -1434,6 +1496,10 @@ int main(void) {
     /* Light objects (Phase 3's "Both like Blender does it" light-source
      * model, see light.h) -- a fixed-capacity registry, cleared once here. */
     light_system_init();
+
+    /* Runtime fracture-activation registry (Phase 2's "shatter on
+     * impact" completion, see fracture_body.h) -- cleared once here. */
+    fracture_body_system_init();
 
     /* Asset Browser -- see phi.md's "Asset tracking and the Asset Browser
      * panel". net.c requests the initial asset list itself, right after

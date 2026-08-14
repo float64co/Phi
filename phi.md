@@ -2736,7 +2736,7 @@ by Phase 4 no longer needing to stand up its own glTF pipeline)*
 
 ## Phase 2 — Physics
 
-### Status: real first slice landed 2026-08-10; convex hulls + breaking-threshold constraints landed 2026-08-14 (see dated note below) — remaining gap is wiring runtime fracture-activation into a live scene, blocked on multi-object scene support this engine doesn't have yet
+### Status: real first slice landed 2026-08-10; convex hulls + breaking-threshold constraints landed 2026-08-14; runtime fracture-activation (bounded FractureBody registry) landed 2026-08-14 (see dated notes below) — Phase 2 is complete for this engine's current single-object-slot scope; a real multi-object scene graph remains future work, not a Phase 2 gap
 
 **Correction to this section's original claim, below**: Bullet has **no
 official C API** for its core engine — verified by cloning the `bullet3`
@@ -2917,6 +2917,79 @@ test`, `mp_physics_test`, `mp_prop_panel_test`, `mp_console_test`,
 `area_tree_test`, `phi_prop_test`) re-verified passing. Native and wasm
 both rebuilt clean. Win32 remains the user's own `build.bat`
 responsibility, not built from this sandbox.
+
+#### Runtime fracture activation — the actual "shatter on impact" connection, 2026-08-14
+
+Closes Phase 2's real remaining gap ("finish Phase 2, item 3" — the
+`on_impact(...)` hookup didn't exist, and collision shapes were the only
+piece not yet load-bearing). Rather than building the full multi-object
+scene graph the prior dated note above flagged as the "real" way to do
+this (a genuinely separate, much larger undertaking — picking, Outliner,
+Properties, Python addressing, Asset Browser save all currently assume
+exactly one object slot), this took the same **bounded-registry**
+approach `light.c`'s `PhiLight` array already established: a new
+`client/fracture_body.h`/`.c` module with its own small, fixed-capacity
+`PHI_MAX_FRACTURE_BODIES` (64) array of real `MeshObject`s, each with its
+own convex-hull `PhiRigidBody`.
+
+- **`fracture_body_activate(...)`**: runs the existing `fracture_voronoi`
+  against the selected object's own half-edge mesh, spawns each non-empty
+  fragment as a real `MeshObject` (render mesh built directly, sized to
+  the fragment's own vertex count rather than `mesh_create()`'s much
+  larger default capacity) with a convex-hull body at the source
+  object's own transform, computes adjacency (`fracture_compute_
+  adjacency`, landed earlier the same day) and glues every adjacent pair
+  with a real breaking-threshold fixed constraint at that shared
+  transform — correct, not just convenient, since every fragment's own
+  local-space vertex offsets are what place it correctly within that
+  shared frame.
+- **Reachable from the existing Fracture context-menu action**
+  (`CTX_ACTION_FRACTURE` in `main.c`): now does both the pre-existing
+  save-fragments-to-disk behavior AND a real `fracture_body_activate`
+  call (`n_fragments=8`, `breaking_threshold=200.0f` — reasoned from the
+  same order of magnitude Blender's own default constraint breaking
+  thresholds use, but **not live-tuned against a real on-screen impact
+  in this sandbox**, flagged honestly rather than presented as a
+  verified-good value). On success the original mesh is hidden from
+  rendering/picking/gizmo (`g_fracture_active` flag) rather than deleted,
+  so nothing is lost if activation is later undone by reload/delete.
+- **`fracture_body_sync_and_draw_all(Renderer *)`**: called once per
+  frame from the Scene panel's content callback, after the physics step
+  — syncs each live fragment's transform from its own `PhiRigidBody`
+  (same "sync FROM the simulated body" pattern `main_loop` already uses
+  for the single test object) then draws it through the existing,
+  unmodified `renderer_draw_mesh_object`.
+- **Fragments are explicitly NOT first-class objects**: not selectable,
+  not in the Outliner, not Python-addressable by id — the same scope
+  boundary `light.c`'s registry already draws, documented in `fracture_
+  body.h`'s own header comment. `fracture_body_clear` (called on
+  delete/reload of the source object) removes every live fragment body
+  and constraint and empties the registry; safe to call with nothing
+  active.
+
+Verified with a new standalone no-GL harness (`fracture_body_test`,
+`make fracture_body_test`): defensive cases (NULL source mesh /
+`n_fragments < 1` spawn nothing rather than crashing), real activation
+(fragments spawn at exactly the source object's own transform, not the
+origin), a gentle impulse well under the breaking threshold keeps the
+whole cluster glued together (measured max pairwise fragment spread:
+0.000), and a hard impulse well over threshold genuinely breaks at least
+one fragment free (measured spread: 828.572) — the same "measure the
+real numbers, don't just check a flag" bar `phi_physics_test`'s own
+constraint section already set. Native and wasm both rebuilt clean from
+a forced-clean state; every other standalone harness in the project
+(`animation_test`, `area_tree_test`, `asset_protocol_test`,
+`fracture_test`, `light_test`, `mesh_edit_test`, `mp_console_test`,
+`mp_physics_test`, `mp_prop_panel_test`, `mp_test`, `mp_stress`,
+`phi_physics_meshobject_test`, `phi_physics_test`, `phi_prop_test`)
+re-run and re-verified passing, since `main.c` and the `Makefile` both
+changed. Live GUI verification (right-clicking a mesh, choosing
+Fracture, shooting it, watching fragments actually separate on screen)
+is still not possible in this sandbox — same `XOpenDisplay()` limitation
+noted everywhere else in this doc a real window is needed; the
+`breaking_threshold=200.0f` value in particular should be treated as a
+starting point to tune once that's possible, not a verified-correct
+constant.
 
 ### Bullet Physics via Emscripten
 
