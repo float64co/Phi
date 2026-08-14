@@ -91,28 +91,28 @@ int             transform_op_active(void) { return g_xf.active; }
 TransformOpKind transform_op_kind(void)   { return g_xf.kind; }
 TransformAxis   transform_op_axis(void)   { return g_xf.axis; }
 
-void transform_op_begin(TransformOpKind kind, MeshObject *obj, const TransformCamCtx *cam,
-                         int mouse_x, int mouse_y) {
+void transform_op_begin(TransformOpKind kind, Vec3f *position, Quat *orientation, Vec3f *scale,
+                         const TransformCamCtx *cam, int mouse_x, int mouse_y) {
     (void)cam;  /* free-mode segments need no plane setup at begin time */
     memset(&g_xf, 0, sizeof(g_xf));
     g_xf.active = 1;
     g_xf.kind = kind;
     g_xf.axis = XFORM_AXIS_NONE;
-    g_xf.orig_position    = obj->position;
-    g_xf.orig_orientation = obj->orientation;
-    g_xf.orig_scale       = obj->scale;
-    g_xf.seg_position     = obj->position;
-    g_xf.seg_scale        = obj->scale;
-    g_xf.seg_orientation  = obj->orientation;
+    g_xf.orig_position    = *position;
+    g_xf.orig_orientation = orientation ? *orientation : quat_identity();
+    g_xf.orig_scale       = scale ? *scale : (Vec3f){1,1,1};
+    g_xf.seg_position     = *position;
+    g_xf.seg_scale        = g_xf.orig_scale;
+    g_xf.seg_orientation  = g_xf.orig_orientation;
     g_xf.seg_mouse_x = mouse_x;
     g_xf.seg_mouse_y = mouse_y;
 }
 
-void transform_op_cancel(MeshObject *obj) {
+void transform_op_cancel(Vec3f *position, Quat *orientation, Vec3f *scale) {
     if (!g_xf.active) return;
-    obj->position    = g_xf.orig_position;
-    obj->orientation = g_xf.orig_orientation;
-    obj->scale       = g_xf.orig_scale;
+    *position = g_xf.orig_position;
+    if (orientation) *orientation = g_xf.orig_orientation;
+    if (scale)        *scale       = g_xf.orig_scale;
     g_xf.active = 0;
     g_xf.kind = XFORM_NONE;
 }
@@ -146,7 +146,7 @@ static void begin_axis_segment_grab(const TransformCamCtx *cam) {
     }
 }
 
-static void update_grab(MeshObject *obj, const TransformCamCtx *cam, int mouse_x, int mouse_y) {
+static void update_grab(Vec3f *position, const TransformCamCtx *cam, int mouse_x, int mouse_y) {
     if (g_xf.axis == XFORM_AXIS_NONE) {
         /* Free move: screen-space mouse delta projected onto the
          * camera's own right/up plane, same technique main.c's
@@ -159,7 +159,7 @@ static void update_grab(MeshObject *obj, const TransformCamCtx *cam, int mouse_x
         int dy = mouse_y - g_xf.seg_mouse_y;
         Vec3f delta = vec3_add(vec3_scale(cam->right, (float)dx * sc),
                                 vec3_scale(cam->up, -(float)dy * sc));
-        obj->position = vec3_add(g_xf.seg_position, delta);
+        *position = vec3_add(g_xf.seg_position, delta);
         return;
     }
     float denom = vec3_dot(g_xf.plane_normal, cam->ray_dir);
@@ -168,10 +168,10 @@ static void update_grab(MeshObject *obj, const TransformCamCtx *cam, int mouse_x
     Vec3f hit = vec3_add(cam->ray_origin, vec3_scale(cam->ray_dir, t));
     Vec3f delta = vec3_sub(hit, g_xf.plane_point);
     float along = vec3_dot(delta, AXIS_DIR[g_xf.axis]);
-    obj->position = vec3_add(g_xf.seg_position, vec3_scale(AXIS_DIR[g_xf.axis], along));
+    *position = vec3_add(g_xf.seg_position, vec3_scale(AXIS_DIR[g_xf.axis], along));
 }
 
-static void update_scale(MeshObject *obj, int mouse_x) {
+static void update_scale(Vec3f *scale, int mouse_x) {
     /* Exponential-in-pixels multiplicative factor -- doubles every ~100px
      * dragged right, halves every ~100px dragged left, so scale can never
      * cross zero/go negative regardless of drag distance (a linear
@@ -179,25 +179,27 @@ static void update_scale(MeshObject *obj, int mouse_x) {
      * screen-space-distance-from-object-center ratio, a deliberate
      * simplification matching this codebase's established "real but not
      * Blender-grade polish" bar (see main.c's fixed-distance extrude). */
+    if (!scale) return;   /* defensive -- callers must never pass XFORM_SCALE for a NULL-scale target, but a stray call shouldn't crash */
     float factor = powf(2.0f, (float)(mouse_x - g_xf.seg_mouse_x) * 0.01f);
     if (g_xf.axis == XFORM_AXIS_NONE) {
-        obj->scale = vec3_scale(g_xf.seg_scale, factor);
+        *scale = vec3_scale(g_xf.seg_scale, factor);
         return;
     }
-    obj->scale = g_xf.seg_scale;
-    float *comp = (g_xf.axis == XFORM_AXIS_X) ? &obj->scale.x
-                : (g_xf.axis == XFORM_AXIS_Y) ? &obj->scale.y
-                :                               &obj->scale.z;
+    *scale = g_xf.seg_scale;
+    float *comp = (g_xf.axis == XFORM_AXIS_X) ? &scale->x
+                : (g_xf.axis == XFORM_AXIS_Y) ? &scale->y
+                :                               &scale->z;
     *comp *= factor;
 }
 
-static void update_rotate(MeshObject *obj, const TransformCamCtx *cam, int mouse_x) {
+static void update_rotate(Quat *orientation, const TransformCamCtx *cam, int mouse_x) {
     /* No axis lock: Blender's own default is a trackball rotation around
      * the view axis -- approximated here as a straight rotation around
      * the camera's forward vector driven by horizontal mouse delta,
      * simpler than a true screen-space-angle-around-center computation
      * but directionally correct and predictable (same simplification
      * class as update_scale's factor curve above). */
+    if (!orientation) return;   /* defensive, same reasoning as update_scale's guard */
     Vec3f world_axis = (g_xf.axis != XFORM_AXIS_NONE) ? AXIS_DIR[g_xf.axis] : cam->fwd;
     float angle;
     if (g_xf.typed_len > 0) {
@@ -207,11 +209,11 @@ static void update_rotate(MeshObject *obj, const TransformCamCtx *cam, int mouse
         angle = (float)(mouse_x - g_xf.seg_mouse_x) * SENS_ROT;
     }
     Quat delta = quat_from_axis_angle(world_axis, angle);
-    obj->orientation = quat_normalize(quat_mul(delta, g_xf.seg_orientation));
+    *orientation = quat_normalize(quat_mul(delta, g_xf.seg_orientation));
 }
 
-void transform_op_update(MeshObject *obj, InputState *inp, const TransformCamCtx *cam,
-                          int mouse_x, int mouse_y) {
+void transform_op_update(Vec3f *position, Quat *orientation, Vec3f *scale, InputState *inp,
+                          const TransformCamCtx *cam, int mouse_x, int mouse_y) {
     if (!g_xf.active) return;
 
     /* Modal ops own all keyboard input while active -- drain the shared
@@ -252,9 +254,9 @@ void transform_op_update(MeshObject *obj, InputState *inp, const TransformCamCtx
 
     if (axis_changed) {
         g_xf.axis = new_axis;
-        g_xf.seg_position    = obj->position;
-        g_xf.seg_scale       = obj->scale;
-        g_xf.seg_orientation = obj->orientation;
+        g_xf.seg_position    = *position;
+        g_xf.seg_scale       = scale ? *scale : g_xf.seg_scale;
+        g_xf.seg_orientation = orientation ? *orientation : g_xf.seg_orientation;
         g_xf.seg_mouse_x = mouse_x;
         g_xf.seg_mouse_y = mouse_y;
         if (g_xf.kind == XFORM_GRAB && g_xf.axis != XFORM_AXIS_NONE) {
@@ -263,9 +265,9 @@ void transform_op_update(MeshObject *obj, InputState *inp, const TransformCamCtx
     }
 
     switch (g_xf.kind) {
-        case XFORM_GRAB:   update_grab(obj, cam, mouse_x, mouse_y); break;
-        case XFORM_SCALE:  update_scale(obj, mouse_x); break;
-        case XFORM_ROTATE: update_rotate(obj, cam, mouse_x); break;
+        case XFORM_GRAB:   update_grab(position, cam, mouse_x, mouse_y); break;
+        case XFORM_SCALE:  update_scale(scale, mouse_x); break;
+        case XFORM_ROTATE: update_rotate(orientation, cam, mouse_x); break;
         default: break;
     }
 }

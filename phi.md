@@ -3146,6 +3146,38 @@ Properties-panel click-to-edit interaction, and Outliner row fix are
 compile-clean-and-reviewed, not click-tested. Win32 remains the user's own
 `build.bat` responsibility, not built from this sandbox.
 
+#### G (Grab) now works on a selected Light, 2026-08-14
+
+Per explicit request. `client/transform_op.h`/`.c`'s modal G/S/R tool
+took a `MeshObject *` directly, mutating `obj->position`/`orientation`/
+`scale` -- widened to plain `Vec3f`/`Quat`/`Vec3f` pointers instead
+(orientation/scale may be `NULL` for a Grab-only target, guarded
+defensively in `update_scale`/`update_rotate`) rather than duplicating
+the whole module for one extra case, the same "generalize once a real
+second use case shows up" reasoning `phi_physics_add_point2point_
+constraint` used for `PhiConstraint`'s own widened field earlier this
+session. New `main.c` helper `resolve_xform_target(kind, ...)` resolves
+the right pointers for whatever's currently selected -- the one
+MeshObject slot (any of Grab/Scale/Rotate) or a selected Light (Grab
+only; a light has no orientation/scale field worth Scale/Rotate-ing, so
+`s`/`r` with a light selected simply isn't offered, falling through to
+whatever else that keystroke normally does rather than being silently
+swallowed). Called fresh at every begin/update/cancel site rather than
+cached, safe because selection can't change while a modal op is active.
+
+Also fixed while touching the Timeline panel: its Play/Pause button
+label was vertically mispositioned (`ui_text_draw`'s `y` is the TOP of
+the glyph box, not a button-center offset -- the original `by + bh*0.5f
++ 4.0f` sat the label near the button's vertical center rather than
+centered within it, visibly low). Replaced with a real centering
+formula, `by + (bh - label_size) * 0.5f`.
+
+Native and wasm both rebuilt clean; every standalone harness in the
+project re-run and re-verified passing (`transform_op.c` has no
+standalone harness of its own -- always exercised through `main.c`
+directly, unchanged this pass). No live GUI verification possible in
+this sandbox, same limitation as everywhere else in this doc.
+
 #### The real path tracer, 2026-08-14
 
 A genuine BVH-accelerated Monte Carlo path tracer (new `client/path_

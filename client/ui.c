@@ -1665,8 +1665,18 @@ static void draw_panel_timeline(Area *a, const UIRenderContext *ctx) {
 
     ui_rect(bx, by, bw, bh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);
     const char *btn_label = obj->playback.playing ? "Pause" : "Play";
-    float label_w = font_text_width(g_ui.font_body, btn_label, 13.0f);
-    ui_text_draw(bx + (bw - label_w) * 0.5f, by + bh * 0.5f + 4.0f, btn_label, g_ui.font_body, 13.0f,
+    const float btn_label_size = 13.0f;
+    float label_w = font_text_width(g_ui.font_body, btn_label, btn_label_size);
+    /* ui_text_draw's own y param is the TOP of the text's glyph box (its
+     * baseline is y + font->ascent*scale, computed internally), not a
+     * button-center-relative offset -- centering a label of roughly its
+     * own point size within a taller button rect means offsetting down
+     * by half the LEFTOVER vertical space, (bh - size) / 2, not half the
+     * button height outright (that would push it well past center for
+     * any button taller than the text, exactly the bug this replaces:
+     * the old `by + bh*0.5f + 4.0f` sat the label's top near the
+     * button's own vertical center, i.e. visibly low/clipped-looking). */
+    ui_text_draw(bx + (bw - label_w) * 0.5f, by + (bh - btn_label_size) * 0.5f, btn_label, g_ui.font_body, btn_label_size,
                  UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
 
     ui_rect(sx, sy, sw, sh, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 1.0f);

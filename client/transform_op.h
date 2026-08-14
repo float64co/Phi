@@ -3,16 +3,28 @@
 #include "meshobject.h"
 #include "input.h"
 
-/* Blender-style modal G/S/R transform tool -- Grab/Scale/Rotate the
- * selected MeshObject with live mouse feedback, X/Y/Z axis locking,
- * Escape-to-cancel, and (Rotate only) numeric degree entry via the digit
- * keys. A self-contained mechanism module, same role gizmo.c already
- * plays for handle-click dragging -- this module owns none of the
- * decisions about WHEN to start/stop an operation or how its input
- * reaches here (see main.c's main_loop: hover-gated entry, confirm on
- * Enter/LMB, cancel on Escape/RMB, all main.c's own job), only the
+/* Blender-style modal G/S/R transform tool -- Grab/Scale/Rotate a
+ * selected entity's position/orientation/scale with live mouse feedback,
+ * X/Y/Z axis locking, Escape-to-cancel, and (Rotate only) numeric degree
+ * entry via the digit keys. A self-contained mechanism module, same role
+ * gizmo.c already plays for handle-click dragging -- this module owns
+ * none of the decisions about WHEN to start/stop an operation or how its
+ * input reaches here (see main.c's main_loop: hover-gated entry, confirm
+ * on Enter/LMB, cancel on Escape/RMB, all main.c's own job), only the
  * mechanics of turning "modal op + mouse position + a few keys" into a
- * live position/orientation/scale on the object. */
+ * live position/orientation/scale.
+ *
+ * Operates on plain Vec3f/Quat/Vec3f pointers rather than a MeshObject
+ * pointer --
+ * originally took a MeshObject* directly (this was the only entity type
+ * with a G/S/R-able transform), widened once a real second use case
+ * showed up (moving a selected Light around with G, which has a
+ * position but no orientation/scale field to speak of) rather than
+ * duplicating this whole module for that one extra case. orientation/
+ * scale may be NULL for a target that only supports Grab (e.g. a Light)
+ * -- callers must not request XFORM_SCALE/XFORM_ROTATE with either NULL
+ * (this module defends against it anyway, see transform_op.c, but the
+ * caller owns picking a sensible kind for whatever's actually selected). */
 
 typedef enum { XFORM_NONE = 0, XFORM_GRAB, XFORM_SCALE, XFORM_ROTATE } TransformOpKind;
 typedef enum { XFORM_AXIS_NONE = -1, XFORM_AXIS_X = 0, XFORM_AXIS_Y, XFORM_AXIS_Z } TransformAxis;
@@ -40,16 +52,18 @@ int             transform_op_active(void);
 TransformOpKind transform_op_kind(void);
 TransformAxis   transform_op_axis(void);
 
-/* Begins a modal operation on obj -- obj's CURRENT position/orientation/
- * scale become both the live working values (mutated in place every
+/* Begins a modal operation -- position/orientation/scale's CURRENT
+ * values become both the live working values (mutated in place every
  * subsequent transform_op_update call, so the Scene panel's own
  * rendering shows the transform live, same as gizmo dragging already
- * does) and the snapshot transform_op_cancel restores. Only one
- * operation can be active at a time -- calling this while already active
- * is a caller bug (main.c's own entry gating prevents it, see
- * transform_op_active()'s doc above). */
-void transform_op_begin(TransformOpKind kind, MeshObject *obj, const TransformCamCtx *cam,
-                         int mouse_x, int mouse_y);
+ * does) and the snapshot transform_op_cancel restores. orientation/scale
+ * may be NULL (a Grab-only target, see this header's own top comment) --
+ * must not be NULL if kind is XFORM_SCALE/XFORM_ROTATE respectively.
+ * Only one operation can be active at a time -- calling this while
+ * already active is a caller bug (main.c's own entry gating prevents it,
+ * see transform_op_active()'s doc above). */
+void transform_op_begin(TransformOpKind kind, Vec3f *position, Quat *orientation, Vec3f *scale,
+                         const TransformCamCtx *cam, int mouse_x, int mouse_y);
 
 /* Call once per frame while transform_op_active(), BEFORE any other
  * keyboard/mouse routing runs -- a modal op owns all relevant input
@@ -63,12 +77,16 @@ void transform_op_begin(TransformOpKind kind, MeshObject *obj, const TransformCa
  * lmb_click/rmb_click -- main.c reads and drains those itself to decide
  * confirm vs cancel, matching how every other one-shot InputState field
  * in this codebase is drained by its own single consumer. */
-void transform_op_update(MeshObject *obj, InputState *inp, const TransformCamCtx *cam,
-                          int mouse_x, int mouse_y);
+void transform_op_update(Vec3f *position, Quat *orientation, Vec3f *scale, InputState *inp,
+                          const TransformCamCtx *cam, int mouse_x, int mouse_y);
 
-/* Ends the op, restoring obj's position/orientation/scale to the
- * snapshot taken at transform_op_begin -- call on Escape/RMB-cancel. */
-void transform_op_cancel(MeshObject *obj);
+/* Ends the op, restoring position/orientation/scale to the snapshot
+ * taken at transform_op_begin -- call on Escape/RMB-cancel. Pass the
+ * SAME pointers transform_op_begin was called with (orientation/scale
+ * NULL exactly when they were NULL at begin time -- a light-Grab op
+ * only ever touches *position, so passing NULL for the other two here
+ * too is correct, not a mismatch). */
+void transform_op_cancel(Vec3f *position, Quat *orientation, Vec3f *scale);
 
 /* Ends the op, keeping obj's current (already-live) values -- call on
  * Enter/LMB-confirm. */

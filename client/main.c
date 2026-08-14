@@ -540,6 +540,37 @@ static PhiLight *selected_light(void) {
     return light_find((int)(sel - LIGHT_ID_BASE));
 }
 
+/* Resolves the G/S/R transform tool's target for whatever's currently
+ * selected -- the one MeshObject slot (any of Grab/Scale/Rotate, its
+ * real position/orientation/scale fields) or a selected Light (Grab
+ * only: a light has a real position but no orientation/scale field to
+ * speak of, so the orientation/scale out-pointers are left NULL and
+ * transform_op.c's own defensive guards make Scale/Rotate a safe no-op if ever
+ * reached for one anyway -- the real gate is the entry-point call site
+ * below, which never offers S/R for a light in the first place). Called
+ * fresh every frame (begin/update/every cancel site) rather than cached,
+ * since selection cannot change while a modal op is active (nothing else
+ * accepts a pick during that time) -- so this always resolves to the
+ * exact same target for the lifetime of one operation. Returns 1 with
+ * the three out-pointers set if there's a valid target for `kind`, 0
+ * (pointers untouched) otherwise. */
+static int resolve_xform_target(TransformOpKind kind, Vec3f **out_position, Quat **out_orientation, Vec3f **out_scale) {
+    if (selected_is_test_mesh()) {
+        *out_position = &g_test_mesh_object.position;
+        *out_orientation = &g_test_mesh_object.orientation;
+        *out_scale = &g_test_mesh_object.scale;
+        return 1;
+    }
+    PhiLight *l = selected_light();
+    if (l && kind == XFORM_GRAB) {
+        *out_position = &l->position;
+        *out_orientation = NULL;
+        *out_scale = NULL;
+        return 1;
+    }
+    return 0;
+}
+
 /* Shared by both the Tab-key shortcut and the Scene context menu's Enter/
  * Exit Edit Mode row -- Blender only allows entering Edit mode with a mesh
  * object selected (a no-op, not silently ignored -- see the printf), and
@@ -709,34 +740,44 @@ static void main_loop(void *userdata) {
             /* Entry: only starts when hovering the Scene panel's own
              * content (same hover-gated convention MMB-drag/scroll-wheel
              * routing already use elsewhere in this file), with a mesh
-             * object selected. Only the FIRST matching character this
-             * frame is consumed and removed from the queue -- any other
-             * character typed the same frame still reaches the console/
-             * chat below undisturbed. */
+             * object OR a Light selected -- a Light only ever offers
+             * Grab (see resolve_xform_target's own comment: no
+             * orientation/scale field worth Scale/Rotate-ing), checked
+             * per typed character below rather than gating the whole
+             * block, so 's'/'r' with a light selected just falls through
+             * to whatever else that keystroke would normally do (console/
+             * chat text entry) instead of silently being swallowed here.
+             * Only the FIRST matching character this frame is consumed
+             * and removed from the queue -- any other character typed
+             * the same frame still reaches the console/chat below
+             * undisturbed. */
             int hovering_scene =
                 (float)g_inp.mouse_x >= sx && (float)g_inp.mouse_x < sx + sw &&
                 (float)g_inp.mouse_y >= sy && (float)g_inp.mouse_y < sy + sh;
-            if (hovering_scene && selected_is_test_mesh()) {
+            if (hovering_scene && (selected_is_test_mesh() || selected_light())) {
                 for (int i = 0; i < g_inp.typed_count; i++) {
                     char c = g_inp.typed_chars[i];
                     TransformOpKind kind = XFORM_NONE;
                     if (c == 'g' || c == 'G') kind = XFORM_GRAB;
                     else if (c == 's' || c == 'S') kind = XFORM_SCALE;
                     else if (c == 'r' || c == 'R') kind = XFORM_ROTATE;
-                    if (kind != XFORM_NONE) {
-                        for (int j = i; j < g_inp.typed_count - 1; j++)
-                            g_inp.typed_chars[j] = g_inp.typed_chars[j + 1];
-                        g_inp.typed_count--;
+                    if (kind == XFORM_NONE) continue;
 
-                        Vec3f ro, rd;
-                        compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &ro, &rd);
-                        TransformCamCtx cam;
-                        cam.ray_origin = ro; cam.ray_dir = rd;
-                        cam_basis(g_cam_yaw, g_cam_pitch, &cam.fwd, &cam.right, &cam.up);
-                        cam.distance = g_cam_distance;
-                        transform_op_begin(kind, &g_test_mesh_object, &cam, g_inp.mouse_x, g_inp.mouse_y);
-                        break;
-                    }
+                    Vec3f *position; Quat *orientation; Vec3f *scale;
+                    if (!resolve_xform_target(kind, &position, &orientation, &scale)) continue;   /* e.g. 's'/'r' with only a Light selected -- not a valid op, let the char fall through */
+
+                    for (int j = i; j < g_inp.typed_count - 1; j++)
+                        g_inp.typed_chars[j] = g_inp.typed_chars[j + 1];
+                    g_inp.typed_count--;
+
+                    Vec3f ro, rd;
+                    compute_scene_ray(sx, sy, sw, sh, g_inp.mouse_x, g_inp.mouse_y, &ro, &rd);
+                    TransformCamCtx cam;
+                    cam.ray_origin = ro; cam.ray_dir = rd;
+                    cam_basis(g_cam_yaw, g_cam_pitch, &cam.fwd, &cam.right, &cam.up);
+                    cam.distance = g_cam_distance;
+                    transform_op_begin(kind, position, orientation, scale, &cam, g_inp.mouse_x, g_inp.mouse_y);
+                    break;
                 }
             }
         }
@@ -748,7 +789,9 @@ static void main_loop(void *userdata) {
             cam.ray_origin = ro; cam.ray_dir = rd;
             cam_basis(g_cam_yaw, g_cam_pitch, &cam.fwd, &cam.right, &cam.up);
             cam.distance = g_cam_distance;
-            transform_op_update(&g_test_mesh_object, &g_inp, &cam, g_inp.mouse_x, g_inp.mouse_y);
+            Vec3f *position; Quat *orientation; Vec3f *scale;
+            resolve_xform_target(transform_op_kind(), &position, &orientation, &scale);
+            transform_op_update(position, orientation, scale, &g_inp, &cam, g_inp.mouse_x, g_inp.mouse_y);
 
             /* Confirm: Enter or a plain LMB click. Cancel: Escape or a
              * plain RMB click. Draining lmb_click/rmb_click/enter_edge
@@ -759,13 +802,13 @@ static void main_loop(void *userdata) {
                 g_inp.enter_edge = 0;
                 transform_op_confirm();
             } else if (xform_escape_pressed) {
-                transform_op_cancel(&g_test_mesh_object);
+                transform_op_cancel(position, orientation, scale);
             } else if (g_inp.lmb_click) {
                 g_inp.lmb_click = 0;
                 transform_op_confirm();
             } else if (g_inp.rmb_click) {
                 g_inp.rmb_click = 0;
-                transform_op_cancel(&g_test_mesh_object);
+                transform_op_cancel(position, orientation, scale);
             }
         } else if (transform_op_active()) {
             /* The Scene panel got swapped away mid-drag (the type-
@@ -776,7 +819,9 @@ static void main_loop(void *userdata) {
                 g_inp.enter_edge = 0;
                 transform_op_confirm();
             } else if (xform_escape_pressed) {
-                transform_op_cancel(&g_test_mesh_object);
+                Vec3f *cancel_position; Quat *cancel_orientation; Vec3f *cancel_scale;
+                resolve_xform_target(transform_op_kind(), &cancel_position, &cancel_orientation, &cancel_scale);
+                transform_op_cancel(cancel_position, cancel_orientation, cancel_scale);
             }
         }
 
