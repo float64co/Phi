@@ -564,7 +564,7 @@ static void main_loop(void *userdata) {
         float sx, sy, sw, sh;
         int have_scene_rect = ui_get_scene_rect(&sx, &sy, &sw, &sh);
 
-        if (!transform_op_active() && !gizmo_is_dragging() && have_scene_rect) {
+        if (!transform_op_active() && !gizmo_is_dragging() && !ui_is_modal_open() && have_scene_rect) {
             /* Entry: only starts when hovering the Scene panel's own
              * content (same hover-gated convention MMB-drag/scroll-wheel
              * routing already use elsewhere in this file), with a mesh
@@ -971,6 +971,36 @@ static void main_loop(void *userdata) {
             break;
         case CTX_ACTION_TOGGLE_EDIT_MODE:
             toggle_editor_mode();
+            break;
+        default:
+            break;
+    }
+
+    /* Top menu bar action (File > Save/Load, see ui.h's TopMenuAction) --
+     * drained once per frame like the context-menu action just above.
+     * Both rows reuse an EXISTING mechanism rather than duplicating it:
+     * Save is the identical "begin the Asset Browser's create flow"
+     * CTX_ACTION_SAVE_AS_ASSET already does; Load sets the exact same
+     * AssetBrowserState::load_requested/load_requested_id fields the
+     * Asset Browser panel's own per-row Load button sets (see ui.c's
+     * hit_test_area), for whichever asset is currently selected there --
+     * the block further down that actually performs a load (g_ab.
+     * load_requested) doesn't know or care which UI triggered it. */
+    switch (ui_poll_top_menu_action()) {
+        case TOP_ACTION_FILE_SAVE:
+            if (g_test_mesh_loaded && ui_get_selected_object() == 4000u + (unsigned int)g_test_mesh_object.id) {
+                asset_browser_begin_create(&g_ab, "MeshObject");
+            } else {
+                printf("[main] File > Save: no MeshObject selected\n");
+            }
+            break;
+        case TOP_ACTION_FILE_LOAD:
+            if (g_ab.selected >= 0 && g_ab.selected < g_ab.count) {
+                g_ab.load_requested = 1;
+                g_ab.load_requested_id = g_ab.items[g_ab.selected].id;
+            } else {
+                printf("[main] File > Load: no asset selected in the Asset Browser panel\n");
+            }
             break;
         default:
             break;

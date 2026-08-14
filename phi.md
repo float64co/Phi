@@ -2660,6 +2660,61 @@ default). No live GL/input verification was possible in this sandbox
 not click-tested. Win32 remains the user's own `build.bat` responsibility,
 not built from this sandbox.
 
+#### Functional top menu bar (File/Edit/View/Help) + modal dialogs, 2026-08-14
+
+The File/Edit/View/Help labels in `draw_menu_row` had been pure static
+text since Phase 1's original chrome pass ("this proves the chrome has a
+place for a real menu system to land in, not a finished menu bar") --
+this pass makes them real click-to-open dropdowns, per explicit request.
+
+- **File > Save/Load** reuse EXISTING mechanisms rather than duplicating
+  them: Save is the identical "begin the Asset Browser's create flow for
+  the selected MeshObject" `CTX_ACTION_SAVE_AS_ASSET` already does; Load
+  sets the exact same `AssetBrowserState::load_requested`/
+  `load_requested_id` fields the Asset Browser panel's own per-row Load
+  button already sets (for whichever asset is currently selected there)
+  -- the existing per-frame block that actually performs a load doesn't
+  know or care which UI triggered it, so no new load path was written.
+- **Generic modal dialog system** (`ui.c`'s `draw_modal_box`/
+  `draw_modal`): centered, screen-dimming overlay, drawn dead last in
+  `ui_render` so it sits above literally everything else (the top menu's
+  own dropdown included) -- any click anywhere closes it, per the literal
+  "(click anywhere to close)" hint drawn on it. New `ui_is_modal_open()`
+  gates the G/S/R transform tool's own keyboard-driven entry (which,
+  unlike mouse clicks, doesn't route through `ui_on_mouse_button` and so
+  wouldn't otherwise know a modal was up) -- mouse-click picking needed
+  no separate gate, since `ui_on_mouse_button` already unconditionally
+  claims every click while a modal is open, same as it already did for
+  the context/area menus.
+- **Keyboard Shortcuts modal** (Help menu): every entry checked against a
+  real `InputState` field or `typed_chars` check in `input.c`/`main.c`/
+  `transform_op.c`, not written from memory of what "should" be bound --
+  navigation (MMB drag/Ctrl+MMB drag/scroll), selection (LMB/RMB/Tab),
+  the full G/S/R transform tool (including X/Y/Z axis-lock and Rotate's
+  digit-key exact-angle entry), and text-field basics.
+- **About modal**, bottom of the Help menu as requested.
+- Both new dropdown-row content functions (`build_top_menu_dropdown_rows`)
+  and the modal box itself follow the same "one function drives both the
+  draw pass and the hit-test pass" discipline this file's context menu/
+  Properties panel already established (`build_ctx_menu_rows`/
+  `properties_panel_walk`), rather than risking a third copy of that
+  historical items[]/actions[] drift bug.
+- **Explicitly NOT built this pass**: a Preferences modal / client-
+  settable Anthropic API key. Originally requested, then the user asked
+  to drop it after I flagged that it would reverse this document's own
+  "Anthropic API key lives server-side only" Hard Architectural Decision
+  (the user's own explicit call earlier this session, made via
+  `AskUserQuestion` at the time) -- surfaced rather than silently
+  reversed, and dropped rather than built once flagged. The decision
+  stands as originally written.
+
+Verified: native and wasm both rebuilt clean; all 11 relevant standalone
+harnesses re-verified passing (none of this touches anything they cover
+directly, but the shared `ui.c`/`main.c` translation units needed a clean
+recompile regardless). No live GL/input verification was possible in this
+sandbox (no real X display) -- compile-clean-and-reviewed, not
+click-tested. Win32 remains the user's own `build.bat` responsibility.
+
 ### Fracturing
 
 Meshes are authored with a fracture pattern at creation time. The editor provides

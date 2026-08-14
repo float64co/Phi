@@ -110,6 +110,17 @@ static void gl_check(const char *where) {
     while ((e = glGetError()) != GL_NO_ERROR) printf("[ui] GL error 0x%04x at %s\n", e, where);
 }
 
+/* Top menu bar dropdowns (File/Edit/View/Help) -- private to ui.c, unlike
+ * CtxMenuAction/TopMenuAction below, since nothing outside this file ever
+ * needs to know WHICH dropdown is open, only main.c needs to know when a
+ * row that actually DOES something (Save/Load) was clicked. */
+typedef enum { TOP_MENU_NONE = 0, TOP_MENU_FILE, TOP_MENU_EDIT, TOP_MENU_VIEW, TOP_MENU_HELP } TopMenu;
+
+/* Modal dialogs (Keyboard Shortcuts, About) -- also private, since both
+ * are pure UI (no main.c-side action to perform when one opens/closes,
+ * unlike Save/Load). */
+typedef enum { MODAL_NONE = 0, MODAL_SHORTCUTS, MODAL_ABOUT } ModalKind;
+
 /* ---- Global UI state ---- */
 typedef struct {
     unsigned int rect_prog, sdf_prog, icon_prog;
@@ -184,6 +195,20 @@ typedef struct {
     const PhiProp *prop_edit_prop;
     char           prop_edit_buf[64];
     int            prop_edit_len;
+
+    /* Top menu bar (File/Edit/View/Help, see draw_menu_row) -- which
+     * dropdown (if any) is currently open. Click-away/click-a-row both
+     * close it, same convention every other dropdown in this file
+     * already uses (type-switcher, Area menu, Scene context menu). */
+    TopMenu top_menu_open;
+    TopMenuAction top_menu_pending_action;  /* see ui_poll_top_menu_action() */
+
+    /* Modal dialogs (Keyboard Shortcuts, About -- see ui_open_modal) --
+     * centered, dimmed-overlay, drawn last so they sit above literally
+     * everything else including the top menu bar itself. Only one can be
+     * open at a time, matching every other exclusive-focus/open state in
+     * this file. */
+    ModalKind open_modal;
 } UIState;
 
 static UIState g_ui;
@@ -502,24 +527,79 @@ static void draw_branding_bar(void) {
     ui_text_draw(w1 + pad_x, text_y, t2, g_ui.font_bold, brand_font, 1.0f, 1.0f, 1.0f, 1.0f);
 }
 
+static const char *TOP_MENU_NAMES[4] = { "File", "Edit", "View", "Help" };
+#define TOP_MENU_MAX_ROWS 4
+
+/* Computes the top menu bar's i'th label rect -- shared by draw_menu_row
+ * and its own hit-test (see ui_on_mouse_button) so they can never
+ * disagree about where a label actually is, same "one source of truth"
+ * pattern this file's other menus already use (type_icon_rect,
+ * build_ctx_menu_rows). */
+static void top_menu_label_rect(int index, float *out_x, float *out_w) {
+    float x = 6.0f;
+    for (int i = 0; i < index; i++) {
+        x += font_text_width(g_ui.font_body, TOP_MENU_NAMES[i], UI_FONT_SIZE) + 20.0f;
+    }
+    *out_x = x;
+    *out_w = font_text_width(g_ui.font_body, TOP_MENU_NAMES[index], UI_FONT_SIZE) + 20.0f;
+}
+
+/* Row action tag: TOP_ROW_ACTION rows bubble up to main.c via
+ * ui_poll_top_menu_action (Save/Load, real file/asset I/O main.c owns);
+ * TOP_ROW_MODAL_* rows open a modal entirely within ui.c, no main.c-side
+ * action needed (Keyboard Shortcuts/About are pure UI, nothing to do or
+ * undo); TOP_ROW_NONE is a non-interactive placeholder (Edit/View have
+ * nothing real yet). */
+typedef enum { TOP_ROW_NONE = 0, TOP_ROW_ACTION, TOP_ROW_MODAL_SHORTCUTS, TOP_ROW_MODAL_ABOUT } TopRowKind;
+
+/* Single source of truth for a dropdown's row content -- used by both the
+ * draw pass and the hit-test pass, same discipline build_ctx_menu_rows/
+ * properties_panel_walk already established in this file. */
+static int build_top_menu_dropdown_rows(TopMenu which, const char *items[TOP_MENU_MAX_ROWS],
+                                         TopMenuAction actions[TOP_MENU_MAX_ROWS], TopRowKind kinds[TOP_MENU_MAX_ROWS]) {
+    int n = 0;
+    switch (which) {
+        case TOP_MENU_FILE:
+            items[n] = "Save"; actions[n] = TOP_ACTION_FILE_SAVE; kinds[n] = TOP_ROW_ACTION; n++;
+            items[n] = "Load"; actions[n] = TOP_ACTION_FILE_LOAD; kinds[n] = TOP_ROW_ACTION; n++;
+            break;
+        case TOP_MENU_EDIT:
+        case TOP_MENU_VIEW:
+            /* Placeholder -- chrome exists, nothing real behind it yet,
+             * same "proves there's a place for this to land, not a
+             * finished menu" honesty this row set used to carry for the
+             * WHOLE bar before File/Help got real content. */
+            items[n] = "(nothing here yet)"; actions[n] = TOP_ACTION_NONE; kinds[n] = TOP_ROW_NONE; n++;
+            break;
+        case TOP_MENU_HELP:
+            items[n] = "Keyboard Shortcuts"; actions[n] = TOP_ACTION_NONE; kinds[n] = TOP_ROW_MODAL_SHORTCUTS; n++;
+            items[n] = "About";              actions[n] = TOP_ACTION_NONE; kinds[n] = TOP_ROW_MODAL_ABOUT;     n++;
+            break;
+        default: break;
+    }
+    return n;
+}
+
 /* Main menu row, directly under the branding bar — Zenith's dark palette,
- * not float64's (see the palette comment above). Plain labels for now
- * (File/Edit/View/Help, the standard desktop-app set) with no dropdown
- * content yet — this proves the chrome has a place for a real menu system
- * to land in, not a finished menu bar. */
+ * not float64's (see the palette comment above). Real click-to-open
+ * dropdowns now (File/Help have real content; Edit/View are still
+ * placeholders, see build_top_menu_dropdown_rows). */
 static void draw_menu_row(void) {
     float y = UI_BAR_H;
     ui_rect(0, y, (float)g_ui.screen_w, UI_MENU_H, UI_ZEN_PANEL_HD_R, UI_ZEN_PANEL_HD_G, UI_ZEN_PANEL_HD_B, 1.0f);
     ui_rect(0, y + UI_MENU_H - 1.0f, (float)g_ui.screen_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
 
-    static const char *items[] = { "File", "Edit", "View", "Help" };
-    float x = 6.0f;
     float text_y = y + (UI_MENU_H - UI_FONT_SIZE) * 0.35f + 2.0f;
-    for (int i = 0; i < (int)(sizeof(items) / sizeof(items[0])); i++) {
-        float w = font_text_width(g_ui.font_body, items[i], UI_FONT_SIZE) + 20.0f;
-        ui_text_draw(x + 10.0f, text_y, items[i], g_ui.font_body, UI_FONT_SIZE,
+    float x = 6.0f;
+    for (int i = 0; i < 4; i++) {
+        float lx, lw;
+        top_menu_label_rect(i, &lx, &lw);
+        if ((TopMenu)(i + 1) == g_ui.top_menu_open) {
+            ui_rect(lx, y, lw, UI_MENU_H, UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 0.25f);
+        }
+        ui_text_draw(lx + 10.0f, text_y, TOP_MENU_NAMES[i], g_ui.font_body, UI_FONT_SIZE,
                      UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
-        x += w;
+        x = lx + lw;
     }
 
     /* Undo/redo, moved here from the branding bar and scaled down to fit
@@ -1683,6 +1763,82 @@ static int build_ctx_menu_rows(const UIRenderContext *ctx, const char *items[CTX
     return n;
 }
 
+/* Generic centered modal box -- dims the whole screen first (so it's
+ * unambiguous the rest of the UI is inert while one is up), then a
+ * bordered panel with a bold title and a list of pre-formatted lines
+ * (monospace, so callers can align columns with plain spaces the way
+ * the old console's own diagnostic output already does elsewhere in
+ * this file). Closing is handled entirely in the hit-test side
+ * (ui_on_mouse_button): any click while a modal is open closes it,
+ * hence the literal "(click anywhere to close)" hint drawn at the
+ * bottom rather than a dedicated close button/row. */
+static void draw_modal_box(const char *title, const char *const *lines, int n_lines, float box_w) {
+    float pad = 16.0f, row_h = 18.0f;
+    float box_h = pad * 2.0f + 30.0f + (float)n_lines * row_h + 26.0f;
+    float box_x = ((float)g_ui.screen_w - box_w) * 0.5f;
+    float box_y = ((float)g_ui.screen_h - box_h) * 0.5f;
+
+    ui_rect(0.0f, 0.0f, (float)g_ui.screen_w, (float)g_ui.screen_h, 0.0f, 0.0f, 0.0f, 0.55f);
+    ui_rect(box_x, box_y, box_w, box_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
+    ui_rect(box_x, box_y, box_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
+    ui_text_draw(box_x + pad, box_y + pad, title, g_ui.font_bold, 16.0f,
+                 UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
+
+    float y = box_y + pad + 30.0f;
+    for (int i = 0; i < n_lines; i++) {
+        ui_text_draw(box_x + pad, y, lines[i], g_ui.font_mono, 13.0f,
+                     UI_ZEN_TEXT_DIM_R, UI_ZEN_TEXT_DIM_G, UI_ZEN_TEXT_DIM_B, 1.0f);
+        y += row_h;
+    }
+    ui_text_draw(box_x + pad, y + 8.0f, "(click anywhere to close)", g_ui.font_body, 12.0f,
+                 UI_ZEN_ACCENT_R, UI_ZEN_ACCENT_G, UI_ZEN_ACCENT_B, 1.0f);
+}
+
+/* Real, verified-accurate shortcut list -- every entry here matches a
+ * real InputState field/typed-char check somewhere in input.c/main.c/
+ * transform_op.c, not a guess at what "should" be bound. Kept as one
+ * static array (not built at runtime) since it never changes based on
+ * app state. */
+static void draw_modal(void) {
+    if (g_ui.open_modal == MODAL_SHORTCUTS) {
+        static const char *lines[] = {
+            "Navigation",
+            "  Middle Mouse Drag         Orbit camera",
+            "  Ctrl + Middle Mouse Drag  Pan camera",
+            "  Scroll Wheel              Zoom (Scene) / scroll whichever panel is hovered",
+            "",
+            "Selection & Mode",
+            "  Left Click                Select an object/light/face, or confirm a menu row",
+            "  Right Click               Open the Scene context menu",
+            "  Tab                       Toggle Object Mode / Edit Mode",
+            "",
+            "Transform (a mesh selected, cursor over the Scene panel)",
+            "  G                         Grab / Move",
+            "  S                         Scale",
+            "  R                         Rotate",
+            "  X / Y / Z                 Lock to that axis (press again to unlock)",
+            "  0-9                       Type an exact rotation angle, Rotate only",
+            "  Enter or Left Click       Confirm the transform",
+            "  Escape or Right Click     Cancel -- restores the original transform exactly",
+            "",
+            "Text fields (Console, Chat, Asset Browser, Properties panel)",
+            "  Enter                     Submit / commit the typed value",
+            "  Up / Down                 Step through Console command history",
+        };
+        draw_modal_box("Keyboard Shortcuts", lines, (int)(sizeof(lines) / sizeof(lines[0])), 560.0f);
+    } else if (g_ui.open_modal == MODAL_ABOUT) {
+        static const char *lines[] = {
+            "A client-authored, server-persisted 3D editor and game engine.",
+            "Native UI in C, live Python scripting via embedded MicroPython,",
+            "glTF-based mesh editing, a deferred renderer, and Claude embedded",
+            "directly in the editor's own Chat panel.",
+            "",
+            "github.com/float64co/Phi",
+        };
+        draw_modal_box("Phi", lines, (int)(sizeof(lines) / sizeof(lines[0])), 480.0f);
+    }
+}
+
 static void walk_and_draw(Area *a, const UIRenderContext *ctx) {
     if (a->kind == AREA_LEAF) { draw_leaf(a, ctx); return; }
     walk_and_draw(a->child[0], ctx);
@@ -1702,6 +1858,31 @@ void ui_render(const UIRenderContext *ctx) {
     glDisable(GL_DEPTH_TEST);
     draw_branding_bar();
     draw_menu_row();
+
+    /* Top menu bar dropdown (File/Edit/View/Help) -- drawn right after
+     * the bar itself so it sits above every panel (already true just by
+     * running after walk_and_draw above) but below modals (drawn last,
+     * see the ctx_menu_open block's own tail below). */
+    if (g_ui.top_menu_open != TOP_MENU_NONE) {
+        float lx, lw;
+        top_menu_label_rect((int)g_ui.top_menu_open - 1, &lx, &lw);
+        float menu_w = 220.0f, row_h = 24.0f;
+        float menu_x = lx, menu_y = UI_BAR_H + UI_MENU_H;
+        const char *items[TOP_MENU_MAX_ROWS];
+        TopMenuAction actions[TOP_MENU_MAX_ROWS];
+        TopRowKind kinds[TOP_MENU_MAX_ROWS];
+        int n = build_top_menu_dropdown_rows(g_ui.top_menu_open, items, actions, kinds);
+        float menu_h = row_h * n;
+        ui_rect(menu_x, menu_y, menu_w, menu_h, UI_ZEN_WIDGET_R, UI_ZEN_WIDGET_G, UI_ZEN_WIDGET_B, 0.98f);
+        ui_rect(menu_x, menu_y, menu_w, 1.0f, UI_ZEN_BORDER_R, UI_ZEN_BORDER_G, UI_ZEN_BORDER_B, 1.0f);
+        for (int i = 0; i < n; i++) {
+            float rr = kinds[i] == TOP_ROW_NONE ? UI_ZEN_TEXT_DIM_R : UI_ZEN_TEXT_R;
+            float rg = kinds[i] == TOP_ROW_NONE ? UI_ZEN_TEXT_DIM_G : UI_ZEN_TEXT_G;
+            float rb = kinds[i] == TOP_ROW_NONE ? UI_ZEN_TEXT_DIM_B : UI_ZEN_TEXT_B;
+            ui_text_draw(menu_x + 10.0f, menu_y + i * row_h + 4.0f, items[i],
+                         g_ui.font_body, 13.0f, rr, rg, rb, 1.0f);
+        }
+    }
 
     /* Border resize highlight -- actively-dragged border wins over a
      * merely-hovered one if somehow both are set (shouldn't happen, but
@@ -1750,6 +1931,12 @@ void ui_render(const UIRenderContext *ctx) {
                          g_ui.font_body, 13.0f, UI_ZEN_TEXT_R, UI_ZEN_TEXT_G, UI_ZEN_TEXT_B, 1.0f);
         }
     }
+
+    /* Modals (Keyboard Shortcuts, About) -- drawn dead last, so they sit
+     * above literally everything else in this function including the top
+     * menu bar's own dropdown just above. */
+    draw_modal();
+
     gl_check("ui_render");
 }
 
@@ -1972,6 +2159,44 @@ static int hit_test_area(Area *a, int x, int y, int button, int pressed, const U
 }
 
 int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderContext *ctx) {
+    /* A modal (Keyboard Shortcuts/About) takes absolute priority -- any
+     * click anywhere closes it and does nothing else this frame, matching
+     * the literal "(click anywhere to close)" hint drawn on it (see
+     * draw_modal_box). */
+    if (g_ui.open_modal != MODAL_NONE) {
+        if (button == 0 && pressed) { g_ui.open_modal = MODAL_NONE; }
+        return 1;
+    }
+
+    if (g_ui.top_menu_open != TOP_MENU_NONE) {
+        float lx, lw;
+        top_menu_label_rect((int)g_ui.top_menu_open - 1, &lx, &lw);
+        float menu_w = 220.0f, row_h = 24.0f;
+        float menu_x = lx, menu_y = UI_BAR_H + UI_MENU_H;
+        const char *items[TOP_MENU_MAX_ROWS];
+        TopMenuAction actions[TOP_MENU_MAX_ROWS];
+        TopRowKind kinds[TOP_MENU_MAX_ROWS];
+        int n = build_top_menu_dropdown_rows(g_ui.top_menu_open, items, actions, kinds);
+        float menu_h = row_h * n;
+        if (button == 0 && pressed) {
+            if (point_in_rect((float)x, (float)y, menu_x, menu_y, menu_w, menu_h)) {
+                int row = (int)(((float)y - menu_y) / row_h);
+                if (row >= 0 && row < n) {
+                    printf("[ui] top menu: '%s'\n", items[row]);
+                    switch (kinds[row]) {
+                        case TOP_ROW_ACTION:          g_ui.top_menu_pending_action = actions[row]; break;
+                        case TOP_ROW_MODAL_SHORTCUTS: g_ui.open_modal = MODAL_SHORTCUTS; break;
+                        case TOP_ROW_MODAL_ABOUT:     g_ui.open_modal = MODAL_ABOUT; break;
+                        default: break;
+                    }
+                }
+            }
+            g_ui.top_menu_open = TOP_MENU_NONE;
+            return 1;
+        }
+        if (button == 1 && pressed) { g_ui.top_menu_open = TOP_MENU_NONE; return 1; }
+    }
+
     if (g_ui.ctx_menu_open) {
         float menu_w = 180.0f, row_h = 24.0f;
         const char *items[CTX_MENU_MAX_ROWS];
@@ -2085,6 +2310,20 @@ int ui_on_mouse_button(int x, int y, int button, int pressed, const UIRenderCont
         }
     }
 
+    /* Top menu bar labels (File/Edit/View/Help) -- opens that dropdown,
+     * closing whichever (if any) was already open. Checked before the
+     * catch-all below swallows the whole top-chrome strip. */
+    if (button == 0 && pressed && (float)y >= UI_BAR_H && (float)y < UI_BAR_H + UI_MENU_H) {
+        for (int i = 0; i < 4; i++) {
+            float lx, lw;
+            top_menu_label_rect(i, &lx, &lw);
+            if ((float)x >= lx && (float)x < lx + lw) {
+                g_ui.top_menu_open = (g_ui.top_menu_open == (TopMenu)(i + 1)) ? TOP_MENU_NONE : (TopMenu)(i + 1);
+                return 1;
+            }
+        }
+    }
+
     if (y < (int)UI_TOP_CHROME_H) return 1;  /* branding bar + menu row claim the whole strip, nothing to route through it yet */
     if (g_ui.root && hit_test_area(g_ui.root, x, y, button, pressed, ctx)) return 1;
     return 0;
@@ -2156,6 +2395,10 @@ void ui_update_prop_edit_text(InputState *inp) {
 
 int ui_is_editing_prop(void) {
     return g_ui.prop_edit_owner != NULL;
+}
+
+int ui_is_modal_open(void) {
+    return g_ui.open_modal != MODAL_NONE;
 }
 
 void ui_on_mouse_move(int x, int y) {
@@ -2232,6 +2475,12 @@ int ui_is_context_menu_open(void) { return g_ui.ctx_menu_open; }
 CtxMenuAction ui_poll_context_menu_action(void) {
     CtxMenuAction a = g_ui.ctx_menu_pending_action;
     g_ui.ctx_menu_pending_action = CTX_ACTION_NONE;
+    return a;
+}
+
+TopMenuAction ui_poll_top_menu_action(void) {
+    TopMenuAction a = g_ui.top_menu_pending_action;
+    g_ui.top_menu_pending_action = TOP_ACTION_NONE;
     return a;
 }
 

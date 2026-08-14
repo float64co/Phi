@@ -245,6 +245,19 @@ int  ui_is_context_menu_open(void);
  * still just report which one was clicked. */
 CtxMenuAction ui_poll_context_menu_action(void);
 
+/* Top menu bar (File/Edit/View/Help, see ui.c's draw_menu_row) -- only
+ * File's two rows actually do anything main.c needs to act on (Save/Load
+ * the selected mesh); Edit/View are placeholder dropdowns for now and
+ * Help's rows (Keyboard Shortcuts/About) open a modal entirely within
+ * ui.c, no main.c-side action needed. Same one-shot "drain it once per
+ * frame" convention as ui_poll_context_menu_action above. */
+typedef enum {
+    TOP_ACTION_NONE = 0,
+    TOP_ACTION_FILE_SAVE,   /* same "begin the Asset Browser's create flow for the selected MeshObject" as the Scene context menu's existing Save as Asset row */
+    TOP_ACTION_FILE_LOAD,   /* same as the Asset Browser panel's own per-row Load button, for whichever asset is currently selected there */
+} TopMenuAction;
+TopMenuAction ui_poll_top_menu_action(void);
+
 /* object_id follows the existing scheme (renderer.h/gbuffer.c): wire-box=3,
  * MeshObjects=4000+id, Lights=5000+id (see main.c's selected_light()).
  * 0xFFFFFFFF = nothing selected. (world=0/ground=1/players=1000+id/
@@ -278,3 +291,11 @@ void ui_update_prop_edit_text(InputState *inp);
  * same "which one thing owns keyboard input right now" priority chain
  * asset_browser/chat focus already slot into. */
 int ui_is_editing_prop(void);
+
+/* True while a modal (Keyboard Shortcuts/About) is open -- main.c checks
+ * this to suppress Scene-panel picking and the G/S/R modal transform
+ * tool's own entry, same reasoning ui_is_editing_prop already gates
+ * those on: a modal owns the whole screen (it dims everything behind it
+ * and any click just closes it, see ui.c's draw_modal_box), so nothing
+ * underneath should react to input while one is up. */
+int ui_is_modal_open(void);
