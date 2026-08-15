@@ -108,6 +108,22 @@ PKT_SET_VERTICES_REPLY         = 0x2D   # C->S: [req_id:u32 ok:u8]
 PKT_DELETE_MESH_OBJECT_REQUEST = 0x2E   # S->C: [req_id:u32 object_id:u32]
 PKT_DELETE_MESH_OBJECT_REPLY   = 0x2F   # C->S: [req_id:u32 ok:u8]
 
+# Incremental mesh editing (see client/net.h's matching comment) -- "the
+# model can see where vertices are, add vertices to an existing mesh, move
+# individual vertices". GET_MESH_VERTICES/GET_MESH_FACES are the read side
+# create_mesh_object/set_mesh_vertices never provided (build-from-scratch
+# or replace-everything-at-the-same-count, never "what's there now").
+PKT_GET_MESH_VERTICES_REQUEST  = 0x30   # S->C: [req_id:u32 object_id:u32]
+PKT_GET_MESH_VERTICES_REPLY    = 0x31   # C->S: [req_id:u32 ok:u8 vert_count:u16 (vert_count*3)*f32]
+PKT_GET_MESH_FACES_REQUEST     = 0x32   # S->C: [req_id:u32 object_id:u32]
+PKT_GET_MESH_FACES_REPLY       = 0x33   # C->S: [req_id:u32 ok:u8 face_count:u16 face_count*{face_index:u16 v0:u16 v1:u16 v2:u16}]
+PKT_ADD_MESH_VERTEX_REQUEST    = 0x34   # S->C: [req_id:u32 object_id:u32 x:f32 y:f32 z:f32]
+PKT_ADD_MESH_VERTEX_REPLY      = 0x35   # C->S: [req_id:u32 ok:u8 vertex_index:u32]
+PKT_ADD_MESH_FACE_REQUEST      = 0x36   # S->C: [req_id:u32 object_id:u32 v0:u16 v1:u16 v2:u16]
+PKT_ADD_MESH_FACE_REPLY        = 0x37   # C->S: [req_id:u32 ok:u8 face_index:u32]
+PKT_SET_MESH_VERTEX_REQUEST    = 0x38   # S->C: [req_id:u32 object_id:u32 vertex_index:u16 x:f32 y:f32 z:f32]
+PKT_SET_MESH_VERTEX_REPLY      = 0x39   # C->S: [req_id:u32 ok:u8]
+
 # Same wire-protocol bounds as client/net.h's own PKT_MESH_MAX_VERTS/
 # PKT_MESH_MAX_TRIS -- must match exactly, or a request this server
 # considers valid could get silently refused (or worse, misparsed) by the
@@ -280,6 +296,68 @@ def pack_delete_mesh_object_request(req_id: int, object_id: int) -> bytes:
     return bytes([PKT_DELETE_MESH_OBJECT_REQUEST]) + struct.pack('<II', req_id, object_id)
 
 def _parse_delete_mesh_object_reply(payload: bytes):
+    if len(payload) < 5: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    return req_id, payload[4] != 0
+
+# ---------------------------------------------------------------------------
+# Incremental mesh editing packet encode/decode (see PKT_GET_MESH_VERTICES_*/
+# PKT_GET_MESH_FACES_*/PKT_ADD_MESH_VERTEX_*/PKT_ADD_MESH_FACE_*/PKT_SET_MESH_
+# VERTEX_* above and client/net.h's matching comment).
+# ---------------------------------------------------------------------------
+def pack_get_mesh_vertices_request(req_id: int, object_id: int) -> bytes:
+    return bytes([PKT_GET_MESH_VERTICES_REQUEST]) + struct.pack('<II', req_id, object_id)
+
+def _parse_get_mesh_vertices_reply(payload: bytes):
+    if len(payload) < 7: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    ok = payload[4] != 0
+    vert_count = struct.unpack_from('<H', payload, 5)[0]
+    if len(payload) < 7 + vert_count * 3 * 4: return None
+    positions = list(struct.unpack_from(f'<{vert_count * 3}f', payload, 7)) if vert_count else []
+    return req_id, ok, positions
+
+def pack_get_mesh_faces_request(req_id: int, object_id: int) -> bytes:
+    return bytes([PKT_GET_MESH_FACES_REQUEST]) + struct.pack('<II', req_id, object_id)
+
+def _parse_get_mesh_faces_reply(payload: bytes):
+    if len(payload) < 7: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    ok = payload[4] != 0
+    face_count = struct.unpack_from('<H', payload, 5)[0]
+    if len(payload) < 7 + face_count * 8: return None
+    faces = []
+    off = 7
+    for _ in range(face_count):
+        face_index, v0, v1, v2 = struct.unpack_from('<HHHH', payload, off)
+        faces.append((face_index, (v0, v1, v2)))
+        off += 8
+    return req_id, ok, faces
+
+def pack_add_mesh_vertex_request(req_id: int, object_id: int, x: float, y: float, z: float) -> bytes:
+    return bytes([PKT_ADD_MESH_VERTEX_REQUEST]) + struct.pack('<IIfff', req_id, object_id, x, y, z)
+
+def _parse_add_mesh_vertex_reply(payload: bytes):
+    if len(payload) < 9: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    ok = payload[4] != 0
+    vertex_index = struct.unpack_from('<I', payload, 5)[0]
+    return req_id, ok, vertex_index
+
+def pack_add_mesh_face_request(req_id: int, object_id: int, v0: int, v1: int, v2: int) -> bytes:
+    return bytes([PKT_ADD_MESH_FACE_REQUEST]) + struct.pack('<IIHHH', req_id, object_id, v0, v1, v2)
+
+def _parse_add_mesh_face_reply(payload: bytes):
+    if len(payload) < 9: return None
+    req_id = struct.unpack_from('<I', payload, 0)[0]
+    ok = payload[4] != 0
+    face_index = struct.unpack_from('<I', payload, 5)[0]
+    return req_id, ok, face_index
+
+def pack_set_mesh_vertex_request(req_id: int, object_id: int, vertex_index: int, x: float, y: float, z: float) -> bytes:
+    return bytes([PKT_SET_MESH_VERTEX_REQUEST]) + struct.pack('<IIHfff', req_id, object_id, vertex_index, x, y, z)
+
+def _parse_set_mesh_vertex_reply(payload: bytes):
     if len(payload) < 5: return None
     req_id = struct.unpack_from('<I', payload, 0)[0]
     return req_id, payload[4] != 0
@@ -548,6 +626,53 @@ class Client:
         packet = pack_delete_mesh_object_request(req_id, object_id)
         return self._send_and_wait(req_id, packet, timeout)
 
+    def get_mesh_vertices(self, object_id: int, timeout: float = 5.0):
+        """Returns (ok, positions) -- positions is a flat [x0,y0,z0,...]
+        list (empty if ok is False: no such object, or it has no editable
+        geometry), or None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        packet = pack_get_mesh_vertices_request(req_id, object_id)
+        result = self._send_and_wait(req_id, packet, timeout)
+        return (result[1], result[2]) if result else None
+
+    def get_mesh_faces(self, object_id: int, timeout: float = 5.0):
+        """Returns (ok, faces) -- faces is a list of (face_index,
+        (v0, v1, v2)) pairs (face_index is what add_mesh_face/a future
+        delete would need, NOT just this list's position -- see net.h),
+        or None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        packet = pack_get_mesh_faces_request(req_id, object_id)
+        result = self._send_and_wait(req_id, packet, timeout)
+        return (result[1], result[2]) if result else None
+
+    def add_mesh_vertex(self, object_id: int, x: float, y: float, z: float, timeout: float = 5.0):
+        """Adds ONE new vertex to an EXISTING object's live geometry
+        (unlike create_mesh_object, which builds a whole new object).
+        Returns (ok, vertex_index) -- the new vertex is invisible until a
+        face references it, see add_mesh_face -- or None on timeout/
+        disconnect."""
+        req_id = self._alloc_req_id()
+        packet = pack_add_mesh_vertex_request(req_id, object_id, x, y, z)
+        return self._send_and_wait(req_id, packet, timeout)
+
+    def add_mesh_face(self, object_id: int, v0: int, v1: int, v2: int, timeout: float = 5.0):
+        """Adds ONE new triangular face to an existing object, referencing
+        3 vertex indices that must already exist (from the object's
+        original geometry or a prior add_mesh_vertex call). Returns (ok,
+        face_index), or None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        packet = pack_add_mesh_face_request(req_id, object_id, v0, v1, v2)
+        return self._send_and_wait(req_id, packet, timeout)
+
+    def set_mesh_vertex(self, object_id: int, vertex_index: int, x: float, y: float, z: float, timeout: float = 5.0):
+        """Moves ONE existing vertex by index -- unlike set_mesh_vertices,
+        which replaces the whole array at once, this is the tool for
+        nudging a single corner. Returns True/False (False if no such
+        object/vertex), or None on timeout/disconnect."""
+        req_id = self._alloc_req_id()
+        packet = pack_set_mesh_vertex_request(req_id, object_id, vertex_index, x, y, z)
+        return self._send_and_wait(req_id, packet, timeout)
+
     def _handle_chat(self, user_text: str):
         """Runs on its own thread (spawned by _on_message on PKT_CHAT_MSG)
         since a real Anthropic round trip -- itself potentially blocking on
@@ -658,6 +783,75 @@ class Client:
             if result is None:
                 return '(the client did not respond in time -- it may be disconnected or busy)'
             return 'ok' if result else f'failed -- no MeshObject with id {object_id}'
+
+        # Incremental mesh editing tools (see phi.md -- "the model can see
+        # where vertices are, add vertices to an existing mesh, move
+        # individual vertices"). Distinct from create_mesh_object/
+        # set_mesh_vertices above: those replace a whole object (build
+        # from scratch, or same-vertex-count rewrite); these grow/nudge
+        # EXISTING geometry one piece at a time.
+        def tool_get_mesh_vertices(input_):
+            object_id = int(input_['object_id'])
+            result = self.get_mesh_vertices(object_id)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            ok, positions = result
+            if not ok:
+                return f'failed -- no MeshObject with id {object_id}, or it has no editable geometry'
+            n = len(positions) // 3
+            if n == 0:
+                return '(0 vertices)'
+            return f'{n} vertices: ' + ', '.join(
+                f'{i}=({positions[i*3]:.3f},{positions[i*3+1]:.3f},{positions[i*3+2]:.3f})'
+                for i in range(n)
+            )
+
+        def tool_get_mesh_faces(input_):
+            object_id = int(input_['object_id'])
+            result = self.get_mesh_faces(object_id)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            ok, faces = result
+            if not ok:
+                return f'failed -- no MeshObject with id {object_id}, or it has no editable geometry'
+            if not faces:
+                return '(0 live faces)'
+            return f'{len(faces)} faces: ' + ', '.join(f'{fi}=({v[0]},{v[1]},{v[2]})' for fi, v in faces)
+
+        def tool_add_mesh_vertex(input_):
+            object_id = int(input_['object_id'])
+            x = float(input_['x']); y = float(input_['y']); z = float(input_['z'])
+            result = self.add_mesh_vertex(object_id, x, y, z)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            ok, vertex_index = result
+            if not ok:
+                return f'failed -- no MeshObject with id {object_id}, or it has no editable geometry'
+            return f'added vertex_index={vertex_index} -- invisible until a face references it, call add_mesh_face next'
+
+        def tool_add_mesh_face(input_):
+            object_id = int(input_['object_id'])
+            v0 = int(input_['v0']); v1 = int(input_['v1']); v2 = int(input_['v2'])
+            result = self.add_mesh_face(object_id, v0, v1, v2)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            ok, face_index = result
+            return f'created face_index={face_index}' if ok else (
+                f'failed -- either no MeshObject with id {object_id} exists, or one of '
+                f'{v0},{v1},{v2} is not a valid existing vertex index (check get_mesh_vertices first)'
+            )
+
+        def tool_set_mesh_vertex(input_):
+            object_id = int(input_['object_id'])
+            vertex_index = int(input_['vertex_index'])
+            x = float(input_['x']); y = float(input_['y']); z = float(input_['z'])
+            result = self.set_mesh_vertex(object_id, vertex_index, x, y, z)
+            if result is None:
+                return '(the client did not respond in time -- it may be disconnected or busy)'
+            return 'ok' if result else (
+                f'failed -- either no MeshObject with id {object_id} exists, or vertex_index '
+                f'{vertex_index} is out of range (check get_mesh_vertices first)'
+            )
 
         tools = [
             {
@@ -818,6 +1012,106 @@ class Client:
                     'required': ['object_id'],
                 },
             },
+            {
+                'name': 'get_mesh_vertices',
+                'description': (
+                    "See exactly where every vertex of an existing "
+                    "MeshObject currently is, as a real read of the "
+                    "running client's live geometry (not a guess from "
+                    "vert_count alone). Call this before add_mesh_vertex/"
+                    "add_mesh_face/set_mesh_vertex if you don't already "
+                    "know the object's current vertex positions -- "
+                    "indices are stable and match what set_mesh_vertices/"
+                    "set_mesh_vertex expect."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {'object_id': {'type': 'integer'}},
+                    'required': ['object_id'],
+                },
+            },
+            {
+                'name': 'get_mesh_faces',
+                'description': (
+                    "See the current triangle topology of an existing "
+                    "MeshObject -- each entry is (face_index, (v0, v1, "
+                    "v2)), where face_index is what a future edit call "
+                    "would need (NOT just this list's position -- faces "
+                    "can have gaps from earlier deletions) and v0/v1/v2 "
+                    "are vertex indices matching get_mesh_vertices. "
+                    "Useful before add_mesh_face, to see how existing "
+                    "geometry connects."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {'object_id': {'type': 'integer'}},
+                    'required': ['object_id'],
+                },
+            },
+            {
+                'name': 'add_mesh_vertex',
+                'description': (
+                    "Add ONE new vertex to an EXISTING MeshObject's live "
+                    "geometry, growing it rather than replacing it "
+                    "(unlike create_mesh_object, which builds a whole new "
+                    "object from scratch). Returns the new vertex's "
+                    "index. The new vertex is invisible until at least "
+                    "one face references it -- call add_mesh_face right "
+                    "after with this index to connect it into the "
+                    "visible mesh (e.g. to give a house a roof peak, add "
+                    "the peak vertex here, then add_mesh_face triangles "
+                    "from the existing top edge up to it)."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {
+                        'object_id': {'type': 'integer'},
+                        'x': {'type': 'number'}, 'y': {'type': 'number'}, 'z': {'type': 'number'},
+                    },
+                    'required': ['object_id', 'x', 'y', 'z'],
+                },
+            },
+            {
+                'name': 'add_mesh_face',
+                'description': (
+                    "Add ONE new triangular face to an existing "
+                    "MeshObject, referencing 3 vertex indices that must "
+                    "already exist (from the object's original geometry, "
+                    "seen via get_mesh_vertices, or a vertex you just "
+                    "created with add_mesh_vertex). This is how a newly-"
+                    "added vertex actually becomes visible geometry. "
+                    "Returns the new face's index."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {
+                        'object_id': {'type': 'integer'},
+                        'v0': {'type': 'integer'}, 'v1': {'type': 'integer'}, 'v2': {'type': 'integer'},
+                    },
+                    'required': ['object_id', 'v0', 'v1', 'v2'],
+                },
+            },
+            {
+                'name': 'set_mesh_vertex',
+                'description': (
+                    "Move ONE existing vertex of a MeshObject to a new "
+                    "position, by index -- unlike set_mesh_vertices "
+                    "(which replaces every vertex at once and needs the "
+                    "exact same count), this nudges a single corner "
+                    "without touching the rest of the mesh. Get the "
+                    "vertex's current index/position from get_mesh_"
+                    "vertices first."
+                ),
+                'input_schema': {
+                    'type': 'object',
+                    'properties': {
+                        'object_id': {'type': 'integer'},
+                        'vertex_index': {'type': 'integer'},
+                        'x': {'type': 'number'}, 'y': {'type': 'number'}, 'z': {'type': 'number'},
+                    },
+                    'required': ['object_id', 'vertex_index', 'x', 'y', 'z'],
+                },
+            },
         ]
         dispatch = {
             'get_asset_list': tool_get_asset_list,
@@ -829,6 +1123,11 @@ class Client:
             'create_mesh_object': tool_create_mesh_object,
             'set_mesh_vertices': tool_set_mesh_vertices,
             'delete_mesh_object': tool_delete_mesh_object,
+            'get_mesh_vertices': tool_get_mesh_vertices,
+            'get_mesh_faces': tool_get_mesh_faces,
+            'add_mesh_vertex': tool_add_mesh_vertex,
+            'add_mesh_face': tool_add_mesh_face,
+            'set_mesh_vertex': tool_set_mesh_vertex,
         }
         system = (
             "You are Claude, embedded as a first-class participant inside "
@@ -843,19 +1142,30 @@ class Client:
             "about the current scene/object state rather than guessing or "
             "making something up. You can also ACT: add_light/"
             "set_light_property/delete_light/set_render_samples/"
-            "create_mesh_object/set_mesh_vertices/delete_mesh_object "
-            "actually change the running client's live scene, not just "
-            "describe it -- use them freely when the user asks you to set "
-            "up lighting, adjust render settings, or create/edit "
-            "geometry, you don't need to ask permission first for these "
-            "specifically. create_mesh_object builds real geometry from "
-            "positions+indices you compute yourself (e.g. for a "
-            "procedural shape the user describes) -- call get_scene_state "
-            "first if you need an existing object's id or vertex count "
-            "before editing it with set_mesh_vertices. Assets (the Asset "
-            "Browser's library) are still read-only from here. Keep "
-            "replies concise: this renders in a small in-editor chat box, "
-            "not a document."
+            "create_mesh_object/set_mesh_vertices/delete_mesh_object/"
+            "get_mesh_vertices/get_mesh_faces/add_mesh_vertex/add_mesh_"
+            "face/set_mesh_vertex actually change the running client's "
+            "live scene, not just describe it -- use them freely when the "
+            "user asks you to set up lighting, adjust render settings, or "
+            "create/edit geometry, you don't need to ask permission first "
+            "for these specifically. create_mesh_object builds real "
+            "geometry from positions+indices you compute yourself (e.g. "
+            "for a procedural shape the user describes) -- call get_"
+            "scene_state first if you need an existing object's id or "
+            "vertex count. For editing an EXISTING object incrementally "
+            "rather than replacing it wholesale: get_mesh_vertices/get_"
+            "mesh_faces show you exactly what's there now (don't guess "
+            "positions or indices), add_mesh_vertex adds a new point "
+            "(invisible until add_mesh_face connects it to the mesh), and "
+            "set_mesh_vertex nudges one existing corner without touching "
+            "the rest -- prefer these over create_mesh_object+delete_"
+            "mesh_object when the user is asking to modify part of an "
+            "object rather than replace it outright (e.g. \"add a "
+            "chimney\" or \"move this corner\" vs. \"turn this into a "
+            "house\", which is more naturally a full replacement). Assets "
+            "(the Asset Browser's library) are still read-only from here. "
+            "Keep replies concise: this renders in a small in-editor chat "
+            "box, not a document."
         )
         try:
             reply = model_display_name(DEFAULT_MODEL) + ': ' + run_tool_loop(system, user_text, tools, dispatch)
@@ -976,6 +1286,46 @@ class Client:
             parsed = _parse_delete_mesh_object_reply(payload)
             if parsed is None:
                 log.info(f'Client {self.pid}: malformed PKT_DELETE_MESH_OBJECT_REPLY')
+            else:
+                req_id, ok = parsed
+                self._resolve_pending(req_id, ok)
+
+        elif t == PKT_GET_MESH_VERTICES_REPLY:
+            parsed = _parse_get_mesh_vertices_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_GET_MESH_VERTICES_REPLY')
+            else:
+                req_id, ok, positions = parsed
+                self._resolve_pending(req_id, (ok, positions))
+
+        elif t == PKT_GET_MESH_FACES_REPLY:
+            parsed = _parse_get_mesh_faces_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_GET_MESH_FACES_REPLY')
+            else:
+                req_id, ok, faces = parsed
+                self._resolve_pending(req_id, (ok, faces))
+
+        elif t == PKT_ADD_MESH_VERTEX_REPLY:
+            parsed = _parse_add_mesh_vertex_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_ADD_MESH_VERTEX_REPLY')
+            else:
+                req_id, ok, vertex_index = parsed
+                self._resolve_pending(req_id, (ok, vertex_index))
+
+        elif t == PKT_ADD_MESH_FACE_REPLY:
+            parsed = _parse_add_mesh_face_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_ADD_MESH_FACE_REPLY')
+            else:
+                req_id, ok, face_index = parsed
+                self._resolve_pending(req_id, (ok, face_index))
+
+        elif t == PKT_SET_MESH_VERTEX_REPLY:
+            parsed = _parse_set_mesh_vertex_reply(payload)
+            if parsed is None:
+                log.info(f'Client {self.pid}: malformed PKT_SET_MESH_VERTEX_REPLY')
             else:
                 req_id, ok = parsed
                 self._resolve_pending(req_id, ok)

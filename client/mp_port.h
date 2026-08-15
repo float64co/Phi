@@ -91,6 +91,36 @@ void phi_mp_register_render_callback(int (*cb)(char *out_path, size_t cap));
  * is a real, unsurprising outcome, not a usage error. */
 void phi_mp_register_ragdoll_callback(int (*cb)(void));
 
+/* Registers real playback control over main.c's g_skinned_test_obj (the
+ * one existing SkinnedMeshObject slot, see phi.md's Phase 4 status --
+ * this codebase has no multi-object registry for skinned meshes yet, the
+ * same "single global slot" stage MeshObject itself was at before Phase
+ * 5's real scene_objects.c registry landed) -- same function-pointer-
+ * handoff shape phi_mp_register_render_callback/_ragdoll_callback above
+ * already use. Real, honestly-scoped gap this closes: this engine had
+ * real C-side Armature/AnimClip/Playback and GPU skinning with ZERO
+ * Python bindings before this.
+ *   play(clip_name, loop): clip_name NULL/empty picks clip 0 if any
+ *     exist; returns 1 on success, 0 if nothing loaded or no such clip.
+ *   set_playing/get_playing: pause/resume without restarting from time 0
+ *     (unlike play, which always restarts).
+ *   get_time/set_time: read/scrub the current playback time in seconds;
+ *     set_time returns 0 if nothing is currently playing (no clip to
+ *     scrub).
+ *   list_clips(out_names, out_durations, max_clips): fills up to
+ *     max_clips entries (each name up to 63 chars + NUL), returns how
+ *     many were written -- so a script (or Claude) can discover real
+ *     clip names instead of guessing them, the same reason phi.md's
+ *     Phase 6 section gives for phi.node_types() existing. */
+void phi_mp_register_animation_callbacks(
+    int   (*play)(const char *clip_name, int loop),
+    void  (*set_playing)(int playing),
+    int   (*get_playing)(void),
+    float (*get_time)(void),
+    int   (*set_time)(float t),
+    int   (*list_clips)(char out_names[][64], float *out_durations, int max_clips)
+);
+
 /* Number of currently-registered @phi.panel classes. Panels are captured
  * (name + a freshly instantiated, cached instance) the moment their
  * decorator runs, via a native callback the bootstrap's @phi.panel

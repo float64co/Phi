@@ -1,0 +1,2 @@
+Vendored from SDL2 release-2.30.0 (https://github.com/libsdl-org/SDL/releases/tag/release-2.30.0)
+Subset: joystick + gamecontroller subsystem and their real dependency closure (see client/vendor/SDL2/HOW_VENDORED.md).

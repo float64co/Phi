@@ -40,6 +40,7 @@
 #include "halfedge_gltf.h"
 #include "scene_objects.h"
 #include "mesh_edit.h"
+#include "node_graph.h"
 
 mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
     mp_raise_OSError(ENOENT);
@@ -610,6 +611,47 @@ static mp_obj_t native_delete_face(mp_obj_t id_obj, mp_obj_t face_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(native_delete_face_obj, native_delete_face);
 
+/* Sets an ARBITRARY face's real PBR material (halfedge_set_face_material,
+ * see halfedge.h) -- distinct from phi.prop_set('face', ...), which only
+ * ever targets the currently UI-selected face (see scene_target.c) and
+ * can't be driven by a script pointing at a specific object_id+face_index
+ * it already knows. Built for Phase 6's shader nodes (principled_bsdf/
+ * emission, see PHI_BOOTSTRAP below) to have something real to apply
+ * their computed material to even with no node-graph editor panel yet --
+ * without this, a shader graph's result could be computed but never
+ * actually reach real geometry. halfedge_set_face_material itself
+ * silently no-ops on a bad face index; validated here instead so a bad
+ * call raises a real ValueError rather than doing nothing observably. */
+static mp_obj_t native_set_face_material(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int id = mp_obj_get_int(args[0]);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.set_face_material: no such object (or it has no editable geometry)"));
+    }
+    int f = mp_obj_get_int(args[1]);
+    if (f < 0 || f >= obj->hem->face_count || obj->hem->faces[f].deleted) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.set_face_material: no such face (out of range, or already deleted)"));
+    }
+    size_t n; mp_obj_t *items;
+    mp_obj_get_array(args[2], &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.set_face_material: base_color must be a 3-element [r,g,b] sequence"));
+    float base_color[3] = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    float metallic = (float)mp_obj_get_float(args[3]);
+    float roughness = (float)mp_obj_get_float(args[4]);
+    mp_obj_get_array(args[5], &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.set_face_material: emission must be a 3-element [r,g,b] sequence"));
+    float emission[3] = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    halfedge_set_face_material(obj->hem, f, base_color, metallic, roughness, emission);
+    /* Material is baked per-vertex into MESHOBJ_VERTEX_STRIDE at flatten
+     * time, not sampled from HEFace at draw time -- rebuild so the change
+     * is actually visible, same reasoning every other geometry-mutating
+     * binding in this file already follows. */
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_set_face_material_obj, 6, 6, native_set_face_material);
+
 /* Whole-object winding flip (mesh_edit_flip_normals, see mesh_edit.h for
  * why this is the safe granularity -- flipping a single face's winding
  * without its neighbors breaks half-edge twin consistency). Returns the
@@ -738,6 +780,99 @@ static mp_obj_t native_activate_ragdoll(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(native_activate_ragdoll_obj, native_activate_ragdoll);
 
+/* ---- Animation playback control, exposed to Python (see mp_port.h's
+ * phi_mp_register_animation_callbacks) -- operates on main.c's single
+ * g_skinned_test_obj slot, same function-pointer-handoff shape phi.
+ * render()/phi.activate_ragdoll() above already use. Real gap this
+ * closes: real C-side Armature/AnimClip/Playback/GPU skinning existed
+ * with zero Python bindings before this. ---- */
+static int   (*s_anim_play)(const char *clip_name, int loop) = NULL;
+static void  (*s_anim_set_playing)(int playing) = NULL;
+static int   (*s_anim_get_playing)(void) = NULL;
+static float (*s_anim_get_time)(void) = NULL;
+static int   (*s_anim_set_time)(float t) = NULL;
+static int   (*s_anim_list_clips)(char out_names[][64], float *out_durations, int max_clips) = NULL;
+
+void phi_mp_register_animation_callbacks(
+    int   (*play)(const char *clip_name, int loop),
+    void  (*set_playing)(int playing),
+    int   (*get_playing)(void),
+    float (*get_time)(void),
+    int   (*set_time)(float t),
+    int   (*list_clips)(char out_names[][64], float *out_durations, int max_clips)
+) {
+    s_anim_play = play;
+    s_anim_set_playing = set_playing;
+    s_anim_get_playing = get_playing;
+    s_anim_get_time = get_time;
+    s_anim_set_time = set_time;
+    s_anim_list_clips = list_clips;
+}
+
+/* clip_name defaults to None (picks clip 0 if any exist), loop defaults
+ * to True -- native, not a Python-level default-arg wrapper, matching
+ * native_mesh_object/native_create_mesh's own optional-trailing-args
+ * convention elsewhere in this file. */
+static mp_obj_t native_play_animation(size_t n_args, const mp_obj_t *args) {
+    const char *name = NULL;
+    int loop = 1;
+    if (n_args > 0 && args[0] != mp_const_none) name = mp_obj_str_get_str(args[0]);
+    if (n_args > 1) loop = mp_obj_is_true(args[1]);
+    if (!s_anim_play) mp_raise_ValueError(MP_ERROR_TEXT("phi.play_animation: not available yet"));
+    if (!s_anim_play(name, loop)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.play_animation: no skinned object loaded, or no clip with that name (see phi.list_animation_clips)"));
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_play_animation_obj, 0, 2, native_play_animation);
+
+static mp_obj_t native_pause_animation(void) {
+    if (s_anim_set_playing) s_anim_set_playing(0);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_pause_animation_obj, native_pause_animation);
+
+static mp_obj_t native_resume_animation(void) {
+    if (s_anim_set_playing) s_anim_set_playing(1);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_resume_animation_obj, native_resume_animation);
+
+static mp_obj_t native_is_animation_playing(void) {
+    return (s_anim_get_playing && s_anim_get_playing()) ? mp_const_true : mp_const_false;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_is_animation_playing_obj, native_is_animation_playing);
+
+static mp_obj_t native_get_animation_time(void) {
+    return mp_obj_new_float(s_anim_get_time ? (mp_float_t)s_anim_get_time() : (mp_float_t)0.0);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_get_animation_time_obj, native_get_animation_time);
+
+static mp_obj_t native_set_animation_time(mp_obj_t t_obj) {
+    float t = (float)mp_obj_get_float(t_obj);
+    if (!s_anim_set_time || !s_anim_set_time(t)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.set_animation_time: nothing is currently playing to scrub (call phi.play_animation first)"));
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_set_animation_time_obj, native_set_animation_time);
+
+/* One (name, duration) pair per real loaded clip -- so a script (or
+ * Claude) can discover real clip names instead of guessing them, same
+ * reasoning phi.md's Phase 6 section gives for phi.node_types() existing. */
+static mp_obj_t native_list_animation_clips(void) {
+    char names[8][64];
+    float durations[8];
+    int n = s_anim_list_clips ? s_anim_list_clips(names, durations, 8) : 0;
+    mp_obj_t items[8];
+    for (int i = 0; i < n; i++) {
+        mp_obj_t pair[2] = { mp_obj_new_str(names[i], strlen(names[i])), mp_obj_new_float((mp_float_t)durations[i]) };
+        items[i] = mp_obj_new_tuple(2, pair);
+    }
+    return mp_obj_new_tuple((size_t)n, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_list_animation_clips_obj, native_list_animation_clips);
+
 /* ---- @phi.panel registry (C side) --
  * Captured eagerly the moment a panel's decorator runs (see
  * native_panel_registered below, called from PHI_BOOTSTRAP's @panel
@@ -787,6 +922,287 @@ static mp_obj_t native_panel_registered(mp_obj_t name_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(native_panel_registered_obj, native_panel_registered);
 
+/* ---- Phase 6's node graphs, exposed to Python (node_graph.h) -- see
+ * phi.md's "Geometry and Animation Nodes". @phi.node registers a node
+ * TYPE (name/inputs/outputs/category/fn) into the registry below, the
+ * same "capture everything at decoration time" shape @phi.panel/
+ * native_panel_registered already established just above. phi.Graph (a
+ * plain Python class in PHI_BOOTSTRAP, see its own comment further down)
+ * wraps an integer graph id into node_graph.c's own C-owned PhiGraph
+ * registry, the identical "opaque id into a C array" idiom MeshObject/
+ * PhiLight ids already use throughout this codebase -- NOT a native
+ * MicroPython type written in C (no make_new/locals-dict machinery),
+ * which this embedding has never needed before and doesn't need here
+ * either: a handful of free functions plus a thin Python-side wrapper
+ * class is simpler and lower-risk than hand-writing a real mp_obj_type_t.
+ *
+ * native_graph_evaluate is the one place in this whole feature that
+ * legitimately touches BOTH node_graph.c's topology and live mp_obj_t
+ * Python values -- every value it produces (each node's real return
+ * value, resolved link inputs) lives only in that function's own C-
+ * stack-local arrays for the duration of one evaluate() call, never
+ * stored back into node_graph.c itself (see node_graph.h's file comment
+ * on why that split exists). ---- */
+
+#define PHI_MP_MAX_NODE_TYPES 32
+
+typedef struct {
+    char     name[64];
+    mp_obj_t inputs;    /* the original @phi.node(inputs=...) list, verbatim -- see phi.node_types() below */
+    mp_obj_t outputs;   /* same, outputs= */
+    mp_obj_t category;  /* a Python str */
+    mp_obj_t fn;        /* the wrapped function itself, called by native_graph_evaluate */
+} PhiMpNodeType;
+
+static PhiMpNodeType s_node_types[PHI_MP_MAX_NODE_TYPES];
+static int           s_node_type_count = 0;
+
+static PhiMpNodeType *find_node_type(const char *name) {
+    for (int i = 0; i < s_node_type_count; i++) {
+        if (strcmp(s_node_types[i].name, name) == 0) return &s_node_types[i];
+    }
+    return NULL;
+}
+
+static mp_obj_t native_node_registered(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    const char *name = mp_obj_str_get_str(args[0]);
+    PhiMpNodeType *nt = find_node_type(name);
+    if (!nt) {
+        if (s_node_type_count >= PHI_MP_MAX_NODE_TYPES) {
+            printf("[mp_port] @phi.node('%s'): registry full (max %d), ignored\n", name, PHI_MP_MAX_NODE_TYPES);
+            return mp_const_none;
+        }
+        nt = &s_node_types[s_node_type_count++];
+    }
+    strncpy(nt->name, name, sizeof(nt->name) - 1);
+    nt->name[sizeof(nt->name) - 1] = 0;
+    nt->inputs = args[1];
+    nt->outputs = args[2];
+    nt->category = args[3];
+    nt->fn = args[4];
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_node_registered_obj, 5, 5, native_node_registered);
+
+/* phi.node_types() -- introspection so a script (or an LLM working in a
+ * running instance) can discover what's registered before building a
+ * graph, per phi.md's own stated reason for this call existing. Rebuilds
+ * a fresh dict from the registry every call rather than caching one --
+ * this registry only grows a handful of times at startup, not a hot path. */
+static mp_obj_t native_node_types(void) {
+    mp_obj_t dict = mp_obj_new_dict((size_t)s_node_type_count);
+    for (int i = 0; i < s_node_type_count; i++) {
+        mp_obj_t entry = mp_obj_new_dict(3);
+        mp_obj_dict_store(entry, mp_obj_new_str("inputs", 6), s_node_types[i].inputs);
+        mp_obj_dict_store(entry, mp_obj_new_str("outputs", 7), s_node_types[i].outputs);
+        mp_obj_dict_store(entry, mp_obj_new_str("category", 8), s_node_types[i].category);
+        mp_obj_dict_store(dict, mp_obj_new_str(s_node_types[i].name, strlen(s_node_types[i].name)), entry);
+    }
+    return dict;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_node_types_obj, native_node_types);
+
+static mp_obj_t native_graph_create(mp_obj_t kind_obj) {
+    const char *kind_str = mp_obj_str_get_str(kind_obj);
+    PhiGraphKind kind = (strcmp(kind_str, "animation") == 0) ? PHI_GRAPH_KIND_ANIMATION : PHI_GRAPH_KIND_GEOMETRY;
+    int gid = phi_graph_create(kind);
+    if (gid < 0) mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph: graph registry is full (PHI_GRAPH_MAX_GRAPHS)"));
+    return mp_obj_new_int(gid);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_graph_create_obj, native_graph_create);
+
+static mp_obj_t native_graph_add_node(mp_obj_t gid_obj, mp_obj_t type_name_obj) {
+    int gid = mp_obj_get_int(gid_obj);
+    const char *type_name = mp_obj_str_get_str(type_name_obj);
+    int idx = phi_graph_add_node(gid, type_name);
+    if (idx < 0) mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph.add_node: no such graph, or it's full (PHI_GRAPH_MAX_NODES)"));
+    return mp_obj_new_int(idx);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_graph_add_node_obj, native_graph_add_node);
+
+static mp_obj_t native_graph_set_param_float(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int gid = mp_obj_get_int(args[0]);
+    int idx = mp_obj_get_int(args[1]);
+    const char *name = mp_obj_str_get_str(args[2]);
+    float value = (float)mp_obj_get_float(args[3]);
+    if (!phi_graph_set_param_float(gid, idx, name, value))
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph: no such graph/node for a param set"));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_graph_set_param_float_obj, 4, 4, native_graph_set_param_float);
+
+static mp_obj_t native_graph_set_param_string(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int gid = mp_obj_get_int(args[0]);
+    int idx = mp_obj_get_int(args[1]);
+    const char *name = mp_obj_str_get_str(args[2]);
+    const char *value = mp_obj_str_get_str(args[3]);
+    if (!phi_graph_set_param_string(gid, idx, name, value))
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph: no such graph/node for a param set"));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_graph_set_param_string_obj, 4, 4, native_graph_set_param_string);
+
+/* See node_graph.h's own comment on why PhiGraphParam grew a real third
+ * type -- shader node params (base_color, emission's color) are 3-tuples,
+ * which neither set_param_float nor set_param_string above could hold. */
+static mp_obj_t native_graph_set_param_vec3(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int gid = mp_obj_get_int(args[0]);
+    int idx = mp_obj_get_int(args[1]);
+    const char *name = mp_obj_str_get_str(args[2]);
+    size_t n; mp_obj_t *items;
+    mp_obj_get_array(args[3], &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph: a vec3 param must be a 3-element sequence"));
+    float value[3] = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    if (!phi_graph_set_param_vec3(gid, idx, name, value))
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph: no such graph/node for a param set"));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_graph_set_param_vec3_obj, 4, 4, native_graph_set_param_vec3);
+
+static mp_obj_t native_graph_connect(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int gid = mp_obj_get_int(args[0]);
+    int src = mp_obj_get_int(args[1]);
+    const char *src_socket = mp_obj_str_get_str(args[2]);
+    int dst = mp_obj_get_int(args[3]);
+    const char *dst_socket = mp_obj_str_get_str(args[4]);
+    return phi_graph_connect(gid, src, src_socket, dst, dst_socket) ? mp_const_true : mp_const_false;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_graph_connect_obj, 5, 5, native_graph_connect);
+
+static mp_obj_t native_graph_set_position(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int gid = mp_obj_get_int(args[0]);
+    int idx = mp_obj_get_int(args[1]);
+    float x = (float)mp_obj_get_float(args[2]);
+    float y = (float)mp_obj_get_float(args[3]);
+    phi_graph_set_position(gid, idx, x, y);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_graph_set_position_obj, 4, 4, native_graph_set_position);
+
+/* Finds src_socket's position within a node type's declared `outputs`
+ * list (same (name, type[, ...]) tuple shape as `inputs`) -- -1 if not
+ * found. Only needed to unpack a MULTI-output node's returned tuple at
+ * the right index; a single-output type's raw return value IS the
+ * output already (ordinary Python return semantics, not a 1-tuple), see
+ * native_graph_evaluate below. */
+static int find_output_index(mp_obj_t outputs, const char *socket_name) {
+    size_t n; mp_obj_t *items;
+    mp_obj_get_array(outputs, &n, &items);
+    for (size_t i = 0; i < n; i++) {
+        size_t tn; mp_obj_t *titems;
+        mp_obj_get_array(items[i], &tn, &titems);
+        if (tn >= 1 && strcmp(mp_obj_str_get_str(titems[0]), socket_name) == 0) return (int)i;
+    }
+    return -1;
+}
+
+/* The evaluator: walks node_graph.c's topological order, and for each
+ * node resolves every declared input socket (an upstream link's cached
+ * output wins over the node's own literal param, matching every node
+ * editor's convention; neither present just omits that keyword and lets
+ * the Python function's own default argument -- or a real TypeError if
+ * it has none -- handle it) and calls the node type's registered Python
+ * function by KEYWORD, not position -- robust to inputs= being listed in
+ * a different order than the function's own parameters, unlike a
+ * positional call would be.
+ *
+ * Honest scope note: `context` (args[1]) is accepted (matching phi.md's
+ * `graph.evaluate(context)` signature) but not yet threaded into any
+ * node call as an implicit extra input -- animation graphs' "time is an
+ * implicit input" behavior needs real per-frame main-loop integration
+ * this pass doesn't attempt; a node function simply won't receive it
+ * yet. The overall graph result is the LAST node in topological order's
+ * output -- a real, stated scope decision (phi.md's own Graph sketch
+ * doesn't specify how a graph's single overall result is chosen), not an
+ * accident of iteration order. */
+static mp_obj_t native_graph_evaluate(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int gid = mp_obj_get_int(args[0]);
+    PhiGraph *g = phi_graph_find(gid);
+    if (!g) mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph.evaluate: no such graph"));
+
+    int order[PHI_GRAPH_MAX_NODES];
+    int n = phi_graph_topological_order(g, order);
+    if (n < 0) mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph.evaluate: the graph contains a cycle"));
+
+    mp_obj_t node_output[PHI_GRAPH_MAX_NODES];   /* stack-local, NOT static -- see this function's own comment on why (reentrancy) */
+    for (int i = 0; i < n; i++) {
+        int node_idx = order[i];
+        PhiGraphNode *node = &g->nodes[node_idx];
+        PhiMpNodeType *nt = find_node_type(node->type_name);
+        if (!nt) mp_raise_ValueError(MP_ERROR_TEXT("phi.Graph.evaluate: a node's type was never registered via @phi.node"));
+
+        size_t n_inputs; mp_obj_t *input_items;
+        mp_obj_get_array(nt->inputs, &n_inputs, &input_items);
+
+        mp_obj_t kw_args[PHI_GRAPH_MAX_PARAMS * 2];
+        size_t n_kw = 0;
+        for (size_t s = 0; s < n_inputs && n_kw < PHI_GRAPH_MAX_PARAMS; s++) {
+            size_t tn; mp_obj_t *titems;
+            mp_obj_get_array(input_items[s], &tn, &titems);
+            if (tn < 1) continue;
+            const char *socket_name = mp_obj_str_get_str(titems[0]);
+
+            mp_obj_t resolved = MP_OBJ_NULL;
+            for (int l = 0; l < g->link_count; l++) {
+                if (!g->links[l].used || g->links[l].dst_node != node_idx) continue;
+                if (strcmp(g->links[l].dst_socket, socket_name) != 0) continue;
+                int src_node = g->links[l].src_node;
+                PhiMpNodeType *src_nt = find_node_type(g->nodes[src_node].type_name);
+                mp_obj_t raw = node_output[src_node];
+                if (src_nt) {
+                    size_t out_n; mp_obj_t *out_items;
+                    mp_obj_get_array(src_nt->outputs, &out_n, &out_items);
+                    if (out_n > 1) {
+                        int oi = find_output_index(src_nt->outputs, g->links[l].src_socket);
+                        if (oi >= 0) {
+                            size_t rn; mp_obj_t *ritems;
+                            mp_obj_get_array(raw, &rn, &ritems);
+                            if ((size_t)oi < rn) raw = ritems[oi];
+                        }
+                    }
+                }
+                resolved = raw;
+                break;   /* last-link-wins isn't reachable here (break on first match) -- deliberate: first match in link-array order, same simple "first wins" this pass commits to rather than defining a real precedence rule for genuinely ambiguous multi-link-into-one-socket authoring, which node_graph.c's own connect() comment already flags as a UI/authoring concern, not a topology one */
+            }
+            if (resolved == MP_OBJ_NULL) {
+                for (int p = 0; p < node->param_count; p++) {
+                    if (strcmp(node->params[p].name, socket_name) != 0) continue;
+                    if (node->params[p].type == PHI_GRAPH_PARAM_STRING) {
+                        resolved = mp_obj_new_str(node->params[p].value_s, strlen(node->params[p].value_s));
+                    } else if (node->params[p].type == PHI_GRAPH_PARAM_VEC3) {
+                        mp_obj_t v3[3] = {
+                            mp_obj_new_float((mp_float_t)node->params[p].value_vec3[0]),
+                            mp_obj_new_float((mp_float_t)node->params[p].value_vec3[1]),
+                            mp_obj_new_float((mp_float_t)node->params[p].value_vec3[2]),
+                        };
+                        resolved = mp_obj_new_tuple(3, v3);
+                    } else {
+                        resolved = mp_obj_new_float((mp_float_t)node->params[p].value_f);
+                    }
+                    break;
+                }
+            }
+            if (resolved == MP_OBJ_NULL) continue;
+
+            kw_args[n_kw*2 + 0] = MP_OBJ_NEW_QSTR(qstr_from_str(socket_name));
+            kw_args[n_kw*2 + 1] = resolved;
+            n_kw++;
+        }
+
+        node_output[node_idx] = mp_call_function_n_kw(nt->fn, 0, n_kw, kw_args);
+    }
+
+    return n > 0 ? node_output[order[n-1]] : mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_graph_evaluate_obj, 2, 2, native_graph_evaluate);
+
 /* Bootstrap script, run once at the end of phi_mp_init after the native
  * functions above are already in globals (it references them by name).
  * The @phi.panel class-decorator shape is copied verbatim from
@@ -827,13 +1243,136 @@ static const char *PHI_BOOTSTRAP =
     "phi.add_vertex = _native_add_vertex\n"
     "phi.add_face = _native_add_face\n"
     "phi.delete_face = _native_delete_face\n"
+    "phi.set_face_material = _native_set_face_material\n"
     "phi.flip_normals = _native_flip_normals\n"
     "phi.extrude_face = _native_extrude_face\n"
     "phi.inset_face = _native_inset_face\n"
     "phi.loop_cut = _native_loop_cut\n"
     "phi.nearest_edge_of_face = _native_nearest_edge_of_face\n"
     "phi.render = _native_render\n"
-    "phi.activate_ragdoll = _native_activate_ragdoll\n";
+    "phi.activate_ragdoll = _native_activate_ragdoll\n"
+    /* Animation playback (see mp_port.h's phi_mp_register_animation_
+     * callbacks) -- operates on main.c's single skinned-test-object slot. */
+    "phi.play_animation = _native_play_animation\n"
+    "phi.pause_animation = _native_pause_animation\n"
+    "phi.resume_animation = _native_resume_animation\n"
+    "phi.is_animation_playing = _native_is_animation_playing\n"
+    "phi.get_animation_time = _native_get_animation_time\n"
+    "phi.set_animation_time = _native_set_animation_time\n"
+    "phi.list_animation_clips = _native_list_animation_clips\n"
+    /* Phase 6's node graphs (see phi.md) -- @phi.node captures a node
+     * TYPE at decoration time, the identical shape @phi.panel/_panel_
+     * decorator above already established for panels. Deliberately
+     * mirrors that decorator's own structure rather than inventing a new
+     * pattern. */
+    "_node_registry = {}\n"
+    "def _node_decorator(inputs=None, outputs=None, category='geometry'):\n"
+    "    def wrap(fn):\n"
+    "        name = fn.__name__\n"
+    "        real_inputs = inputs if inputs is not None else []\n"
+    "        real_outputs = outputs if outputs is not None else []\n"
+    "        _node_registry[name] = fn\n"
+    "        _native_node_registered(name, real_inputs, real_outputs, category, fn)\n"
+    "        return fn\n"
+    "    return wrap\n"
+    "phi.node = _node_decorator\n"
+    "phi.node_types = _native_node_types\n"
+    /* Marker classes for socket type annotations (@phi.node(inputs=
+     * [('mesh', phi.Mesh)], ...)) -- metadata for introspection/future
+     * UI only, NOT enforced against a node function's real arguments at
+     * call time this pass (a real, stated scope limit, not an oversight
+     * -- see native_graph_evaluate's own comment). */
+    "class Mesh:\n"
+    "    pass\n"
+    "class Texture:\n"
+    "    pass\n"
+    "phi.Mesh = Mesh\n"
+    "phi.Texture = Texture\n"
+    /* phi.Graph -- a plain Python wrapper around an opaque C-owned graph
+     * id (node_graph.c), the same "id into a C array" idiom phi.add_
+     * light/phi.mesh_object already use. add_node's **params collects
+     * literal (unconnected-input) values by ordinary Python kwarg syntax
+     * rather than needing a native dict-parsing function on the C side. */
+    "class Graph:\n"
+    "    def __init__(self, kind='geometry'):\n"
+    "        self._id = _native_graph_create(kind)\n"
+    "    def add_node(self, type_name, **params):\n"
+    "        idx = _native_graph_add_node(self._id, type_name)\n"
+    "        for k in params:\n"
+    "            v = params[k]\n"
+    "            if isinstance(v, str):\n"
+    "                _native_graph_set_param_string(self._id, idx, k, v)\n"
+    "            elif isinstance(v, (tuple, list)):\n"
+    "                _native_graph_set_param_vec3(self._id, idx, k, v)\n"
+    "            else:\n"
+    "                _native_graph_set_param_float(self._id, idx, k, float(v))\n"
+    "        return idx\n"
+    "    def connect(self, src, src_socket, dst, dst_socket):\n"
+    "        return _native_graph_connect(self._id, src, src_socket, dst, dst_socket)\n"
+    "    def set_position(self, node_id, x, y):\n"
+    "        _native_graph_set_position(self._id, node_id, x, y)\n"
+    "    def evaluate(self, context=None):\n"
+    "        return _native_graph_evaluate(self._id, context)\n"
+    "phi.Graph = Graph\n"
+    /* Built-in node types -- one MVP-real example per node domain
+     * (shader/geometry/animation), each backed by an already-proven
+     * phi.* call, not a new invented subsystem. Registered the same way
+     * any user's own @phi.node function would be (this bootstrap script
+     * has no privileged path -- phi.node is already fully defined by the
+     * time execution reaches here). */
+    /* Shader nodes (see phi.md's "screen-space effects... same @phi.node
+     * decorator" note -- these are the material-shading half of that,
+     * not screen-space post-process). No node-graph editor panel exists
+     * yet (see phi.md's Phase 6 status) -- these are real, evaluable node
+     * types today via phi.Graph, just not yet visually wireable. */
+    "class Color:\n"
+    "    pass\n"
+    "phi.Color = Color\n"
+    "class Shader:\n"
+    "    pass\n"
+    "phi.Shader = Shader\n"
+    "@phi.node(inputs=[('base_color', Color, (0.8, 0.8, 0.8)), ('metallic', float, 0.0), ('roughness', float, 0.5)], outputs=[('shader', Shader)], category='shader')\n"
+    "def principled_bsdf(base_color=(0.8, 0.8, 0.8), metallic=0.0, roughness=0.5):\n"
+    "    return {'base_color': tuple(base_color), 'metallic': float(metallic), 'roughness': float(roughness), 'emission': (0.0, 0.0, 0.0)}\n"
+    "@phi.node(inputs=[('color', Color, (1.0, 1.0, 1.0)), ('strength', float, 1.0)], outputs=[('shader', Shader)], category='shader')\n"
+    "def emission(color=(1.0, 1.0, 1.0), strength=1.0):\n"
+    "    r = color[0] * strength\n"
+    "    g = color[1] * strength\n"
+    "    b = color[2] * strength\n"
+    "    return {'base_color': (0.0, 0.0, 0.0), 'metallic': 0.0, 'roughness': 1.0, 'emission': (r, g, b)}\n"
+    /* apply_material is the bridge that makes the two node types above
+     * genuinely actionable without a panel: it writes a graph-computed
+     * shader dict onto real geometry via phi.set_face_material. */
+    "@phi.node(inputs=[('object_id', float, 0.0), ('face_index', float, 0.0), ('shader', Shader, None)], outputs=[], category='shader')\n"
+    "def apply_material(object_id=0.0, face_index=0.0, shader=None):\n"
+    "    if shader is None:\n"
+    "        return None\n"
+    "    phi.set_face_material(int(object_id), int(face_index), shader['base_color'], shader['metallic'], shader['roughness'], shader['emission'])\n"
+    "    return None\n"
+    /* Geometry nodes -- matches the doc's own input_mesh/noise_displace
+     * vocabulary (phi.md's Phase 6 Graph example), using only already-
+     * proven phi.* geometry calls rather than inventing a new noise
+     * function to get a first example landed. */
+    "@phi.node(inputs=[('asset', str, ''), ('x', float, 0.0), ('y', float, 0.0), ('z', float, 0.0)], outputs=[('object_id', float)], category='geometry')\n"
+    "def input_mesh(asset='', x=0.0, y=0.0, z=0.0):\n"
+    "    return float(phi.mesh_object(asset, x, y, z))\n"
+    "@phi.node(inputs=[('object_id', float, 0.0), ('dx', float, 0.0), ('dy', float, 0.0), ('dz', float, 0.0)], outputs=[('object_id', float)], category='geometry')\n"
+    "def translate_mesh(object_id=0.0, dx=0.0, dy=0.0, dz=0.0):\n"
+    "    oid = int(object_id)\n"
+    "    verts = phi.get_vertices(oid)\n"
+    "    offsets = (dx, dy, dz)\n"
+    "    new_verts = [verts[i] + offsets[i % 3] for i in range(len(verts))]\n"
+    "    phi.set_vertices(oid, new_verts)\n"
+    "    return float(oid)\n"
+    /* Animation node -- a real trigger over the new phi.play_animation
+     * binding. NOT per-frame time-driven yet (native_graph_evaluate
+     * doesn't thread `context`/time into node calls this pass, a stated
+     * scope limit -- see its own comment), so this is scoped honestly as
+     * a one-shot "start this clip" node, not a live scrubber. */
+    "@phi.node(inputs=[('clip_name', str, ''), ('loop', float, 1.0)], outputs=[('playing', float)], category='animation')\n"
+    "def play_animation_node(clip_name='', loop=1.0):\n"
+    "    ok = phi.play_animation(clip_name if clip_name else None, bool(loop))\n"
+    "    return 1.0 if ok else 0.0\n";
 
 int phi_mp_panel_count(void) { return s_panel_count; }
 
@@ -901,6 +1440,7 @@ static void phi_mp_install_bindings(void) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_add_vertex")), MP_OBJ_FROM_PTR(&native_add_vertex_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_add_face")), MP_OBJ_FROM_PTR(&native_add_face_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_delete_face")), MP_OBJ_FROM_PTR(&native_delete_face_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_face_material")), MP_OBJ_FROM_PTR(&native_set_face_material_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_flip_normals")), MP_OBJ_FROM_PTR(&native_flip_normals_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_extrude_face")), MP_OBJ_FROM_PTR(&native_extrude_face_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_inset_face")), MP_OBJ_FROM_PTR(&native_inset_face_obj));
@@ -908,6 +1448,23 @@ static void phi_mp_install_bindings(void) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_nearest_edge_of_face")), MP_OBJ_FROM_PTR(&native_nearest_edge_of_face_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_render")), MP_OBJ_FROM_PTR(&native_render_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_activate_ragdoll")), MP_OBJ_FROM_PTR(&native_activate_ragdoll_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_play_animation")), MP_OBJ_FROM_PTR(&native_play_animation_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_pause_animation")), MP_OBJ_FROM_PTR(&native_pause_animation_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_resume_animation")), MP_OBJ_FROM_PTR(&native_resume_animation_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_is_animation_playing")), MP_OBJ_FROM_PTR(&native_is_animation_playing_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_animation_time")), MP_OBJ_FROM_PTR(&native_get_animation_time_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_animation_time")), MP_OBJ_FROM_PTR(&native_set_animation_time_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_list_animation_clips")), MP_OBJ_FROM_PTR(&native_list_animation_clips_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_node_registered")), MP_OBJ_FROM_PTR(&native_node_registered_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_node_types")), MP_OBJ_FROM_PTR(&native_node_types_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_graph_create")), MP_OBJ_FROM_PTR(&native_graph_create_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_graph_add_node")), MP_OBJ_FROM_PTR(&native_graph_add_node_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_graph_set_param_float")), MP_OBJ_FROM_PTR(&native_graph_set_param_float_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_graph_set_param_string")), MP_OBJ_FROM_PTR(&native_graph_set_param_string_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_graph_set_param_vec3")), MP_OBJ_FROM_PTR(&native_graph_set_param_vec3_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_graph_connect")), MP_OBJ_FROM_PTR(&native_graph_connect_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_graph_set_position")), MP_OBJ_FROM_PTR(&native_graph_set_position_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_graph_evaluate")), MP_OBJ_FROM_PTR(&native_graph_evaluate_obj));
 
     nlr_buf_t nlr;
     if (nlr_push(&nlr) == 0) {

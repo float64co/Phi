@@ -17,6 +17,9 @@
 #include "scene_target.h"
 #include "fracture_body.h"
 #include "scene_objects.h"
+#include "node_graph.h"
+#include "render_hooks.h"
+#include "input_gamepad.h"
 #include "path_tracer.h"
 #include "skinned_mesh_object.h"
 #include "ragdoll.h"
@@ -421,6 +424,67 @@ static int activate_ragdoll_on_test_object(void) {
     return spawned;
 }
 
+/* phi.play_animation/pause_animation/resume_animation/get_animation_time/
+ * set_animation_time/list_animation_clips' real callbacks (see mp_port.h's
+ * phi_mp_register_animation_callbacks) -- operate on g_skinned_test_obj,
+ * the same single global slot activate_ragdoll_on_test_object above
+ * already targets. All six return a real 0/failure sentinel rather than
+ * raising themselves -- mp_port.c's native_* wrappers decide whether that
+ * becomes a Python ValueError, same division of labor as
+ * render_still_frame_to_disk/activate_ragdoll_on_test_object already
+ * establish. */
+static int anim_play_clip(const char *clip_name, int loop) {
+    if (!g_skinned_test_loaded) return 0;
+    const AnimClip *clip = NULL;
+    if (clip_name && clip_name[0]) {
+        for (int i = 0; i < g_skinned_test_obj.clip_count; i++) {
+            if (strcmp(g_skinned_test_obj.clips[i].name, clip_name) == 0) {
+                clip = &g_skinned_test_obj.clips[i];
+                break;
+            }
+        }
+        if (!clip) return 0;
+    } else if (g_skinned_test_obj.clip_count > 0) {
+        clip = &g_skinned_test_obj.clips[0];
+    } else {
+        return 0;
+    }
+    anim_playback_play(&g_skinned_test_obj.playback, clip, loop);
+    return 1;
+}
+
+static void anim_set_playing_state(int playing) {
+    if (g_skinned_test_loaded && g_skinned_test_obj.playback.clip) {
+        g_skinned_test_obj.playback.playing = playing;
+    }
+}
+
+static int anim_get_playing_state(void) {
+    return g_skinned_test_loaded && g_skinned_test_obj.playback.playing;
+}
+
+static float anim_get_playback_time(void) {
+    return g_skinned_test_loaded ? g_skinned_test_obj.playback.time : 0.0f;
+}
+
+static int anim_set_playback_time(float t) {
+    if (!g_skinned_test_loaded || !g_skinned_test_obj.playback.clip) return 0;
+    g_skinned_test_obj.playback.time = t;
+    return 1;
+}
+
+static int anim_list_clips(char out_names[][64], float *out_durations, int max_clips) {
+    if (!g_skinned_test_loaded) return 0;
+    int n = g_skinned_test_obj.clip_count;
+    if (n > max_clips) n = max_clips;
+    for (int i = 0; i < n; i++) {
+        strncpy(out_names[i], g_skinned_test_obj.clips[i].name, 63);
+        out_names[i][63] = 0;
+        out_durations[i] = g_skinned_test_obj.clips[i].duration;
+    }
+    return n;
+}
+
 /* fwd/right/up basis matched EXACTLY against compute_scene_ray/
  * renderer.c's build_vp/mat4_look_dir -- every camera-navigation
  * function below (zoom/orbit/pan) reuses this same one, so none of them
@@ -701,6 +765,11 @@ static void main_loop(void *userdata) {
 #ifndef __EMSCRIPTEN__
     net_poll_native();  /* wasm gets messages via an async JS callback instead */
 #endif
+
+    /* Gamepad/Steam Deck input (see input_gamepad.h) -- cheap, safe no-op
+     * when nothing's connected; refreshes real button/axis state and
+     * detects connect/disconnect once per frame. */
+    phi_gamepad_poll();
 
     /* Phase 2 physics step -- see phi.md's "Bullet Physics via
      * Emscripten". phi_physics_world_step already subdivides into fixed
@@ -1625,6 +1694,105 @@ static void delete_mesh_object_handler(uint32_t req_id, uint32_t object_id) {
     net_send_delete_mesh_object_reply(&g_ns, req_id, 1);
 }
 
+/* Incremental mesh editing for chat (see net.h's PKT_GET_MESH_VERTICES_
+ * REQUEST comment) -- "the model can see where vertices are, add
+ * vertices to an existing mesh, move individual vertices". Same
+ * halfedge_add_vertex/halfedge_add_face/direct hem->verts access
+ * mp_port.c's phi.get_vertices/get_faces/add_vertex/add_face/set_vertex
+ * already use for the LOCAL Python console -- this is the identical
+ * capability, reached over the wire instead. */
+static void get_mesh_vertices_handler(uint32_t req_id, uint32_t object_id) {
+    MeshObject *obj = scene_object_find((int)object_id);
+    if (!obj || !obj->hem) {
+        net_send_get_mesh_vertices_reply(&g_ns, req_id, 0, NULL, 0);
+        return;
+    }
+    HalfEdgeMesh *hem = obj->hem;
+    int vc = hem->vert_count;
+    if (vc > PKT_MESH_MAX_VERTS) vc = PKT_MESH_MAX_VERTS;   /* wire cap -- see net.h */
+    static float pos_buf[PKT_MESH_MAX_VERTS * 3];
+    for (int i = 0; i < vc; i++) {
+        pos_buf[i*3+0] = hem->verts[i].pos[0];
+        pos_buf[i*3+1] = hem->verts[i].pos[1];
+        pos_buf[i*3+2] = hem->verts[i].pos[2];
+    }
+    net_send_get_mesh_vertices_reply(&g_ns, req_id, 1, pos_buf, vc);
+}
+
+static void get_mesh_faces_handler(uint32_t req_id, uint32_t object_id) {
+    MeshObject *obj = scene_object_find((int)object_id);
+    if (!obj || !obj->hem) {
+        net_send_get_mesh_faces_reply(&g_ns, req_id, 0, NULL, NULL, 0);
+        return;
+    }
+    HalfEdgeMesh *hem = obj->hem;
+    static uint16_t face_idx_buf[PKT_MESH_MAX_TRIS];
+    static uint16_t vert_buf[PKT_MESH_MAX_TRIS * 3];
+    int n = 0;
+    for (int f = 0; f < hem->face_count && n < PKT_MESH_MAX_TRIS; f++) {
+        if (hem->faces[f].deleted) continue;
+        if (hem->faces[f].count != 3) continue;   /* wire format is triangles-only, see net.h */
+        int verts[3];
+        halfedge_face_verts(hem, f, verts);
+        face_idx_buf[n] = (uint16_t)f;
+        vert_buf[n*3+0] = (uint16_t)verts[0];
+        vert_buf[n*3+1] = (uint16_t)verts[1];
+        vert_buf[n*3+2] = (uint16_t)verts[2];
+        n++;
+    }
+    net_send_get_mesh_faces_reply(&g_ns, req_id, 1, face_idx_buf, vert_buf, n);
+}
+
+/* Adding a lone vertex doesn't touch the render mesh -- same reasoning as
+ * mp_port.c's native_add_vertex (meshobject_build_render_mesh_from_
+ * halfedge only ever walks live FACES). No rebuild call here for that
+ * reason; add_mesh_face_handler below is what actually makes a just-
+ * added vertex visible. */
+static void add_mesh_vertex_handler(uint32_t req_id, uint32_t object_id, float x, float y, float z) {
+    MeshObject *obj = scene_object_find((int)object_id);
+    if (!obj || !obj->hem) {
+        net_send_add_mesh_vertex_reply(&g_ns, req_id, 0, 0);
+        return;
+    }
+    int idx = halfedge_add_vertex(obj->hem, x, y, z);
+    printf("[main] chat add_mesh_vertex: added vertex %d to MeshObject #%u\n", idx, object_id);
+    net_send_add_mesh_vertex_reply(&g_ns, req_id, 1, (uint32_t)idx);
+}
+
+static void add_mesh_face_handler(uint32_t req_id, uint32_t object_id, uint16_t v0, uint16_t v1, uint16_t v2) {
+    MeshObject *obj = scene_object_find((int)object_id);
+    if (!obj || !obj->hem) {
+        net_send_add_mesh_face_reply(&g_ns, req_id, 0, 0);
+        return;
+    }
+    /* Bounds-checked here because halfedge_add_face itself does not -- an
+     * out-of-range index writes straight past hem->verts (same reasoning
+     * as mp_port.c's native_add_face). */
+    if (v0 >= obj->hem->vert_count || v1 >= obj->hem->vert_count || v2 >= obj->hem->vert_count) {
+        net_send_add_mesh_face_reply(&g_ns, req_id, 0, 0);
+        return;
+    }
+    int verts[3] = { v0, v1, v2 };
+    int f = halfedge_add_face(obj->hem, verts, 3);
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    printf("[main] chat add_mesh_face: added face %d (%u,%u,%u) to MeshObject #%u\n", f, v0, v1, v2, object_id);
+    net_send_add_mesh_face_reply(&g_ns, req_id, 1, (uint32_t)f);
+}
+
+static void set_mesh_vertex_handler(uint32_t req_id, uint32_t object_id, uint16_t vertex_index, float x, float y, float z) {
+    MeshObject *obj = scene_object_find((int)object_id);
+    if (!obj || !obj->hem || vertex_index >= obj->hem->vert_count) {
+        net_send_set_mesh_vertex_reply(&g_ns, req_id, 0);
+        return;
+    }
+    obj->hem->verts[vertex_index].pos[0] = x;
+    obj->hem->verts[vertex_index].pos[1] = y;
+    obj->hem->verts[vertex_index].pos[2] = z;
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    printf("[main] chat set_mesh_vertex: moved vertex %u on MeshObject #%u\n", vertex_index, object_id);
+    net_send_set_mesh_vertex_reply(&g_ns, req_id, 1);
+}
+
 static void scene_state_handler(uint32_t req_id) {
     /* Every live scene object (Phase 5's real multi-object support, see
      * phi.md) -- id/position/orientation/is_static/vert_count/
@@ -1759,6 +1927,19 @@ int main(void) {
      * spawn_test_mesh_object below, which allocates the first slot. */
     scene_objects_init();
 
+    /* Phase 6 node graphs (see phi.md's "Geometry and Animation Nodes")
+     * -- cleared once here, same registry-init convention as scene_
+     * objects_init/light_system_init above/below. No test graphs are
+     * created at startup (unlike spawn_test_mesh_object) -- graphs are
+     * always explicitly authored via phi.Graph from Python. */
+    phi_graph_system_init();
+
+    /* Real C-level render-pass hooks (see render_hooks.h) -- cleared once
+     * here, same registry-init convention as the calls just above. No
+     * hooks are registered by the editor itself; this only exists so
+     * game/src/ *.c code (Phase 9) has somewhere real to register into. */
+    render_hooks_init();
+
     /* Phase 1 foundation test object — see spawn_test_mesh_object's own
      * comment (also reused by the scene context menu's "Add > Mesh
      * Object", see CTX_ACTION_ADD_MESH, and Asset Browser/File > Load,
@@ -1780,6 +1961,12 @@ int main(void) {
     /* Input */
     input_init(&g_inp);
     input_install_callbacks(&g_inp);
+
+    /* Gamepad/Steam Deck input (Phase 9, see input_gamepad.h) -- real
+     * SDL2-backed on native Linux, Emscripten's own Gamepad API on wasm,
+     * a real honest stub on win32 (see client/vendor/SDL2/VENDORED.md
+     * and each backend file's own comment). */
+    phi_gamepad_init();
 
     /* Console / Python panel */
     pyconsole_init(&g_cs);
@@ -1825,6 +2012,8 @@ int main(void) {
      * the registration calls just above. */
     phi_mp_register_render_callback(render_still_frame_to_disk);
     phi_mp_register_ragdoll_callback(activate_ragdoll_on_test_object);
+    phi_mp_register_animation_callbacks(anim_play_clip, anim_set_playing_state, anim_get_playing_state,
+                                         anim_get_playback_time, anim_set_playback_time, anim_list_clips);
 
     /* Light objects (Phase 3's "Both like Blender does it" light-source
      * model, see light.h) -- a fixed-capacity registry, cleared once here. */
@@ -1876,6 +2065,11 @@ int main(void) {
     net_set_create_mesh_handler(create_mesh_handler);
     net_set_set_vertices_handler(set_vertices_handler);
     net_set_delete_mesh_object_handler(delete_mesh_object_handler);
+    net_set_get_mesh_vertices_handler(get_mesh_vertices_handler);
+    net_set_get_mesh_faces_handler(get_mesh_faces_handler);
+    net_set_add_mesh_vertex_handler(add_mesh_vertex_handler);
+    net_set_add_mesh_face_handler(add_mesh_face_handler);
+    net_set_set_mesh_vertex_handler(set_mesh_vertex_handler);
 
     /* Network -- see phi.md's Phase 1 status, "Client/server model": this
      * is Qek's connection/transport machinery, repurposed rather than

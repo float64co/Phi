@@ -1,4 +1,5 @@
 #include "gbuffer.h"
+#include "render_hooks.h"
 #ifdef __EMSCRIPTEN__
 #include <GLES3/gl3.h>   /* not GLES2/gl2.h — MRT/FBO/integer-texture support (GLES2/WebGL1 had none of it) */
 #else
@@ -769,6 +770,11 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
 
 void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color,
                       const float *inv_view_proj, const float *cam_pos) {
+    /* Real C-level render-pass hook, see render_hooks.h -- geometry+
+     * shadow passes are already done (they run before gbuffer_resolve is
+     * even called), nothing lit yet. */
+    render_hooks_invoke(PHI_HOOK_AFTER_GBUFFER, gb);
+
     /* ---- Lighting: G-buffer -> HDR ---- */
     glBindFramebuffer(GL_FRAMEBUFFER, gb->hdr_fbo);
     glViewport(0, 0, gb->w, gb->h);
@@ -942,6 +948,11 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glDisable(GL_DEPTH_TEST);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
+    /* Real C-level render-pass hook, see render_hooks.h -- Lighting,
+     * Bloom, and Transparency have all completed into gb->hdr_tex by
+     * this point; nothing tonemapped yet. */
+    render_hooks_invoke(PHI_HOOK_AFTER_LIGHTING, gb);
+
     /* ---- Tonemap: HDR -> intermediate LDR texture (not the default
      * framebuffer directly — fxaa below needs to read the tonemapped
      * result before it's actually presented). ---- */
@@ -953,6 +964,10 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glBindVertexArray(gb->quad_vao);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     gl_check("gbuffer_resolve/tonemap");
+
+    /* Real C-level render-pass hook, see render_hooks.h -- gb->ldr_tex
+     * holds the tonemapped-but-not-yet-temporally-resolved frame here. */
+    render_hooks_invoke(PHI_HOOK_AFTER_RESOLVE, gb);
 
     /* ---- TAA: temporal resolve (tonemapped LDR + velocity-reprojected,
      * neighborhood-clamped history) -> one of the ping-pong targets. FXAA
@@ -1095,6 +1110,11 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     gl_check("gbuffer_resolve/fxaa");
 
     glEnable(GL_DEPTH_TEST);
+
+    /* Real C-level render-pass hook, see render_hooks.h -- the very last
+     * point before this frame is presented (matches phi.md's original
+     * "after [fxaa], final output" placement for this specific name). */
+    render_hooks_invoke(PHI_HOOK_AFTER_TONEMAP, gb);
 }
 
 unsigned int gbuffer_pick_object_id(GBuffer *gb, int x, int y) {

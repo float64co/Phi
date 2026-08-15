@@ -87,6 +87,31 @@
 #define PKT_DELETE_MESH_OBJECT_REQUEST 0x2E   /* S->C: [req_id:u32 object_id:u32] */
 #define PKT_DELETE_MESH_OBJECT_REPLY   0x2F   /* C->S: [req_id:u32 ok:u8] */
 
+/* Incremental mesh editing for chat -- "see where vertices are, add
+ * vertices to an existing mesh, move individual vertices" (see phi.md).
+ * Same "server asks THIS client to act" shape as everything above; the
+ * two GET_MESH_* pairs are the read side create_mesh_object/set_mesh_
+ * vertices never needed before (that pair could only build-from-scratch
+ * or replace-everything-at-the-same-count -- neither lets the model see
+ * or incrementally grow existing geometry). Mirrors mp_port.c's phi.
+ * get_vertices/get_faces/add_vertex/add_face/set_vertex wire-for-wire in
+ * spirit -- same underlying halfedge.c calls, just reached over the
+ * network instead of an embedded interpreter. ADD_MESH_FACE isn't
+ * something the user literally asked for, but a lone added vertex is
+ * invisible (the render mesh only ever reflects live FACES, see
+ * mp_port.c's native_add_vertex comment) -- without it, "add vertices"
+ * would be a capability that visibly does nothing. */
+#define PKT_GET_MESH_VERTICES_REQUEST  0x30   /* S->C: [req_id:u32 object_id:u32] */
+#define PKT_GET_MESH_VERTICES_REPLY    0x31   /* C->S: [req_id:u32 ok:u8 vert_count:u16 (vert_count*3)*f32 positions] */
+#define PKT_GET_MESH_FACES_REQUEST     0x32   /* S->C: [req_id:u32 object_id:u32] */
+#define PKT_GET_MESH_FACES_REPLY       0x33   /* C->S: [req_id:u32 ok:u8 face_count:u16 face_count*{face_index:u16 v0:u16 v1:u16 v2:u16}] -- triangles only, see halfedge.h */
+#define PKT_ADD_MESH_VERTEX_REQUEST    0x34   /* S->C: [req_id:u32 object_id:u32 x:f32 y:f32 z:f32] */
+#define PKT_ADD_MESH_VERTEX_REPLY      0x35   /* C->S: [req_id:u32 ok:u8 vertex_index:u32] */
+#define PKT_ADD_MESH_FACE_REQUEST      0x36   /* S->C: [req_id:u32 object_id:u32 v0:u16 v1:u16 v2:u16] -- must reference existing (or just-added) vertex indices */
+#define PKT_ADD_MESH_FACE_REPLY        0x37   /* C->S: [req_id:u32 ok:u8 face_index:u32] */
+#define PKT_SET_MESH_VERTEX_REQUEST    0x38   /* S->C: [req_id:u32 object_id:u32 vertex_index:u16 x:f32 y:f32 z:f32] -- moves ONE existing vertex, unlike PKT_SET_VERTICES_REQUEST's whole-array replace */
+#define PKT_SET_MESH_VERTEX_REPLY      0x39   /* C->S: [req_id:u32 ok:u8] */
+
 typedef struct {
     int  connected;
     int  local_id;
@@ -115,6 +140,14 @@ void net_send_delete_light_reply(NetState *ns, uint32_t req_id, int ok);
 void net_send_create_mesh_reply(NetState *ns, uint32_t req_id, int ok, uint32_t object_id);
 void net_send_set_vertices_reply(NetState *ns, uint32_t req_id, int ok);
 void net_send_delete_mesh_object_reply(NetState *ns, uint32_t req_id, int ok);
+
+/* positions is vert_count*3 floats (borrowed, valid only for the call). */
+void net_send_get_mesh_vertices_reply(NetState *ns, uint32_t req_id, int ok, const float *positions, int vert_count);
+/* face_indices/verts are parallel arrays, face_count entries each (verts holds 3 per face, flat). */
+void net_send_get_mesh_faces_reply(NetState *ns, uint32_t req_id, int ok, const uint16_t *face_indices, const uint16_t *verts, int face_count);
+void net_send_add_mesh_vertex_reply(NetState *ns, uint32_t req_id, int ok, uint32_t vertex_index);
+void net_send_add_mesh_face_reply(NetState *ns, uint32_t req_id, int ok, uint32_t face_index);
+void net_send_set_mesh_vertex_reply(NetState *ns, uint32_t req_id, int ok);
 
 /* Registers a callback net_on_message invokes on PKT_SCENE_STATE_REQUEST --
  * net.c has no access to MeshObject/physics-world state itself (that's
@@ -145,6 +178,15 @@ void net_set_create_mesh_handler(void (*handler)(uint32_t req_id, float x, float
 void net_set_set_vertices_handler(void (*handler)(uint32_t req_id, uint32_t object_id,
                                                      const float *positions, int vert_count));
 void net_set_delete_mesh_object_handler(void (*handler)(uint32_t req_id, uint32_t object_id));
+
+/* Incremental mesh editing handlers -- see PKT_GET_MESH_VERTICES_REQUEST's
+ * own comment above. Same division of labor as everything else in this
+ * section (net.c parses, main.c owns scene_objects.c/halfedge.c). */
+void net_set_get_mesh_vertices_handler(void (*handler)(uint32_t req_id, uint32_t object_id));
+void net_set_get_mesh_faces_handler(void (*handler)(uint32_t req_id, uint32_t object_id));
+void net_set_add_mesh_vertex_handler(void (*handler)(uint32_t req_id, uint32_t object_id, float x, float y, float z));
+void net_set_add_mesh_face_handler(void (*handler)(uint32_t req_id, uint32_t object_id, uint16_t v0, uint16_t v1, uint16_t v2));
+void net_set_set_mesh_vertex_handler(void (*handler)(uint32_t req_id, uint32_t object_id, uint16_t vertex_index, float x, float y, float z));
 
 #ifndef __EMSCRIPTEN__
 /* Native only: pumps the WebSocket socket (non-blocking) once per frame.

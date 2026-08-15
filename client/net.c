@@ -47,6 +47,28 @@ void net_set_delete_mesh_object_handler(void (*handler)(uint32_t req_id, uint32_
     s_delete_mesh_object_handler = handler;
 }
 
+static void (*s_get_mesh_vertices_handler)(uint32_t req_id, uint32_t object_id) = NULL;
+static void (*s_get_mesh_faces_handler)(uint32_t req_id, uint32_t object_id) = NULL;
+static void (*s_add_mesh_vertex_handler)(uint32_t req_id, uint32_t object_id, float x, float y, float z) = NULL;
+static void (*s_add_mesh_face_handler)(uint32_t req_id, uint32_t object_id, uint16_t v0, uint16_t v1, uint16_t v2) = NULL;
+static void (*s_set_mesh_vertex_handler)(uint32_t req_id, uint32_t object_id, uint16_t vertex_index, float x, float y, float z) = NULL;
+
+void net_set_get_mesh_vertices_handler(void (*handler)(uint32_t req_id, uint32_t object_id)) {
+    s_get_mesh_vertices_handler = handler;
+}
+void net_set_get_mesh_faces_handler(void (*handler)(uint32_t req_id, uint32_t object_id)) {
+    s_get_mesh_faces_handler = handler;
+}
+void net_set_add_mesh_vertex_handler(void (*handler)(uint32_t req_id, uint32_t object_id, float x, float y, float z)) {
+    s_add_mesh_vertex_handler = handler;
+}
+void net_set_add_mesh_face_handler(void (*handler)(uint32_t req_id, uint32_t object_id, uint16_t v0, uint16_t v1, uint16_t v2)) {
+    s_add_mesh_face_handler = handler;
+}
+void net_set_set_mesh_vertex_handler(void (*handler)(uint32_t req_id, uint32_t object_id, uint16_t vertex_index, float x, float y, float z)) {
+    s_set_mesh_vertex_handler = handler;
+}
+
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/websocket.h>
@@ -242,10 +264,25 @@ void net_send_asset_delete(NetState *ns, uint32_t id) {
 
 /* Writes a [len:u16 bytes] field -- the wider-length twin of
  * w_lenprefixed above, needed because chat text/scene-state JSON can
- * plausibly exceed 255 bytes where names/tags/queries never do. */
-static uint8_t *w_lenprefixed16(uint8_t *p, const char *s) {
+ * plausibly exceed 255 bytes where names/tags/queries never do.
+ *
+ * `cap` is the caller's real remaining room for the STRING BODY (not
+ * counting the 2-byte length prefix this function always writes) --
+ * REQUIRED, not optional, after a real bug found here: this used to trust
+ * strlen(s) unconditionally and just memcpy the whole string, and
+ * net_send_scene_state_reply's pkt buffer (a stack array sized 3072) was
+ * smaller than main.c's scene_state_handler can legitimately produce (its
+ * own json[10240] buffer, easily exceeded 3072 with a handful of objects/
+ * lights populated) -- a real stack buffer overflow on every scene-state
+ * reply past that size, not a theoretical one. Truncating here is a
+ * silent-but-safe last resort (the caller should size its own buffer
+ * correctly, see net_send_scene_state_reply below for the actual fix) --
+ * never trust a destination buffer is big enough just because it always
+ * has been so far. */
+static uint8_t *w_lenprefixed16(uint8_t *p, const char *s, size_t cap) {
     size_t n = s ? strlen(s) : 0;
     if (n > 65535) n = 65535;
+    if (n > cap) n = cap;
     uint16_t n16 = (uint16_t)n;
     memcpy(p, &n16, 2); p += 2;
     if (n) { memcpy(p, s, n); p += n; }
@@ -257,17 +294,26 @@ void net_send_chat_msg(NetState *ns, const char *text) {
     uint8_t pkt[1 + 2 + CHAT_INPUT_LEN];
     uint8_t *p = pkt;
     p = w_u8(p, PKT_CHAT_MSG);
-    p = w_lenprefixed16(p, text);
+    p = w_lenprefixed16(p, text, CHAT_INPUT_LEN);
     ws_send_binary(pkt, (int)(p - pkt));
 }
 
+/* pkt sized to comfortably exceed main.c's scene_state_handler's own
+ * json[10240] buffer (see its comment for how that bound was derived) --
+ * the REAL fix for the overflow described above; the cap passed to
+ * w_lenprefixed16 is defense in depth, not the primary guard, in case
+ * that bound ever grows without this buffer being revisited too. static,
+ * not stack-local -- 10KB+ is not something to put on the stack
+ * unconditionally on every reply, same reasoning as the mesh vertex/face
+ * reply buffers above; this client is single-threaded on the calling
+ * side, so static reuse is safe. */
 void net_send_scene_state_reply(NetState *ns, uint32_t req_id, const char *json) {
     (void)ns;
-    uint8_t pkt[1 + 4 + 2 + 3072];
+    static uint8_t pkt[1 + 4 + 2 + 12288];
     uint8_t *p = pkt;
     p = w_u8(p, PKT_SCENE_STATE_REPLY);
     memcpy(p, &req_id, 4); p += 4;
-    p = w_lenprefixed16(p, json);
+    p = w_lenprefixed16(p, json, 12288);
     ws_send_binary(pkt, (int)(p - pkt));
 }
 
@@ -328,6 +374,80 @@ void net_send_delete_mesh_object_reply(NetState *ns, uint32_t req_id, int ok) {
     uint8_t pkt[1 + 4 + 1];
     uint8_t *p = pkt;
     p = w_u8(p, PKT_DELETE_MESH_OBJECT_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+/* static, not stack-local -- same reasoning as PKT_CREATE_MESH_REQUEST's
+ * own pos_buf/idx_buf below (a PKT_MESH_MAX_VERTS/TRIS-sized array is
+ * tens of KB, not something to put on the stack unconditionally on every
+ * call). This client is single-threaded on the calling side (main
+ * render/network loop), so static reuse across calls is safe here the
+ * same way it already is there. */
+void net_send_get_mesh_vertices_reply(NetState *ns, uint32_t req_id, int ok, const float *positions, int vert_count) {
+    (void)ns;
+    if (vert_count > PKT_MESH_MAX_VERTS) vert_count = PKT_MESH_MAX_VERTS;   /* defensive -- see PKT_GET_MESH_VERTICES_REPLY's own comment */
+    static uint8_t pkt[1 + 4 + 1 + 2 + PKT_MESH_MAX_VERTS * 3 * sizeof(float)];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_GET_MESH_VERTICES_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    uint16_t vc = (uint16_t)(ok ? vert_count : 0);
+    memcpy(p, &vc, 2); p += 2;
+    if (ok && vert_count > 0) {
+        size_t n = (size_t)vert_count * 3 * sizeof(float);
+        memcpy(p, positions, n); p += n;
+    }
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_get_mesh_faces_reply(NetState *ns, uint32_t req_id, int ok, const uint16_t *face_indices, const uint16_t *verts, int face_count) {
+    (void)ns;
+    if (face_count > PKT_MESH_MAX_TRIS) face_count = PKT_MESH_MAX_TRIS;   /* defensive -- see PKT_GET_MESH_FACES_REPLY's own comment */
+    static uint8_t pkt[1 + 4 + 1 + 2 + PKT_MESH_MAX_TRIS * 4 * sizeof(uint16_t)];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_GET_MESH_FACES_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    uint16_t fc = (uint16_t)(ok ? face_count : 0);
+    memcpy(p, &fc, 2); p += 2;
+    for (int i = 0; i < (ok ? face_count : 0); i++) {
+        memcpy(p, &face_indices[i], 2); p += 2;
+        memcpy(p, &verts[i*3+0], 2); p += 2;
+        memcpy(p, &verts[i*3+1], 2); p += 2;
+        memcpy(p, &verts[i*3+2], 2); p += 2;
+    }
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_add_mesh_vertex_reply(NetState *ns, uint32_t req_id, int ok, uint32_t vertex_index) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1 + 4];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_ADD_MESH_VERTEX_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    memcpy(p, &vertex_index, 4); p += 4;
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_add_mesh_face_reply(NetState *ns, uint32_t req_id, int ok, uint32_t face_index) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1 + 4];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_ADD_MESH_FACE_REPLY);
+    memcpy(p, &req_id, 4); p += 4;
+    p = w_u8(p, ok ? 1 : 0);
+    memcpy(p, &face_index, 4); p += 4;
+    ws_send_binary(pkt, (int)(p - pkt));
+}
+
+void net_send_set_mesh_vertex_reply(NetState *ns, uint32_t req_id, int ok) {
+    (void)ns;
+    uint8_t pkt[1 + 4 + 1];
+    uint8_t *p = pkt;
+    p = w_u8(p, PKT_SET_MESH_VERTEX_REPLY);
     memcpy(p, &req_id, 4); p += 4;
     p = w_u8(p, ok ? 1 : 0);
     ws_send_binary(pkt, (int)(p - pkt));
@@ -487,6 +607,59 @@ void net_on_message(NetState *ns, const uint8_t *data, int len) {
         uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
         uint32_t object_id; memcpy(&object_id, p, 4); p += 4;
         if (s_delete_mesh_object_handler) s_delete_mesh_object_handler(req_id, object_id);
+        break;
+    }
+
+    case PKT_GET_MESH_VERTICES_REQUEST: {
+        if (len < 1 + 4 + 4) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint32_t object_id; memcpy(&object_id, p, 4); p += 4;
+        if (s_get_mesh_vertices_handler) s_get_mesh_vertices_handler(req_id, object_id);
+        break;
+    }
+
+    case PKT_GET_MESH_FACES_REQUEST: {
+        if (len < 1 + 4 + 4) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint32_t object_id; memcpy(&object_id, p, 4); p += 4;
+        if (s_get_mesh_faces_handler) s_get_mesh_faces_handler(req_id, object_id);
+        break;
+    }
+
+    case PKT_ADD_MESH_VERTEX_REQUEST: {
+        if (len < 1 + 4 + 4 + 12) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint32_t object_id; memcpy(&object_id, p, 4); p += 4;
+        float x, y, z;
+        memcpy(&x, p, 4); p += 4;
+        memcpy(&y, p, 4); p += 4;
+        memcpy(&z, p, 4); p += 4;
+        if (s_add_mesh_vertex_handler) s_add_mesh_vertex_handler(req_id, object_id, x, y, z);
+        break;
+    }
+
+    case PKT_ADD_MESH_FACE_REQUEST: {
+        if (len < 1 + 4 + 4 + 6) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint32_t object_id; memcpy(&object_id, p, 4); p += 4;
+        uint16_t v0, v1, v2;
+        memcpy(&v0, p, 2); p += 2;
+        memcpy(&v1, p, 2); p += 2;
+        memcpy(&v2, p, 2); p += 2;
+        if (s_add_mesh_face_handler) s_add_mesh_face_handler(req_id, object_id, v0, v1, v2);
+        break;
+    }
+
+    case PKT_SET_MESH_VERTEX_REQUEST: {
+        if (len < 1 + 4 + 4 + 2 + 12) break;
+        uint32_t req_id; memcpy(&req_id, p, 4); p += 4;
+        uint32_t object_id; memcpy(&object_id, p, 4); p += 4;
+        uint16_t vertex_index; memcpy(&vertex_index, p, 2); p += 2;
+        float x, y, z;
+        memcpy(&x, p, 4); p += 4;
+        memcpy(&y, p, 4); p += 4;
+        memcpy(&z, p, 4); p += 4;
+        if (s_set_mesh_vertex_handler) s_set_mesh_vertex_handler(req_id, object_id, vertex_index, x, y, z);
         break;
     }
 
