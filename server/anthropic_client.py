@@ -22,7 +22,18 @@ log = logging.getLogger('anthropic_client')
 API_URL = 'https://api.anthropic.com/v1/messages'
 API_VERSION = '2023-06-01'
 DEFAULT_MODEL = os.environ.get('PHI_ANTHROPIC_MODEL', 'claude-sonnet-5')
-MAX_TOKENS = 1024
+# Was 1024, then 4096 -- still too tight for a real generated mesh (a
+# house-scale shape's positions/indices arrays can run well past a few
+# thousand tokens). A response that hits the cap mid-tool-call truncates
+# with stop_reason='max_tokens' and no usable text or complete tool_use
+# block -- see run_tool_loop's explicit handling of that below for what
+# used to happen instead (silently returned ''). Raised again here; if a
+# genuinely huge single-call mesh still gets cut off, the model should be
+# told (via the system prompt) to build it in smaller pieces across
+# multiple create_mesh_object/set_mesh_vertices calls rather than pushing
+# this value past what the API accepts without an extended-output beta
+# header (not added here, since nothing has needed it yet).
+MAX_TOKENS = 8192
 
 # Human-readable labels for the Chat panel's "Name: ..." username prefix
 # (see client/ui.c's draw_panel_chat -- it bolds whatever's before the
@@ -70,7 +81,14 @@ def _post(body: dict) -> dict:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # Was 30s -- too tight now that MAX_TOKENS is 8192; a real,
+        # legitimately-in-progress large tool call (generated mesh geometry
+        # especially) can take meaningfully longer than that to finish
+        # generating, and a network-level timeout here looks identical to
+        # "the model is stuck" from the caller's side (URLError, not a
+        # truncation this module can detect/explain the way it now does
+        # for stop_reason='max_tokens').
+        with urllib.request.urlopen(req, timeout=90) as resp:
             return json.loads(resp.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors='replace')
@@ -90,6 +108,7 @@ def run_tool_loop(system: str, user_message: str, tools: list[dict], dispatch: d
     is still caught (see below) but aborts the WHOLE reply rather than
     just that one tool call, so callers should prefer the former.
     """
+    log.info(f'tool loop start: user_message={user_message[:200]!r}')
     messages = [{'role': 'user', 'content': user_message}]
 
     for _round in range(MAX_TOOL_ROUNDS):
@@ -102,14 +121,42 @@ def run_tool_loop(system: str, user_message: str, tools: list[dict], dispatch: d
         })
 
         if 'error' in resp:
+            log.warning(f'round {_round}: API returned an error: {resp["error"]!r}')
             raise AnthropicError(resp['error'].get('message', str(resp['error'])))
 
         content = resp.get('content', [])
         stop_reason = resp.get('stop_reason')
+        usage = resp.get('usage', {})
+        block_types = [b.get('type') for b in content]
+        log.info(f'round {_round}: stop_reason={stop_reason} blocks={block_types} '
+                  f'usage={usage.get("input_tokens")}in/{usage.get("output_tokens")}out')
         messages.append({'role': 'assistant', 'content': content})
 
+        # A truncated response (hit MAX_TOKENS before the model finished)
+        # is NOT the same thing as a normal, deliberate empty reply -- the
+        # content in hand may be a half-written tool_use block (so no
+        # complete tool call to dispatch) and/or no text block at all.
+        # Previously this fell into the `stop_reason != 'tool_use'` branch
+        # below and silently returned '', which is exactly what looked
+        # like "Claude said nothing and did nothing" from the Chat panel
+        # with zero indication of why. Surface it for real instead, both
+        # to the server log and (briefly) to the user.
+        if stop_reason == 'max_tokens':
+            text = ''.join(b.get('text', '') for b in content if b.get('type') == 'text')
+            log.warning(f'round {_round}: hit MAX_TOKENS ({MAX_TOKENS}) before finishing -- '
+                        f'response truncated, {len(text)} chars of text recovered')
+            if text:
+                return text + '\n\n(cut off -- hit the reply length limit)'
+            return ('(the reply was cut off by the token limit before producing any text -- '
+                    'likely mid-way through a large tool call, e.g. a big generated mesh; '
+                    'try asking for something smaller or in fewer steps)')
+
         if stop_reason != 'tool_use':
-            return ''.join(b.get('text', '') for b in content if b.get('type') == 'text')
+            text = ''.join(b.get('text', '') for b in content if b.get('type') == 'text')
+            if not text:
+                log.warning(f'round {_round}: stop_reason={stop_reason} but no text block in the '
+                            f'response (blocks={block_types}) -- returning an empty reply')
+            return text
 
         tool_results = []
         for block in content:
@@ -120,11 +167,14 @@ def run_tool_loop(system: str, user_message: str, tools: list[dict], dispatch: d
             fn = dispatch.get(name)
             if fn is None:
                 result_text = f'Unknown tool: {name}'
+                log.warning(f'round {_round}: model called unknown tool {name!r}')
             else:
                 try:
                     result_text = fn(tool_input)
                 except Exception as e:
                     result_text = f'Tool {name} raised: {e}'
+                    log.warning(f'round {_round}: tool {name} raised: {e!r}')
+            log.info(f'round {_round}: tool {name}({tool_input!r}) -> {str(result_text)[:200]!r}')
             tool_results.append({
                 'type': 'tool_result',
                 'tool_use_id': block.get('id'),
@@ -132,4 +182,5 @@ def run_tool_loop(system: str, user_message: str, tools: list[dict], dispatch: d
             })
         messages.append({'role': 'user', 'content': tool_results})
 
+    log.warning(f'tool loop: hit MAX_TOOL_ROUNDS ({MAX_TOOL_ROUNDS}) without a final answer')
     return '(stopped after reaching the tool-call round limit without a final answer)'

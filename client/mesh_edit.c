@@ -169,6 +169,35 @@ int mesh_edit_loop_cut_edge(HalfEdgeMesh *hem, int e) {
     return mv;
 }
 
+int mesh_edit_flip_normals(HalfEdgeMesh *hem) {
+    /* Snapshot the face count first -- faces added below (the re-added,
+     * flipped replacements) must NOT themselves be visited again by this
+     * same pass; append-only growth (see halfedge.h) means new faces land
+     * past this bound. */
+    int original_count = hem->face_count;
+    int flipped = 0;
+    for (int f = 0; f < original_count; f++) {
+        if (hem->faces[f].deleted) continue;
+        int n = hem->faces[f].count;
+        /* n is always 3 in this codebase (triangles-only) -- same fixed
+         * bound as extrude_or_inset's new_v[8] above, for the same reason. */
+        int verts[8];
+        if (n > 8) continue;
+        halfedge_face_verts(hem, f, verts);
+        for (int i = 0; i < n / 2; i++) {
+            int tmp = verts[i]; verts[i] = verts[n - 1 - i]; verts[n - 1 - i] = tmp;
+        }
+
+        HEFace src = hem->faces[f];
+        halfedge_delete_face(hem, f);
+        int newf = halfedge_add_face(hem, verts, n);
+        if (newf < 0) continue;
+        halfedge_set_face_material(hem, newf, src.base_color, src.metallic, src.roughness, src.emission);
+        flipped++;
+    }
+    return flipped;
+}
+
 int mesh_edit_nearest_edge_of_face(const HalfEdgeMesh *hem, int f, float hit_x, float hit_y, float hit_z) {
     if (f < 0 || f >= hem->face_count || hem->faces[f].deleted) return -1;
     V3 hit = { hit_x, hit_y, hit_z };

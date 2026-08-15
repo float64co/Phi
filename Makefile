@@ -452,7 +452,7 @@ $(OUT_ANIMATION_TEST): $(ANIMATION_TEST_SRCS) | $(BUILDDIR)
 # defined near COMMON_SRCS now, not here, since the real build needs them
 # too.
 # ---------------------------------------------------------------
-MP_TEST_SRCS  := $(SRCDIR)/mp_test_main.c $(SRCDIR)/mp_port.c \
+MP_TEST_SRCS  := $(SRCDIR)/mp_test_main.c $(SRCDIR)/mp_port.c $(SRCDIR)/mesh_edit.c \
                          $(SRCDIR)/scene_objects.c \
                   $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                   $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
@@ -472,7 +472,7 @@ $(OUT_MP_TEST): $(MP_TEST_SRCS) | $(BUILDDIR)
 # phi.prop_get/set + phi_mp_panel_count/name/draw_panel, see phi_prop.h) --
 # same no-GL-dependency rationale as mp_test above, against a real embedded
 # interpreter (not a mock).
-MP_PROP_PANEL_TEST_SRCS := $(SRCDIR)/mp_prop_panel_test_main.c $(SRCDIR)/mp_port.c \
+MP_PROP_PANEL_TEST_SRCS := $(SRCDIR)/mp_prop_panel_test_main.c $(SRCDIR)/mp_port.c $(SRCDIR)/mesh_edit.c \
                          $(SRCDIR)/scene_objects.c \
                             $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                             $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
@@ -494,7 +494,7 @@ $(OUT_MP_PROP_PANEL_TEST): $(MP_PROP_PANEL_TEST_SRCS) | $(BUILDDIR)
 # panel_test above, same real phi_physics.cpp/Bullet link (mp_port.c's
 # OTHER physics bindings need real definitions regardless of whether
 # this specific test calls them).
-MP_GEOMETRY_TEST_SRCS := $(SRCDIR)/mp_geometry_test_main.c $(SRCDIR)/mp_port.c \
+MP_GEOMETRY_TEST_SRCS := $(SRCDIR)/mp_geometry_test_main.c $(SRCDIR)/mp_port.c $(SRCDIR)/mesh_edit.c \
                           $(SRCDIR)/scene_objects.c \
                           $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                           $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
@@ -514,7 +514,7 @@ $(OUT_MP_GEOMETRY_TEST): $(MP_GEOMETRY_TEST_SRCS) | $(BUILDDIR)
 # patterns, out of scope here): this is what Phase 1's Console-as-real-
 # Python-REPL piece actually depends on. No GL dependency, same rationale
 # as mesh_edit_test/fracture_test.
-MP_CONSOLE_TEST_SRCS := $(SRCDIR)/mp_console_test_main.c $(SRCDIR)/mp_port.c \
+MP_CONSOLE_TEST_SRCS := $(SRCDIR)/mp_console_test_main.c $(SRCDIR)/mp_port.c $(SRCDIR)/mesh_edit.c \
                          $(SRCDIR)/scene_objects.c \
                          $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                          $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
@@ -557,7 +557,7 @@ $(OUT_MP_TEST_WIN32): $(MP_TEST_SRCS) | $(BUILDDIR)
 	chmod +x $(OUT_MP_TEST_WIN32)
 	@echo "mp_test_win32 build complete -> $(OUT_MP_TEST_WIN32)"
 
-MP_STRESS_SRCS := $(SRCDIR)/mp_stress_test_main.c $(SRCDIR)/mp_port.c \
+MP_STRESS_SRCS := $(SRCDIR)/mp_stress_test_main.c $(SRCDIR)/mp_port.c $(SRCDIR)/mesh_edit.c \
                          $(SRCDIR)/scene_objects.c \
                    $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                    $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \

@@ -39,6 +39,7 @@
 #include "halfedge.h"
 #include "halfedge_gltf.h"
 #include "scene_objects.h"
+#include "mesh_edit.h"
 
 mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
     mp_raise_OSError(ENOENT);
@@ -474,6 +475,234 @@ static mp_obj_t native_delete_object(mp_obj_t id_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(native_delete_object_obj, native_delete_object);
 
+/* ---- Incremental mesh editing, exposed to Python -- adding vertices/
+ * faces to EXISTING geometry (create_mesh/set_vertices above only cover
+ * from-scratch build and same-topology-rewrite), reading back current
+ * geometry (nothing above lets a script see what's already there),
+ * flipping winding, and mesh_edit.c's own extrude/inset/loop-cut
+ * operations -- already used by the right-click context menu, but not
+ * Python-reachable until now. Together these are what let a script (or
+ * Claude driving one) reshape a mesh into new topology one edit at a
+ * time, not just replace it wholesale. ---- */
+
+static mp_obj_t native_get_vertices(mp_obj_t id_obj) {
+    int id = mp_obj_get_int(id_obj);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.get_vertices: no such object (or it has no editable geometry)"));
+    }
+    HalfEdgeMesh *hem = obj->hem;
+    mp_obj_t *items = (mp_obj_t *)malloc((size_t)hem->vert_count * 3 * sizeof(mp_obj_t));
+    for (int i = 0; i < hem->vert_count; i++) {
+        items[i*3+0] = mp_obj_new_float(hem->verts[i].pos[0]);
+        items[i*3+1] = mp_obj_new_float(hem->verts[i].pos[1]);
+        items[i*3+2] = mp_obj_new_float(hem->verts[i].pos[2]);
+    }
+    mp_obj_t result = mp_obj_new_tuple((size_t)hem->vert_count * 3, items);
+    free(items);
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_get_vertices_obj, native_get_vertices);
+
+/* One (face_index, (v0,v1,...)) pair per LIVE face (deleted/tombstoned
+ * faces are skipped, same as halfedge_flatten_triangles does for
+ * rendering). face_index is included explicitly -- NOT just this face's
+ * position in the returned tuple -- because tombstoning leaves gaps in
+ * hem->faces; position-in-list only equals real face index when nothing
+ * has ever been deleted. delete_face/extrude_face/inset_face all need the
+ * real index, so a script enumerating faces has to be able to get it back
+ * out of get_faces() rather than reconstruct it. n-gon aware via
+ * HEFace.count even though every live face is a triangle in this codebase
+ * today (see halfedge.h). */
+static mp_obj_t native_get_faces(mp_obj_t id_obj) {
+    int id = mp_obj_get_int(id_obj);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.get_faces: no such object (or it has no editable geometry)"));
+    }
+    HalfEdgeMesh *hem = obj->hem;
+    mp_obj_t *faces = (mp_obj_t *)malloc((size_t)(hem->face_count > 0 ? hem->face_count : 1) * sizeof(mp_obj_t));
+    int live_count = 0;
+    for (int f = 0; f < hem->face_count; f++) {
+        if (hem->faces[f].deleted) continue;
+        int n = hem->faces[f].count;
+        int verts[64];
+        if (n > 64) n = 64;   /* defensive -- triangles only today, well under this */
+        halfedge_face_verts(hem, f, verts);
+        mp_obj_t v_items[64];
+        for (int i = 0; i < n; i++) v_items[i] = mp_obj_new_int(verts[i]);
+        mp_obj_t pair[2] = { mp_obj_new_int(f), mp_obj_new_tuple((size_t)n, v_items) };
+        faces[live_count++] = mp_obj_new_tuple(2, pair);
+    }
+    mp_obj_t result = mp_obj_new_tuple((size_t)live_count, faces);
+    free(faces);
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_get_faces_obj, native_get_faces);
+
+/* Adding a lone vertex doesn't change anything a render-mesh rebuild would
+ * pick up (halfedge_flatten_triangles/meshobject_build_render_mesh_from_
+ * halfedge only ever walk LIVE FACES, never unreferenced vertices) --
+ * so unlike add_face/delete_face/flip_normals below, this one skips the
+ * rebuild; there's nothing to redraw until the new vertex is actually
+ * used in a face. */
+static mp_obj_t native_add_vertex(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int id = mp_obj_get_int(args[0]);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.add_vertex: no such object (or it has no editable geometry)"));
+    }
+    float x = (float)mp_obj_get_float(args[1]);
+    float y = (float)mp_obj_get_float(args[2]);
+    float z = (float)mp_obj_get_float(args[3]);
+    int idx = halfedge_add_vertex(obj->hem, x, y, z);
+    return mp_obj_new_int(idx);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_add_vertex_obj, 4, 4, native_add_vertex);
+
+/* Exactly 3 indices -- this codebase's editable meshes are triangles-only
+ * for now (see halfedge.h/mesh_edit.h); halfedge_flatten_triangles assumes
+ * every LIVE face already is one, so accepting an n-gon here would corrupt
+ * the next render-mesh rebuild rather than fail loudly. Indices are
+ * bounds-checked here because halfedge_add_face itself does not -- an
+ * out-of-range index writes straight past hem->verts (see its own
+ * implementation), the same reason native_create_mesh above validates
+ * before calling halfedge_build_from_triangles. */
+static mp_obj_t native_add_face(mp_obj_t id_obj, mp_obj_t indices_obj) {
+    int id = mp_obj_get_int(id_obj);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.add_face: no such object (or it has no editable geometry)"));
+    }
+    size_t n; mp_obj_t *items;
+    mp_obj_get_array(indices_obj, &n, &items);
+    if (n != 3) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.add_face: must be exactly 3 vertex indices (this engine's editable meshes are triangles-only for now)"));
+    }
+    int verts[3];
+    for (size_t i = 0; i < n; i++) {
+        int v = mp_obj_get_int(items[i]);
+        if (v < 0 || v >= obj->hem->vert_count) {
+            mp_raise_ValueError(MP_ERROR_TEXT("phi.add_face: a vertex index is out of range"));
+        }
+        verts[i] = v;
+    }
+    int f = halfedge_add_face(obj->hem, verts, 3);
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    return mp_obj_new_int(f);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_add_face_obj, native_add_face);
+
+static mp_obj_t native_delete_face(mp_obj_t id_obj, mp_obj_t face_obj) {
+    int id = mp_obj_get_int(id_obj);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.delete_face: no such object (or it has no editable geometry)"));
+    }
+    int f = mp_obj_get_int(face_obj);
+    if (f < 0 || f >= obj->hem->face_count || obj->hem->faces[f].deleted) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.delete_face: no such face (out of range, or already deleted)"));
+    }
+    halfedge_delete_face(obj->hem, f);
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_delete_face_obj, native_delete_face);
+
+/* Whole-object winding flip (mesh_edit_flip_normals, see mesh_edit.h for
+ * why this is the safe granularity -- flipping a single face's winding
+ * without its neighbors breaks half-edge twin consistency). Returns the
+ * number of faces flipped, so a script can tell the call actually did
+ * something. */
+static mp_obj_t native_flip_normals(mp_obj_t id_obj) {
+    int id = mp_obj_get_int(id_obj);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.flip_normals: no such object (or it has no editable geometry)"));
+    }
+    int n = mesh_edit_flip_normals(obj->hem);
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    return mp_obj_new_int(n);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_flip_normals_obj, native_flip_normals);
+
+static mp_obj_t native_extrude_face(mp_obj_t id_obj, mp_obj_t face_obj, mp_obj_t dist_obj) {
+    int id = mp_obj_get_int(id_obj);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.extrude_face: no such object (or it has no editable geometry)"));
+    }
+    int f = mp_obj_get_int(face_obj);
+    float dist = (float)mp_obj_get_float(dist_obj);
+    int newf = mesh_edit_extrude_face(obj->hem, f, dist);
+    if (newf < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.extrude_face: failed (out-of-range/deleted face, or not a triangle)"));
+    }
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    return mp_obj_new_int(newf);
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(native_extrude_face_obj, native_extrude_face);
+
+static mp_obj_t native_inset_face(mp_obj_t id_obj, mp_obj_t face_obj, mp_obj_t factor_obj) {
+    int id = mp_obj_get_int(id_obj);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.inset_face: no such object (or it has no editable geometry)"));
+    }
+    int f = mp_obj_get_int(face_obj);
+    float factor = (float)mp_obj_get_float(factor_obj);
+    int newf = mesh_edit_inset_face(obj->hem, f, factor);
+    if (newf < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.inset_face: failed (out-of-range/deleted face, or not a triangle)"));
+    }
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    return mp_obj_new_int(newf);
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(native_inset_face_obj, native_inset_face);
+
+static mp_obj_t native_loop_cut(mp_obj_t id_obj, mp_obj_t edge_obj) {
+    int id = mp_obj_get_int(id_obj);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.loop_cut: no such object (or it has no editable geometry)"));
+    }
+    int e = mp_obj_get_int(edge_obj);
+    int mv = mesh_edit_loop_cut_edge(obj->hem, e);
+    if (mv < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.loop_cut: failed (out-of-range edge, or its face isn't a live triangle)"));
+    }
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, obj->hem);
+    return mp_obj_new_int(mv);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_loop_cut_obj, native_loop_cut);
+
+/* Companion to loop_cut above -- loop_cut takes an EDGE index, but nothing
+ * exposed to Python enumerates edges at all (get_faces only gives vertex
+ * indices per face). Without this, loop_cut would be uncallable from a
+ * script except by guessing indices. Mirrors exactly how the interactive
+ * right-click loop-cut tool itself resolves a pick: a face + an
+ * approximate 3D point (e.g. the midpoint of the edge a script wants) maps
+ * to the real edge index whose own midpoint is nearest. */
+static mp_obj_t native_nearest_edge_of_face(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    int id = mp_obj_get_int(args[0]);
+    MeshObject *obj = scene_object_find(id);
+    if (!obj || !obj->hem) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.nearest_edge_of_face: no such object (or it has no editable geometry)"));
+    }
+    int f = mp_obj_get_int(args[1]);
+    float x = (float)mp_obj_get_float(args[2]);
+    float y = (float)mp_obj_get_float(args[3]);
+    float z = (float)mp_obj_get_float(args[4]);
+    int e = mesh_edit_nearest_edge_of_face(obj->hem, f, x, y, z);
+    if (e < 0) {
+        mp_raise_ValueError(MP_ERROR_TEXT("phi.nearest_edge_of_face: no such face (out of range or deleted)"));
+    }
+    return mp_obj_new_int(e);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_nearest_edge_of_face_obj, 5, 5, native_nearest_edge_of_face);
+
 /* Phase 3's real offline path tracer (path_tracer.h), triggered from
  * Python -- main.c owns the actual scene-collection/pt_render/pt_write_
  * png logic (render_still_frame_to_disk), registered here as a plain
@@ -593,6 +822,16 @@ static const char *PHI_BOOTSTRAP =
     "phi.set_vertex = _native_set_vertex\n"
     "phi.list_objects = _native_list_objects\n"
     "phi.delete_object = _native_delete_object\n"
+    "phi.get_vertices = _native_get_vertices\n"
+    "phi.get_faces = _native_get_faces\n"
+    "phi.add_vertex = _native_add_vertex\n"
+    "phi.add_face = _native_add_face\n"
+    "phi.delete_face = _native_delete_face\n"
+    "phi.flip_normals = _native_flip_normals\n"
+    "phi.extrude_face = _native_extrude_face\n"
+    "phi.inset_face = _native_inset_face\n"
+    "phi.loop_cut = _native_loop_cut\n"
+    "phi.nearest_edge_of_face = _native_nearest_edge_of_face\n"
     "phi.render = _native_render\n"
     "phi.activate_ragdoll = _native_activate_ragdoll\n";
 
@@ -657,6 +896,16 @@ static void phi_mp_install_bindings(void) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_vertex")), MP_OBJ_FROM_PTR(&native_set_vertex_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_list_objects")), MP_OBJ_FROM_PTR(&native_list_objects_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_delete_object")), MP_OBJ_FROM_PTR(&native_delete_object_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_vertices")), MP_OBJ_FROM_PTR(&native_get_vertices_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_faces")), MP_OBJ_FROM_PTR(&native_get_faces_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_add_vertex")), MP_OBJ_FROM_PTR(&native_add_vertex_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_add_face")), MP_OBJ_FROM_PTR(&native_add_face_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_delete_face")), MP_OBJ_FROM_PTR(&native_delete_face_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_flip_normals")), MP_OBJ_FROM_PTR(&native_flip_normals_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_extrude_face")), MP_OBJ_FROM_PTR(&native_extrude_face_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_inset_face")), MP_OBJ_FROM_PTR(&native_inset_face_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_loop_cut")), MP_OBJ_FROM_PTR(&native_loop_cut_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_nearest_edge_of_face")), MP_OBJ_FROM_PTR(&native_nearest_edge_of_face_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_render")), MP_OBJ_FROM_PTR(&native_render_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_activate_ragdoll")), MP_OBJ_FROM_PTR(&native_activate_ragdoll_obj));
 

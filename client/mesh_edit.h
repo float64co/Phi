@@ -59,3 +59,15 @@ int mesh_edit_loop_cut_edge(HalfEdgeMesh *hem, int e);
  * mesh_edit_loop_cut_edge without needing separate edge-picking UI/input.
  * Returns -1 if f is out of range or deleted. */
 int mesh_edit_nearest_edge_of_face(const HalfEdgeMesh *hem, int f, float hit_x, float hit_y, float hit_z);
+
+/* Reverses every LIVE face's winding order (and hence its normal
+ * direction) across the whole mesh, preserving each face's material.
+ * Uses the same delete-then-readd technique extrude/inset use above, one
+ * face at a time (halfedge.c has no in-place mutation, see this file's own
+ * comment). As long as every face bordering a given edge gets flipped
+ * exactly once -- true here, since this walks every live face in the
+ * mesh -- halfedge_add_face's own twin-finding naturally re-links each
+ * edge to its now-also-flipped neighbor by the time both sides have been
+ * processed, restoring full twin consistency by the end. Returns the
+ * number of faces flipped. */
+int mesh_edit_flip_normals(HalfEdgeMesh *hem);

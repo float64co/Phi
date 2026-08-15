@@ -5,6 +5,14 @@ It covers architecture decisions, the full development roadmap, and the
 current development strategy. Intended to be passed to a fresh Claude instance
 as a starting point for any phase of work.
 
+Phi is two things built from one codebase: the editor (everything else in this
+document) and a standalone player. Shipping a game is not an "export" step —
+it's a compile. A user clones this repository once per game, drops assets and
+scripts into `./game/`, and builds `player_main.c` (no panels, no chrome —
+just window → init → main menu → gameplay loop) against the same shared
+engine core using their own GCC or MSVC. No `emcc`, no WASM, no live server
+in the shipped binary. See Phase 9 for the full mechanism.
+
 Merged from `phi_brief.md` and `phi_desktop.md` (2026-08-08). Superseding
 decisions made in this merge: FEA is out of scope (split into separate CAD
 software) and the editor UI is the custom Blender DNA/RNA-style system, not
@@ -15,6 +23,12 @@ pattern — validated in `qek/`'s octree editor — is now stated explicitly as 
 cross-cutting principle (see Core Pattern, below) rather than left implicit
 per-phase. glTF 2.0 (`.glb`/`.gltf`) is now the mesh file format from Phase 1
 onward — there is no bespoke `.pmesh` format; see Core Pattern and Phase 1.
+
+Revised 2026-08-15: added Phase 9 (Shipping a Standalone Game) — the
+editor/player build split, the `./game/` directory convention, the
+`game/src/` native C API, Asset Browser asset-marking, and vendored-SDL2
+gamepad/Steam Deck support. This closes the previously-open question of how
+a game built in Phi actually gets to Steam.
 
 ---
 
@@ -151,7 +165,7 @@ conversation:
 |---|---|
 | No ImGui | Native UI system modelled on Blender DNA/RNA, written in C, panels authored in Python via `@phi.panel` |
 | No Tauri | Output is `.wasm` or `glext.h`-based native executable only |
-| No SDL / GLFW | Native platform APIs directly; wrapped behind `phi_platform.h` |
+| No SDL / GLFW for windowing, GL context, or audio | Native platform APIs directly; wrapped behind `phi_platform.h`. **Exception (Phase 9):** SDL2's `GameController` subsystem specifically is vendored for gamepad/Steam Deck input — controller-mapping-database work (`SDL_GameControllerDB`, hundreds of physical controller layouts) is a solved problem, not worth reinventing, unlike windowing/GL/audio which stay hand-rolled. This is the one deliberate, conscious exception to this row. |
 | No ammo.js | Bullet physics compiled directly via `emcc` |
 | WebGL 2 from day one | `USE_WEBGL2=1`, `FULL_ES3=1`; no WebGL 1.0 constraints anywhere |
 | MicroPython (not CPython/Pyodide) | ~200–400 KB compiled into `engine.wasm` |
@@ -209,6 +223,11 @@ running) is sufficient between milestones.
 
 ## Distribution Model
 
+Phi has two distribution channels with genuinely different models. Don't
+conflate them.
+
+### Browser/hosted distribution (editor, and any web-hosted runtime)
+
 ```
 Distributed to users:
   engine.wasm      — opaque binary: engine + editor + MicroPython + Bullet
@@ -233,6 +252,17 @@ never shipped. Users keep their `.c` source; they receive a `.wasm` side module.
 WASM binaries are not cryptographically opaque (`wasm2c` can decompile them), but
 this is equivalent to shipping a compiled `.dll` — sufficient for practical IP
 protection.
+
+### Standalone game distribution (Phase 9)
+
+There is no opaque binary and no cloud compile step here at all — see Phase 9
+for the full mechanism. A user clones the Phi repository itself to build a
+game, so unlike the browser model above, **engine source is not kept private**
+in this channel — that's the deliberate trade of the clone-per-game model, not
+an oversight. `game/src/*.c` compiles and links via the user's own local GCC
+or MSVC directly into the shipped native executable; `emcc`/WASM plays no part
+in a shipped game at all, even though the engine itself still supports a wasm
+build target for the browser/editor channel above.
 
 ---
 
@@ -4543,6 +4573,126 @@ required across peers.
 
 ---
 
+## Phase 9 — Shipping a Standalone Game (Single-Player)
+
+### Goal
+
+Let a user clone Phi, build a real single-player game inside their clone, and
+get a standalone native executable with no editor chrome and no live server
+dependency at runtime — suitable for Steam distribution. Multiplayer (Phase 8)
+is explicitly out of scope here; this phase covers the init → main menu →
+gameplay loop shipping path only.
+
+### The clone-per-game model
+
+There is no "export" step and no packaged SDK separate from the engine. A user
+clones the Phi repository once per game project — their game *is* a fork of
+the engine repo, not a project referencing an installed dependency. This
+mirrors how id Software-era engines (Quake, Doom) shipped: engine and
+game-built-on-it are the same source tree. The user is expected to have a real
+C toolchain already — GCC/Clang on Linux/macOS, MSVC on Windows — the same
+requirement as building the editor itself today.
+
+### Editor / player split
+
+The engine core (renderer, physics, `scene_objects.c`, animation,
+MicroPython/`mp_port.c`) is shared and unchanged. Two thin drivers link
+against it:
+
+- `editor_main.c` — today's `main.c`. Full panel UI, Asset Browser, Chat
+  panel, live `ws://` connection to `server.py`. Unchanged.
+- `player_main.c` — new. No panels, no outliner, no chat, no live server
+  connection at all. Boots straight into: load `./game/` → run its init →
+  main menu → gameplay loop. This is the "chromeless gameloop" — the same
+  rendering/physics/animation/scripting stack as the editor, minus every
+  editor-only system.
+
+`make native`/`make win32` gain a second executable target (the player),
+built from the same object files as the editor target plus `player_main.c`
+instead of `main.c`. No new build-target category — wasm still plays no part
+in the shipped-game path (see Distribution Model).
+
+### `./game/` directory
+
+```
+game/
+  assets/            — .glb/.gltf marked "in game" from the Asset Browser
+  main.py            — OR —
+  src/
+    main.c           — entry point, either format
+    *.c               — additional game-authored C, compiled + statically
+                        linked alongside main.c
+```
+
+- If `game/main.py` exists, it's the top-level driver: `player_main.c` boots
+  MicroPython (same embed mechanism `mp_port.c` already proves), execs it
+  once, then calls a `tick(dt)` function it defines every frame. The script
+  owns its own internal state machine (menu → gameplay → …) — no
+  `phi.on()`/`emit()` event system needed for this.
+- If `game/src/main.c` exists instead, it *is* the state machine:
+  `player_main.c` calls real exported C symbols (`game_init()`,
+  `game_tick(float dt)`, `game_shutdown()`) directly — no MicroPython round
+  trip in the hot path.
+- Both can coexist: a `game/main.py`-driven game can still have
+  `game/src/*.c` files, compiled and statically linked, exposed back into
+  Python as ordinary `phi.*`-style bound functions (the same pattern
+  `mp_port.c` already uses to expose engine internals) — a real path to
+  hand-written performance-critical code from a mostly-Python game.
+
+### The `game/src/` C API
+
+A curated `phi.h` (the same public-header concept already used for the
+browser channel's side modules, repurposed here for the native path) exposes
+engine primitives — mesh/vertex access, the physics world, scene object
+queries, the render-pass insertion points from Phase 0 — to user-authored
+`game/src/*.c`. Compiled and statically linked via the user's own local GCC/
+MSVC at build time; no cloud compilation endpoint, no dynamic `.wasm`
+side-module loading anywhere in this path — that machinery exists only for
+the browser-hosted channel, where a compiler isn't available client-side. A
+standalone game build always has a real local toolchain, so that complexity
+doesn't apply here.
+
+**Scope note, stated plainly:** the API does not ship smoke, fluid, or
+Euphoria-style procedural-animation systems. It exposes the integration
+points — mesh data, physics bodies, the animation/pose system, render-pass
+hooks — that let a user *supply their own* such systems and have them
+interoperate with Phi's rendering, physics, and scene graph. Realtime ray
+tracing is a separate, much larger gap: the engine has no hardware or
+realtime RT path today (Phase 3's path tracer is offline/CPU-only). The C API
+makes building one possible; it doesn't provide one.
+
+### Asset Browser: marking assets for `./game/`
+
+Reuses the existing tag system rather than a new DB field or wire-protocol
+change — a reserved tag (`"game"`) that the Asset Browser recognizes and
+renders as a small green dot in the top-right corner of an asset's
+listing/preview row. An asset can carry this tag alongside ordinary library
+membership; the game build step walks the library filtering on it to
+materialize `game/assets/`.
+
+### Gamepad + Steam Deck
+
+No gamepad input exists anywhere in the codebase today (`input.c` is
+keyboard/mouse only). Rather than hand-roll HID/controller-mapping — a large,
+already-solved problem spanning hundreds of physical controller layouts —
+Phi vendors SDL2's `GameController` subsystem specifically, using
+`SDL_GameControllerDB` for mapping. This is the one deliberate, narrow
+exception to the "No SDL/GLFW" rule in Hard Architectural Decisions:
+windowing, GL context creation, and audio stay hand-rolled via
+`phi_platform.h` as before; only gamepad input goes through SDL2. Steam Deck
+runs a real Linux desktop (SteamOS) under the hood, so the existing native/X11
+build plus gamepad support covers it; Valve's Steam Input layer (extra
+remapping, gyro, community configs) is optional on top, not required for a
+working default.
+
+**Effort:** 4–6 weeks (editor/player split + `./game/` loading +
+`game/main.py`/`game/src/main.c` entry points + Asset Browser marking + SDL2
+gamepad integration). Excludes any specific simulation system (fluid, smoke,
+Euphoria-style procedural animation, realtime RT) a user might build against
+the C API — those are the user's own scope, not this engine's.
+
+---
+
 ## Dependency Graph
 
 ```
@@ -4563,12 +4713,18 @@ Phase 0: Platform abstraction + deferred renderer
                                 └── Phase 7: Async NPC Behaviour ─────┘
 
 Phase 8: WebRTC P2P  (depends only on Phase 0, runs in parallel)
+
+Phase 9: Standalone Game Shipping  (depends on Phase 1's Asset Browser and
+                                     Phase 5's MicroPython; independent of
+                                     Phase 8 — single-player ships without it)
 ```
 
 Phase 2 is the main branch point. Phases 3, 4, and 5 can all proceed in parallel
 after Phase 2 completes. Phase 6 requires both Phase 4 and Phase 5. Phase 7
 requires Phase 5. Phase 8 is transport-layer work independent of all others and
-can run in parallel throughout.
+can run in parallel throughout. Phase 9 needs Phase 1 (Asset Browser, for
+asset-marking) and Phase 5 (MicroPython, for `game/main.py`) but not Phase 8 —
+a Steam single-player release doesn't need multiplayer at all.
 
 ---
 
@@ -4585,6 +4741,7 @@ can run in parallel throughout.
 | 6 | Geometry and animation nodes | 4–6 weeks |
 | 7 | Async NPC coroutine system | 2–3 weeks |
 | 8 | WebRTC P2P + signaling server | 4–5 weeks |
+| 9 | Standalone game shipping (editor/player split, `./game/`, native C API, gamepad) | 4–6 weeks |
 
 Single-developer estimates. Moving glTF I/O and the half-edge editing
 structure into Phase 1 front-loads work that was previously implicit
