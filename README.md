@@ -13,12 +13,11 @@ same Python everywhere, running on a real embedded MicroPython interpreter,
 not a scripting sandbox bolted on after the fact.
 
 A standalone-game path ships alongside the editor: `phi.h` aggregates the 
-engine's actual internals — geometry operations, Bullet physics, 
-animation/armature playback, node graphs, render-pass
-hooks, gamepad input — into one public C header, so a `game/src/main.c`
-written against it today compiles and links, no stubs. The same
-ground is covered from Python: `phi.*` is a real, fairly rich API (mesh
-editing, physics, animation playback, node graphs, per-face materials).
+engine's internals — geometry operations, Bullet physics, animation/armature
+playback, node graphs, render-pass hooks, gamepad input — into one public C 
+header, so a `game/src/main.c` written against it today compiles and links, 
+no stubs. The same ground is covered from Python: `phi.*` is a fairly rich 
+API (mesh editing, physics, animation playback, node graphs, per-face materials).
 Custom shaders are possible now too, if low-level — `render_hooks.h` lets C
 code register a callback at one of four pipeline insertion points and
 write raw GL/GLSL against the live `GBuffer*`, with no asset-pipeline
