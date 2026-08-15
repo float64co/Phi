@@ -30,6 +30,29 @@ editor/player build split, the `./game/` directory convention, the
 gamepad/Steam Deck support. This closes the previously-open question of how
 a game built in Phi actually gets to Steam.
 
+Revised 2026-08-15 (same day, second pass): the editor/player split is real
+now, not just designed — `client/main.c` is `client/editor_main.c` (a pure
+rename, verified byte-identical native/wasm behavior), `client/player_main.c`
+is a new, independent chromeless driver (no UI/Asset Browser/Chat/Console/net
+connection/selection concept), and `make player` builds it (native only;
+win32 player deferred, no verifiable toolchain in this environment beyond the
+editor target already built there). Both `game/main.py` (MicroPython
+`tick(dt)`) and `game/src/main.c` (`game_init`/`game_tick`/`game_shutdown`,
+`-DPHI_GAME_HAS_C_ENTRY`, no MicroPython round trip) entry-point shapes are
+wired and build-tested; a real checked-in `game/main.py` example (procedural
+geometry via `phi.create_mesh`, a real per-frame `tick(dt)` mutation) verifies
+the whole path end to end, confirmed in a real running window. Still open:
+the Asset Browser's green-dot "in `./game/`" marking UI (Phase 1's Asset
+Browser exists; the marking affordance itself doesn't yet), and win32 for the
+player target specifically. Also fixed while verifying this in a real window:
+`gbuffer_resolve`'s one-shot transparency blend self-check used to draw its
+probe quad directly into the real, visible `hdr_fbo` — a translucent
+reddish-magenta square flashing over the actual frame for one frame at
+startup, in every build (editor, player, wasm/browser alike), the whole time.
+It now draws into a dedicated 1x1 offscreen scratch target instead, so the
+same real GPU blend-math verification runs without ever touching what's
+displayed.
+
 ---
 
 ## Project Identity

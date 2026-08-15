@@ -106,6 +106,15 @@ typedef struct {
      * transparent exists in the game yet to exercise this path with. */
     unsigned int transparent_test_vbo, transparent_test_program;
     int transparent_test_u_color;
+    /* A tiny (1x1) offscreen target the one-shot blend-math self-check in
+     * gbuffer_resolve draws into instead of the real hdr_fbo -- see that
+     * function's own comment on why: this used to draw into hdr_fbo
+     * directly, which put a real, visible translucent red probe quad over
+     * the actual rendered frame for one frame, in every build (editor,
+     * player, wasm/browser alike), forever. Same RGBA16F format as
+     * hdr_tex so the blend math it exercises is bit-for-bit the same
+     * precision as the real pipeline. */
+    unsigned int transparent_test_scratch_fbo, transparent_test_scratch_tex;
 
     /* TAA: temporal resolve between tonemap and fxaa. taa_tex_a/b are a
      * ping-pong pair (see taa_write_idx below) — each frame writes the

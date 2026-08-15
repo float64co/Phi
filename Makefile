@@ -226,8 +226,21 @@ SDL2_JOYSTICK_SRCS := \
 	$(SRCDIR)/vendor/SDL2/src/video/yuv2rgb/yuv_rgb_sse.c \
 	$(SRCDIR)/vendor/SDL2/src/video/yuv2rgb/yuv_rgb_std.c
 
-COMMON_SRCS := \
-	$(SRCDIR)/main.c          \
+# Phase 9 (see phi.md's "Shipping a Standalone Game"): renamed from
+# COMMON_SRCS -- this is the shared engine core BOTH drivers link
+# (editor_main.c, today's full-chrome editor, and player_main.c, the new
+# chromeless game driver), with the actual entry point (main()) added
+# separately per target below (EDITOR_SRCS/PLAYER_SRCS). No attempt was
+# made to trim editor-only modules (ui.c/asset_browser.c/chat.c/
+# console.c/gizmo.c/area_tree.c/font.c/svg_icon.c/net.c/etc.) out of what
+# player_main.c links -- they're real, working code that simply never
+# gets CALLED from a driver that never calls ui_init()/asset_browser_
+# init()/net_connect()/etc., not a correctness risk, just some unused
+# object code in the shipped binary. Trimming that is real future work
+# (a real "what does a shipped binary actually need" pass), not attempted
+# this pass to keep the actual risk surface (a first player_main.c that
+# needs to link and run at all) as small as possible.
+ENGINE_CORE_SRCS := \
 	$(SRCDIR)/octree_render.c \
 	$(SRCDIR)/renderer.c      \
 	$(SRCDIR)/net.c           \
@@ -265,7 +278,7 @@ COMMON_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test node_graph_test mp_node_test phi_h_test render_hooks_test input_gamepad_test
+.PHONY: all wasm native player run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test node_graph_test mp_node_test phi_h_test render_hooks_test input_gamepad_test
 
 all: wasm native
 
@@ -273,7 +286,7 @@ all: wasm native
 # WASM (Emscripten / WebGL1)
 # ---------------------------------------------------------------
 WASM_CC   := emcc
-WASM_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_wasm.c $(SRCDIR)/gbuffer.c $(SRCDIR)/input_gamepad_wasm.c
+WASM_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/editor_main.c $(SRCDIR)/phi_platform_wasm.c $(SRCDIR)/gbuffer.c $(SRCDIR)/input_gamepad_wasm.c
 
 WASM_CFLAGS := \
 	-O2 \
@@ -329,7 +342,7 @@ run: wasm
 # Native (Xlib/GLX, OpenGL 3.3 core)
 # ---------------------------------------------------------------
 NATIVE_CC   := gcc
-NATIVE_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_native.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_native.c $(SRCDIR)/http_client_native.c \
+NATIVE_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/editor_main.c $(SRCDIR)/phi_platform_native.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_native.c $(SRCDIR)/http_client_native.c \
                $(SRCDIR)/input_gamepad_native.c $(SDL2_JOYSTICK_SRCS)
 
 NATIVE_CFLAGS := \
@@ -358,13 +371,54 @@ $(OUT_NATIVE): $(NATIVE_SRCS) $(HDRS) | $(BUILDDIR)
 	@echo "native build complete -> $(OUT_NATIVE)"
 
 # ---------------------------------------------------------------
+# Player (Phase 9's "chromeless gameloop", see phi.md's "Editor/Player
+# split") — the shipped-game binary. Native-only for now (matching
+# player_main.c's own top comment: wasm plays no part in the Distribution
+# Model's shipped-game path; win32 is deferred, no verifiable toolchain
+# in this environment for it beyond the editor target already built there).
+#
+# Same ENGINE_CORE_SRCS + native platform/GL/gamepad backend as `native`
+# above, swapping player_main.c in for editor_main.c, plus whatever the
+# user has actually placed in game/src/ -- GAME_SRC_FILES is a real
+# `wildcard`, evaluated at `make` invocation time, not a fixed list, so a
+# game with no game/src/ at all (a pure game/main.py game) still builds
+# cleanly with an empty addition here. PHI_GAME_HAS_C_ENTRY is defined
+# iff game/src/main.c specifically exists -- see player_main.c's own top
+# comment for why that one file's presence (not just "some game/src/
+# files exist") is what selects the C-entry-point code path.
+# ---------------------------------------------------------------
+GAME_SRC_FILES := $(wildcard game/src/*.c)
+ifneq ($(wildcard game/src/main.c),)
+PHI_GAME_HAS_C_ENTRY := -DPHI_GAME_HAS_C_ENTRY
+endif
+
+# net.c is one of the not-yet-trimmed-out ENGINE_CORE_SRCS members (see
+# that variable's own comment) -- player_main.c never calls net_connect,
+# but net.c's own symbols still need a real ws_client_* backend at link
+# time regardless, same as http_client_native.c for asset_browser.c's
+# symbols -- both included here purely to satisfy the linker, matching
+# NATIVE_SRCS' own set for exactly the same reason.
+PLAYER_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/player_main.c $(SRCDIR)/phi_platform_native.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_native.c $(SRCDIR)/http_client_native.c \
+               $(SRCDIR)/input_gamepad_native.c $(SDL2_JOYSTICK_SRCS) $(GAME_SRC_FILES)
+
+PLAYER_CFLAGS := $(NATIVE_CFLAGS) $(PHI_GAME_HAS_C_ENTRY)
+
+OUT_PLAYER := $(BUILDDIR)/phi_player
+
+player: $(OUT_PLAYER)
+
+$(OUT_PLAYER): $(PLAYER_SRCS) $(HDRS) | $(BUILDDIR)
+	$(NATIVE_CC) $(PLAYER_CFLAGS) $(PLAYER_SRCS) -o $(OUT_PLAYER) $(NATIVE_LDFLAGS)
+	@echo "player build complete -> $(OUT_PLAYER)"
+
+# ---------------------------------------------------------------
 # Win32 (WGL, OpenGL 3.3 core) — built via a Windows-side MinGW-w64
 # toolchain reached through WSL interop; produces a real Windows .exe.
 # Windowing + GL context + rendering only for now — no Win32 input or
 # Winsock networking yet (see phi_platform_win32.c's header comment).
 # ---------------------------------------------------------------
 WIN32_CC   := /mnt/c/msys64/mingw64/bin/gcc.exe
-WIN32_SRCS := $(COMMON_SRCS) $(SRCDIR)/phi_platform_win32.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_win32.c $(SRCDIR)/input_gamepad_win32_stub.c
+WIN32_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/editor_main.c $(SRCDIR)/phi_platform_win32.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_win32.c $(SRCDIR)/input_gamepad_win32_stub.c
 
 WIN32_CFLAGS := \
 	-O2 \

@@ -596,6 +596,19 @@ GBuffer *gbuffer_create(int w, int h) {
     gb->transparent_test_program = link(TRANSPARENT_TEST_VERT_SRC, TRANSPARENT_TEST_FRAG_SRC);
     gb->transparent_test_u_color = glGetUniformLocation(gb->transparent_test_program, "u_color");
 
+    /* See gbuffer.h's own comment on transparent_test_scratch_fbo: a 1x1
+     * offscreen target for the transparency blend self-check, so it never
+     * draws over the real visible frame. */
+    gb->transparent_test_scratch_tex = make_target(1, 1, GL_RGBA16F, GL_RGBA, GL_FLOAT);
+    glGenFramebuffers(1, &gb->transparent_test_scratch_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, gb->transparent_test_scratch_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gb->transparent_test_scratch_tex, 0);
+    GLenum scratch_buf = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &scratch_buf);
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        printf("[gbuffer] transparency scratch FBO incomplete: 0x%04x\n", status);
+
     gb->taa_program          = link(QUAD_VERT_SRC, TAA_FRAG_SRC);
     gb->taa_u_current        = glGetUniformLocation(gb->taa_program, "u_current");
     gb->taa_u_history        = glGetUniformLocation(gb->taa_program, "u_history");
@@ -616,7 +629,7 @@ static void free_gl_resources(GBuffer *gb) {
     unsigned int texs[] = { gb->tex_albedo, gb->tex_normal, gb->tex_material, gb->tex_emissive,
                              gb->tex_velocity, gb->tex_object_id, gb->tex_depth_stencil, gb->hdr_tex,
                              gb->shadow_tex, gb->ldr_tex, gb->tex_bright, gb->tex_blur_a, gb->tex_blur_b,
-                             gb->taa_tex_a, gb->taa_tex_b };
+                             gb->taa_tex_a, gb->taa_tex_b, gb->transparent_test_scratch_tex };
     glDeleteTextures((int)(sizeof(texs) / sizeof(texs[0])), texs);
     glDeleteFramebuffers(1, &gb->fbo);
     glDeleteFramebuffers(1, &gb->hdr_fbo);
@@ -627,6 +640,7 @@ static void free_gl_resources(GBuffer *gb) {
     glDeleteFramebuffers(1, &gb->blur_fbo_b);
     glDeleteFramebuffers(1, &gb->taa_fbo_a);
     glDeleteFramebuffers(1, &gb->taa_fbo_b);
+    glDeleteFramebuffers(1, &gb->transparent_test_scratch_fbo);
     glDeleteProgram(gb->lighting_program);
     glDeleteProgram(gb->tonemap_program);
     glDeleteProgram(gb->shadow_program);
@@ -887,36 +901,45 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    /* One-shot sanity check — draws a small semi-transparent NDC-space
-     * probe quad near screen center, over whatever the scene already
-     * rendered, and (native only) verifies the resulting blend against
-     * the standard over-blend equation. This used to draw EVERY frame
-     * forever: only the native readPixels+printf verification was gated
-     * behind s_transparency_checked, not the glDrawArrays call itself —
-     * so the probe quad permanently tinted/obscured the center of every
-     * Scene panel render, on every platform, for this entire project
-     * (that quiet reddish-magenta square visible in every screenshot this
-     * whole session wasn't scene content, it was this). Found while
-     * debugging why a transform gizmo positioned at the same on-screen
-     * location wasn't visible despite the geometry pass genuinely
-     * rasterizing it (confirmed via a direct object-id G-buffer
-     * readback) — this quad was blending over it every single frame.
-     * Now gated the same way the verification itself always was: draws
-     * once, to prove the blend math actually works, then never again. */
+    /* One-shot sanity check — verifies the standard over-blend equation
+     * (src*alpha + dst*(1-alpha)) against this exact program/blend state,
+     * entirely into transparent_test_scratch_fbo (a 1x1 offscreen target,
+     * see gbuffer.h's own comment on it), NOT hdr_fbo. This used to draw
+     * a small semi-transparent NDC-space probe quad directly into hdr_fbo
+     * — the real, visible frame — every single build (editor, player,
+     * wasm/browser alike) for exactly one frame at startup: only the
+     * native readPixels+printf verification was ever gated behind
+     * s_transparency_checked, not the glDrawArrays call itself, so a
+     * translucent reddish-magenta square flashed over the real scene once
+     * on every run (found originally while debugging why a transform
+     * gizmo at that same on-screen location wasn't visible despite the
+     * geometry pass genuinely rasterizing it — this quad was blending
+     * over it). Redirecting the draw to an isolated scratch target keeps
+     * the exact same real GPU verification (same program, same blend
+     * state, same math) without it ever touching what gets displayed. */
     static int s_transparency_checked = 0;
     if (!s_transparency_checked) {
-#ifndef __EMSCRIPTEN__
-        /* Capture the HDR center pixel immediately BEFORE the blend
-         * (background) and immediately AFTER (both within this same
-         * gbuffer_resolve call, so scene content is identical between the
-         * two reads — no frame-to-frame noise), confirming the "after"
-         * value matches result = src*alpha + dst*(1-alpha) applied to the
-         * captured background — proves the blend math is actually
-         * happening at this exact pixel, not just assumed from the
-         * state-setting calls below. */
+        s_transparency_checked = 1;
+
+        /* Real captured background color, native only (same WebGL2
+         * RGBA/FLOAT readback-legality caveat as the other diagnostics in
+         * this file — see gl_native.h/this file's own history) — seeds
+         * the scratch target so the blend math is checked against a real,
+         * current scene color rather than an arbitrary constant. On wasm
+         * this stays zeroed; the scratch draw still happens (proving the
+         * pipeline runs there too) but isn't numerically verified, same
+         * as before. */
         float t_bg[4] = {0,0,0,0};
+#ifndef __EMSCRIPTEN__
         glReadPixels(gb->w / 2, gb->h / 2, 1, 1, GL_RGBA, GL_FLOAT, t_bg);
 #endif
+        GLint prev_viewport[4];
+        glGetIntegerv(GL_VIEWPORT, prev_viewport);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, gb->transparent_test_scratch_fbo);
+        glViewport(0, 0, 1, 1);
+        glClearColor(t_bg[0], t_bg[1], t_bg[2], t_bg[3]);
+        glClear(GL_COLOR_BUFFER_BIT);
 
         glUseProgram(gb->transparent_test_program);
         glUniform4f(gb->transparent_test_u_color, 1.0f, 0.0f, 0.0f, 0.5f);
@@ -928,10 +951,9 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
         glBindBuffer(GL_ARRAY_BUFFER, gb->quad_vbo);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
 
-        s_transparency_checked = 1;
 #ifndef __EMSCRIPTEN__
         float t_after[4];
-        glReadPixels(gb->w / 2, gb->h / 2, 1, 1, GL_RGBA, GL_FLOAT, t_after);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, t_after);
         float alpha = 0.5f;
         float exp_r = 1.0f * alpha + t_bg[0] * (1.0f - alpha);
         float exp_g = 0.0f * alpha + t_bg[1] * (1.0f - alpha);
@@ -941,6 +963,13 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
                t_bg[0], t_bg[1], t_bg[2], exp_r, exp_g, exp_b,
                t_after[0], t_after[1], t_after[2]);
 #endif
+
+        /* Restore hdr_fbo + the real viewport -- the rest of this
+         * function (and the transparency depth-test state set up just
+         * above, for future real transparent world content) still
+         * expects hdr_fbo bound at the caller's real resolution. */
+        glBindFramebuffer(GL_FRAMEBUFFER, gb->hdr_fbo);
+        glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2], prev_viewport[3]);
     }
 
     glDisable(GL_BLEND);

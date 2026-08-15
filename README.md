@@ -12,6 +12,24 @@ logic, NPC behaviour, and tool UI (`@phi.panel`) are written in Python — the
 same Python everywhere, running on a real embedded MicroPython interpreter,
 not a scripting sandbox bolted on after the fact.
 
+A standalone-game path ships alongside the editor, and it's real rather than
+aspirational: `phi.h` aggregates the engine's actual internals — geometry
+CRUD, Bullet physics, animation/armature playback, node graphs, render-pass
+hooks, gamepad input — into one public C header, so a `game/src/main.c`
+written against it today genuinely compiles and links, no stubs. The same
+ground is covered from Python: `phi.*` is a real, fairly rich API (mesh
+editing, physics, animation playback, node graphs, per-face materials).
+Custom shaders are possible now too, if low-level — `render_hooks.h` lets C
+code register a callback at one of four real pipeline insertion points and
+write raw GL/GLSL against the live `GBuffer*`, with no asset-pipeline
+convenience yet. Gamepad input, including Steam Deck, runs on a real
+vendored SDL2 `GameController` subsystem (`SDL_GameControllerDB`'s actual
+mapping database) — Steam Deck runs a standard Linux desktop under the hood,
+so the same native build covers it. And a game built this way ships
+chromeless: `player_main.c` is an independent driver with no editor UI, no
+Asset Browser, no live server connection, just `./game/` loaded into a real
+per-frame gameplay loop.
+
 ```
 Language:    C (Emscripten -> WASM, or native via glext.h — no SDL/GLFW)
 Rendering:   WebGL 2 (GLES3) in-browser, OpenGL 3.3 core natively,
@@ -53,7 +71,11 @@ pre-fracture, the full Native UI System, DNA/RNA property system, a real
 Python console, the Asset Browser, and the Chat panel described above) are
 built and verified. Phase 2 (Bullet physics — vendored, wrapped in a hand
 -written C API since Bullet has no official one, wired into both the editor
-and its Python API) is also landed. See [`phi.md`](phi.md) for the complete
+and its Python API) is also landed. Phase 9 (standalone-game shipping — the
+editor/player split, `./game/` loading, the `phi.h` C API, node graphs,
+render-pass hooks, and vendored-SDL2 gamepad/Steam Deck support) is landed
+and build-verified too; the Asset Browser's "mark this asset for `./game/`"
+UI is the one piece of it still outstanding. See [`phi.md`](phi.md) for the complete
 phase-by-phase engineering brief, including exactly what's verified vs.
 still a known gap at any given point.
 
@@ -62,10 +84,12 @@ still a known gap at any given point.
 ### Build
 
 ```bash
-make native     # native binary -> build/phi_native  (fastest edit loop)
-make wasm       # browser build -> www/game.js + www/game.wasm
+make native     # native editor binary -> build/phi_native  (fastest edit loop)
+make wasm       # browser editor build -> www/game.js + www/game.wasm
                  # (needs Emscripten: source /path/to/emsdk/emsdk_env.sh first)
-make win32       # cross-compiled Windows binary -> build/phi_win32.exe
+make win32       # cross-compiled Windows editor binary -> build/phi_win32.exe
+make player      # standalone chromeless game binary -> build/phi_player
+                 # (native only; boots ./game/main.py or ./game/src/main.c)
 ```
 
 ### Run
@@ -88,14 +112,17 @@ and mention `@llm` anywhere in your message.
 
 ```
 client/     Engine + editor, plain C (compiles unchanged with gcc or emcc)
-  main.c              entry point / frame loop
+  editor_main.c       editor entry point / frame loop (full panel UI)
+  player_main.c       standalone-game entry point — no editor chrome, see phi.md's Phase 9
+  phi.h               public C API for game/src/*.c (geometry, physics, animation, node graphs, render hooks, gamepad)
   ui.c, area_tree.c   Native UI System — panel layout, DNA/RNA-style widgets
   meshobject.c, halfedge.c, halfedge_gltf.c   editable mesh representation
   mesh_edit.c, fracture.c, gizmo.c            editing operations
   mp_port.c           MicroPython embedding + the phi.* Python API surface
   phi_physics.cpp     hand-written C wrapper over vendored Bullet
+  render_hooks.c      C-level render-pass insertion points for custom shaders
   chat.c, console.c, asset_browser.c, net.c   editor panels + wire protocol
-  vendor/             Bullet, MicroPython, cgltf, nanosvg, stb — all vendored
+  vendor/             Bullet, MicroPython, cgltf, nanosvg, stb, SDL2 (gamepad only) — all vendored
 
 server/     Pure-Python stdlib HTTP + WebSocket server, asset DB, and the
             Anthropic tool-use loop the Chat panel talks to
