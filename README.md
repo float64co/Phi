@@ -1,47 +1,45 @@
 # Phi
 
-**A browser-native and desktop game engine with a Blender-style editor, real Python scripting, and Claude built in as a first-class editor participant.**
+**A browser-native and desktop game engine with a Blender-style editor, Python scripting, and Claude built in as a first-class editor participant.**
 
 ![Phi editor screenshot](docs/screenshot.png)
 
 Phi ships as a single opaque `engine.wasm` (or a native executable on
-Linux/Windows/macOS) that *is* the mesh editor, the animation editor, and the
-node-graph system all at once. There's no separate authoring tool and no
-separate runtime: the same binary edits a scene live and plays it. All game
-logic, NPC behaviour, and tool UI (`@phi.panel`) are written in Python — the
-same Python everywhere, running on a real embedded MicroPython interpreter,
-not a scripting sandbox bolted on after the fact.
+Linux/Windows/macOS) that is the mesh editor, the animation editor, and the
+node-graph system at once. There's no separate authoring tool and no
+separate runtime: the same binary edits a scene live and plays it. Game
+logic, NPC behaviour, and tool UI (`@phi.panel`) are written in Python,
+running on an embedded MicroPython interpreter — the same language and the
+same API surface in the editor and in a shipped game.
 
-A standalone-game path ships alongside the editor: `phi.h` aggregates the
+A standalone-game path ships alongside the editor. `phi.h` aggregates the
 engine's internals — geometry operations, Bullet physics, animation/armature
 playback, node graphs, render-pass hooks, gamepad input, keyboard/mouse
-input, camera control, and audio — into one public C header, so a
-`game/src/main.c` written against it today compiles and links, no stubs. The
-same ground is covered from Python: `phi.*` is a genuinely rich API — mesh
-editing, whole-object transforms, object-id-keyed physics, animation
-playback, node graphs, per-face materials, keyboard/mouse/gamepad input, and
-sound playback, none of it gated behind the editor's own UI concepts (a
-shipped game has no "selected object," and doesn't need one). Custom shaders
-are possible now too, if low-level — `render_hooks.h` lets C code register a
-callback at one of four pipeline insertion points and write raw GL/GLSL
-against the live `GBuffer*`, with no asset-pipeline convenience yet. Gamepad
-input, including Steam Deck, runs on a vendored SDL2 `GameController`
-subsystem (`SDL_GameControllerDB`'s mapping database) — Steam Deck runs a
-standard Linux desktop under the hood, so the same native build covers it.
-Audio is real too: a hand-written WAV decoder + mixer, ALSA on native Linux
-(detected at build time, an honest no-op fallback otherwise), the real Web
-Audio API in the browser, positional 3D sound included. And a game built
-this way ships chromeless: `player_main.c` is an independent driver with no
-editor UI, no Asset Browser, no live server connection — a real camera, real
-input, real physics, real sound, and `./game/` loaded into a real per-frame
-gameplay loop. `game/src/main.c` ships a real, playable demo of all of it: a
-minimal first-person shooter — WASD, mouse look under real OS/browser
-pointer capture (`input_capture_mouse`, click to engage, Escape to release),
-click to shoot real dynamic-physics targets — written entirely in C, no
-MicroPython round trip anywhere in the hot path. `make player_wasm` builds
-the same game for the browser too (not part of the actual shipping story —
-a real Steam release stays native-only — just the easiest way to try it
-without a native build environment).
+input, camera control, and audio — into one public C header, so
+`game/src/main.c` compiles and links against it directly. The same ground is
+covered from Python: `phi.*` exposes mesh editing, whole-object transforms,
+object-id-keyed physics, animation playback, node graphs, per-face
+materials, keyboard/mouse/gamepad input, and sound playback, all addressed
+by object id rather than through the editor's own selection state. Custom
+shaders are supported at a low level — `render_hooks.h` lets C code register
+a callback at one of four pipeline insertion points and write GL/GLSL
+against the live `GBuffer*`. Gamepad input, including Steam Deck, runs on a
+vendored SDL2 `GameController` subsystem (`SDL_GameControllerDB`'s mapping
+database); Steam Deck runs a standard Linux desktop under the hood, so the
+native build covers it without extra work. Audio is a hand-written WAV
+decoder and mixer, with ALSA on native Linux (detected at build time, with a
+no-op fallback otherwise) and the Web Audio API in the browser, including
+positional 3D sound. A shipped game runs chromeless: `player_main.c` is an
+independent driver with no editor UI, no Asset Browser, and no live server
+connection, loading `./game/` into a per-frame gameplay loop with its own
+camera, input, physics, and audio.
+
+`game/src/main.c` is a playable first-person-shooter example built entirely
+in C — WASD movement, mouse look under OS/browser pointer capture, and
+physics-driven targets — with no MicroPython in the hot path. `make
+player_wasm` builds the same game for the browser, for evaluation without a
+native toolchain; it isn't part of the standalone-shipping path itself,
+which stays native-only.
 
 ```
 Language:    C (Emscripten -> WASM, or native via glext.h — no SDL/GLFW)
@@ -51,54 +49,51 @@ Scripting:   MicroPython, embedded directly into engine.wasm
 Physics:     Bullet, compiled straight into the same binary
 Networking:  WebSockets (RFC 6455 — hand-rolled client + server)
 Server:      Pure Python stdlib — no third-party dependencies
-Mesh format: glTF 2.0 (.glb/.gltf) — no bespoke format, ever
+Mesh format: glTF 2.0 (.glb/.gltf) — no bespoke format
 ```
 
 ## What makes this different
 
-- **Blender DNA/RNA-style UI, not Dear ImGui.** A real recursive area-split
-  panel system (drag-to-resize, split, join) written in C, with panels
-  authorable from Python via `@phi.panel` — the same pattern Blender itself
-  uses, not a re-skin of an immediate-mode debug UI.
+- **Blender DNA/RNA-style UI, not Dear ImGui.** A recursive area-split panel
+  system (drag-to-resize, split, join) written in C, with panels authorable
+  from Python via `@phi.panel` — the same architecture Blender uses, not an
+  immediate-mode debug UI dressed up.
 - **Claude runs inside the editor**, not beside it as a chat-window bolt-on.
-  The Chat panel talks to a real Anthropic tool-use loop running
-  server-side — mention `@llm` and it can introspect the live running scene
-  (`get_scene_state`) and your asset library (`get_asset_list`) to answer
-  real questions about what you're building. The API key never ships to a
-  client; it lives on the authoring server only.
-- **One mesh representation, one file format.** The editor holds a real
+  The Chat panel talks to an Anthropic tool-use loop running server-side —
+  mention `@llm` and it can introspect the live scene (`get_scene_state`)
+  and the asset library (`get_asset_list`) to answer questions about what
+  you're building. The API key stays on the authoring server; it never
+  ships to a client.
+- **One mesh representation, one file format.** The editor holds a
   half-edge structure for live topology edits (extrude, inset, loop cut);
-  glTF is the load/save interchange format, not a lossy round-trip through
-  something else.
+  glTF is the load/save interchange format, not an intermediate that loses
+  information on round-trip.
 - **Client-authored, server-persisted.** Every edit — a vertex drag, a
   Python panel's button click, an AI-proposed change — applies locally
-  first and is reconciled by an authoritative server, the same pattern
-  proven out in this codebase's own predecessor project (`qek`, a
-  multiplayer octree-editor arena shooter).
+  first and is reconciled by an authoritative server, the same pattern this
+  codebase's predecessor project (`qek`, a multiplayer octree-editor arena
+  shooter) established.
 
 ## Status
 
-Phase 0 (deferred renderer, G-buffer, TAA) and Phase 1 (mesh editor: picking,
+Phase 0 (deferred renderer, G-buffer, TAA), Phase 1 (mesh editor: picking,
 gizmos, extrude/inset/loop-cut, PBR materials per face, Voronoi
-pre-fracture, the full Native UI System, DNA/RNA property system, a real
-Python console, the Asset Browser, and the Chat panel described above) are
-built and verified. Phase 2 (Bullet physics — vendored, wrapped in a hand
--written C API since Bullet has no official one, wired into both the editor
-and its Python API) is also landed. Phase 9 (standalone-game shipping — the
-editor/player split, `./game/` loading, the `phi.h` C API, node graphs,
-render-pass hooks, vendored-SDL2 gamepad/Steam Deck support, camera control,
-whole-object transforms, keyboard/mouse input, and object-id-keyed physics)
-and Phase 10 (audio — WAV decode/mixing, native ALSA, wasm Web Audio, a
-win32 stub, real Python bindings) are both landed and build-verified; a
-shipped game can genuinely be seen, moved, driven, and heard today. Real OS/
-browser pointer capture (`input_capture_mouse`) and a playable first-person
-shooter demo (`game/src/main.c`, `make player`/`make player_wasm`) prove all
-of it end to end. The Asset Browser's "mark this asset for `./game/`" UI,
-and win32 for both the player target and native audio, are the real pieces
-still outstanding (all three unverified in this project's build environment
-so far, not unbuilt in principle). See [`phi.md`](phi.md) for the complete
-phase-by-phase engineering brief, including exactly what's verified vs.
-still a known gap at any given point.
+pre-fracture, the Native UI System, DNA/RNA property system, a Python
+console, the Asset Browser, and the Chat panel described above), and Phase 2
+(Bullet physics, wrapped in a hand-written C API since Bullet ships no
+official one, wired into both the editor and its Python API) are complete.
+Phase 9 (standalone-game shipping — the editor/player split, `./game/`
+loading, the `phi.h` C API, node graphs, render-pass hooks, vendored-SDL2
+gamepad/Steam Deck support, camera control, whole-object transforms,
+keyboard/mouse input, and object-id-keyed physics) and Phase 10 (audio — WAV
+decode/mixing, native ALSA, wasm Web Audio, a win32 stub, and Python
+bindings) are also complete, demonstrated end to end by OS/browser pointer
+capture (`input_capture_mouse`) and the first-person-shooter example
+(`game/src/main.c`, `make player` / `make player_wasm`). Outstanding: the
+Asset Browser's "mark this asset for `./game/`" UI, and win32 support for
+both the player target and native audio — none built or verified in this
+project's history yet. See [`phi.md`](phi.md) for the full phase-by-phase
+brief, including what's verified versus outstanding at any given point.
 
 ## Quick start
 
@@ -112,15 +107,15 @@ make win32       # cross-compiled Windows editor binary -> build/phi_win32.exe
 make player      # standalone chromeless game binary -> build/phi_player
                  # (native only; boots ./game/main.py or ./game/src/main.c)
 make player_wasm # same game, browser build -> www/player.js + www/player.wasm
-                 # (not part of the real shipping story -- see Status -- just
-                 #  the easiest way to try it without a native build environment)
+                 # (for evaluation without a native toolchain — see Status;
+                 #  the standalone-shipping path itself stays native-only)
 ```
 
-A checked-in example ships in `./game/` right now: a minimal first-person
-shooter (`game/src/main.c`) with real physics targets and real OS/browser
-mouse capture. `make player && ./build/phi_player`, or `make player_wasm`
-then open `player.html` (see Run, below) — click the canvas to lock the
-mouse, WASD to move, click to shoot, Escape to let go.
+An example ships in `./game/`: a first-person shooter (`game/src/main.c`)
+with physics targets and OS/browser mouse capture. Build and run with
+`make player && ./build/phi_player`, or `make player_wasm` and open
+`player.html` (see Run, below). Click the canvas to lock the mouse, WASD to
+move, click to shoot, Escape to release.
 
 ### Run
 
@@ -128,11 +123,12 @@ mouse, WASD to move, click to shoot, Escape to let go.
 cd server && python3 server.py
 ```
 
-Then open `http://localhost:8765` for the browser editor, or
+Open `http://localhost:8765` for the browser editor, or
 `http://localhost:8765/player.html` for the browser player build (`make
-player_wasm`), or run `build/phi_native`/`build/phi_player` directly for the
-native ones. The same `server.py` serves all of it — the player build talks
-to no live server at runtime (see Status), it's just files on disk either way.
+player_wasm`), or run `build/phi_native` / `build/phi_player` directly for
+the native builds. `server.py` serves all of it; the player build makes no
+live server connection at runtime, so this is only serving static files for
+that path.
 
 ### Talk to Claude in the editor
 
@@ -161,23 +157,22 @@ server/     Pure-Python stdlib HTTP + WebSocket server, asset DB, and the
             Anthropic tool-use loop the Chat panel talks to
 
 www/        Browser shells: index.html (editor) + player.html (player),
-            both loading their own emcc-generated .js/.wasm
+            each loading its own emcc-generated .js/.wasm
 assets/     glTF test assets + the uploaded asset library
 
-game/       A real, checked-in example game -- what `make player`/
-            `make player_wasm` actually boot
-  src/main.c   the FPS demo (game_init/game_tick/game_shutdown, no MicroPython)
-  main.py      an equivalent, earlier Python-driven example (mutually
-               exclusive with src/main.c at build time -- see phi.md's
-               Phase 9 "./game/ directory" section)
+game/       Example game — what `make player` / `make player_wasm` boot
+  src/main.c   the FPS example (game_init/game_tick/game_shutdown, no MicroPython)
+  main.py      an equivalent Python-driven example (mutually exclusive with
+               src/main.c at build time — see phi.md's Phase 9 "./game/
+               directory" section)
 ```
 
 ## Full engineering brief
 
 [`phi.md`](phi.md) is the living design document and status log for this
-project — architecture decisions, the full 10-phase roadmap, and a dated,
-honest account of what's actually been built and verified vs. still
-outstanding at every stage. Start there for anything beyond a quick look.
+project — architecture decisions, the full 10-phase roadmap, and a dated
+account of what's built and verified versus outstanding at every stage.
+Start there for anything beyond a quick look.
 
 ---
 
