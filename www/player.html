@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phi Player</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+    color: #e0e0e0;
+  }
+  #canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #loading {
+    position: fixed;
+    inset: 0;
+    background: #0a0a0f;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    gap: 28px;
+  }
+  #loading-title {
+    font-size: 2.8rem;
+    letter-spacing: 0.35em;
+    color: #00bfff;
+    text-shadow: 0 0 40px #00bfff66;
+    user-select: none;
+  }
+  #loading-bar-wrap {
+    width: min(420px, 72vw);
+    height: 6px;
+    background: #1a1a22;
+    border-radius: 3px;
+    overflow: hidden;
+    box-shadow: 0 0 0 1px #00bfff33;
+  }
+  #loading-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #00bfff, #87ceeb);
+    border-radius: 3px;
+    transition: width 0.18s ease-out;
+    box-shadow: 0 0 10px #00bfff88;
+  }
+  #loading-status {
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    color: #00bfff;
+    opacity: 0.55;
+    min-height: 1em;
+    text-transform: uppercase;
+  }
+  /* Click-to-play overlay -- real pointer lock (see input.c's
+     input_capture_mouse) requires a genuine user gesture; this is that
+     gesture. Dismissed the instant the browser confirms the lock
+     actually engaged (pointerlockchange), not just on click, so the
+     hint stays up if the browser ever refuses the request. */
+  #play-hint {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,10,15,0.35);
+    color: #e0e0e0;
+    font-size: 1rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+    user-select: none;
+  }
+  #play-hint span {
+    padding: 18px 28px;
+    border: 1px solid #00bfff88;
+    border-radius: 4px;
+    background: #0a0a0fcc;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div id="loading-title">PHI</div>
+  <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+  <div id="loading-status">Initialising...</div>
+</div>
+
+<canvas id="canvas"></canvas>
+<div id="play-hint"><span>Click to play &mdash; Esc to release the mouse</span></div>
+
+<script>
+function resizeCanvas() {
+  var c = document.getElementById('canvas');
+  c.width  = window.innerWidth;
+  c.height = window.innerHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+document.getElementById('canvas').addEventListener('contextmenu', function(e) {
+  e.preventDefault();
+});
+
+// Click-to-play / real Pointer Lock: the C side (input_capture_mouse,
+// called from player_main.c's own capture policy) calls emscripten_
+// request_pointerlock in response to InputState::lmb_click, but a
+// browser will only actually GRANT that inside a real user gesture --
+// the canvas's own click handler here IS that gesture, so by the time
+// C code asks (one frame later), the browser still honors it (that's
+// exactly what emscripten_request_pointerlock's deferUntilInEventHandler
+// flag is for). This listener's only real job is showing/hiding the
+// click-to-play hint; it does not request the lock directly itself.
+var hint = document.getElementById('play-hint');
+document.addEventListener('pointerlockchange', function() {
+  var locked = document.pointerLockElement === document.getElementById('canvas');
+  hint.style.display = locked ? 'none' : 'flex';
+});
+// Shown once the app has actually booted (see onRuntimeInitialized
+// below) -- not before, so it never flashes over the loading screen.
+
+var _loadBar    = null;
+var _loadStatus = null;
+function _setLoadProgress(pct, text) {
+  if (!_loadBar)    _loadBar    = document.getElementById('loading-bar');
+  if (!_loadStatus) _loadStatus = document.getElementById('loading-status');
+  if (_loadBar)    _loadBar.style.width = Math.min(100, pct) + '%';
+  if (_loadStatus) _loadStatus.textContent = text || '';
+}
+
+var Module = {
+  canvas: (function() { return document.getElementById('canvas'); })(),
+  setStatus: function(text) {
+    if (!text) return;
+    var match = text.match(/\((\d+)\/(\d+)\)/);
+    if (match) {
+      var pct = Math.round(parseInt(match[1]) / parseInt(match[2]) * 90);
+      _setLoadProgress(pct, text.replace(/\s*\(.*\)/, '').trim());
+    } else {
+      _setLoadProgress(null, text);
+    }
+  },
+  monitorRunDependencies: function(left) {
+    if (left === 0) {
+      _setLoadProgress(99, 'Starting...');
+    } else {
+      var bar = document.getElementById('loading-bar');
+      if (bar) {
+        var cur = parseFloat(bar.style.width) || 0;
+        _setLoadProgress(Math.min(90, cur + 2), 'Compiling...');
+      }
+    }
+  },
+  onRuntimeInitialized: function() {
+    _setLoadProgress(100, 'Ready');
+    setTimeout(function() {
+      document.getElementById('loading').style.display = 'none';
+      hint.style.display = 'flex';   // real gameplay is up -- now it's meaningful to ask for a click
+    }, 320);
+  },
+  print:    function(t) { console.log('[wasm]', t); },
+  printErr: function(t) { console.warn('[wasm]', t); },
+  locateFile: function(path) { return '/' + path; }
+};
+</script>
+<script src="/player.js"></script>
+
+</body>
+</html>

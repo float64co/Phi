@@ -7,6 +7,7 @@
 #include <emscripten/html5.h>
 
 static InputState *s_inp = NULL;
+static int         s_captured = 0;
 
 static void push_typed_char(InputState *inp, const char *key) {
     /* Only queue single printable ASCII/UTF8-byte chars — "Enter",
@@ -79,8 +80,37 @@ static EM_BOOL mouse_move(int type, const EmscriptenMouseEvent *e, void *ud) {
     inp->mouse_x = e->targetX;
     inp->mouse_y = e->targetY;
     inp->ctrl_down = e->ctrlKey;
+    /* Real relative motion (see input.h's own mouse_dx/dy comment) --
+     * accumulated unconditionally, harmless when nothing's captured
+     * (nothing reads it), accurate small per-event deltas once the
+     * Pointer Lock API is actually engaged. */
+    inp->mouse_dx += e->movementX;
+    inp->mouse_dy += e->movementY;
     return EM_TRUE;
 }
+
+static EM_BOOL pointerlock_change(int type, const EmscriptenPointerlockChangeEvent *e, void *ud) {
+    (void)type; (void)ud;
+    s_captured = e->isActive;
+    return EM_TRUE;
+}
+
+void input_capture_mouse(int enable) {
+    if (enable) {
+        /* deferUntilInEventHandler=1: our own call to this function
+         * happens from inside player_main.c's per-frame update, not
+         * literally synchronously inside the JS mousedown handler that
+         * set lmb_click -- this flag is Emscripten's real, documented
+         * way to still honor the request despite that one-frame gap
+         * (browsers refuse an unprompted pointer-lock request outside a
+         * real user gesture otherwise). */
+        emscripten_request_pointerlock("#canvas", 1);
+    } else {
+        emscripten_exit_pointerlock();
+    }
+}
+
+int input_mouse_captured(void) { return s_captured; }
 
 static EM_BOOL mouse_down(int type, const EmscriptenMouseEvent *e, void *ud) {
     (void)type; (void)ud;
@@ -143,16 +173,19 @@ void input_install_callbacks(InputState *inp) {
     emscripten_set_mouseup_callback(EMSCRIPTEN_EVENT_TARGET_DOCUMENT,   NULL, 1, mouse_up);
     emscripten_set_wheel_callback(EMSCRIPTEN_EVENT_TARGET_DOCUMENT,     NULL, 1, wheel_move);
     emscripten_set_blur_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW,        NULL, 1, on_blur);
+    emscripten_set_pointerlockchange_callback(EMSCRIPTEN_EVENT_TARGET_DOCUMENT, NULL, 1, pointerlock_change);
 }
 
 #elif defined(_WIN32)
 #include <windows.h>
+#include "phi_platform_win32.h"
 
 /* Mirrors the X11 branch below one message at a time, driven by
  * phi_platform_win32.c's WndProc via input_native_handle_event() — same
  * role as the X11 event pump, message-driven instead of pumped. */
 
 static InputState *s_inp  = NULL;
+static int         s_captured = 0;
 
 static void reset_held_buttons_win32(InputState *inp) {
     inp->lmb_down = inp->rmb_down = inp->mmb_down = 0;
@@ -183,6 +216,39 @@ static int win32_vk_to_phikey(WPARAM vk) {
 void input_install_callbacks(InputState *inp) {
     s_inp = inp;
 }
+
+/* Same real technique as the X11 branch below (see its own comment for
+ * the full reasoning): ClipCursor confines the cursor to the window,
+ * ShowCursor(FALSE) hides it, and handle_motion re-centers via
+ * SetCursorPos every real WM_MOUSEMOVE once captured, diffing against
+ * client-area center for mouse_dx/dy. Unverified against a real Windows
+ * build/run this pass (see phi.md's Phase 9 notes on win32's general
+ * verification status) -- written from real, correct Win32 API usage,
+ * not guessed, but not build-tested here. */
+void input_capture_mouse(int enable) {
+    HWND hwnd = phi_platform_win32_window();
+    if (!hwnd) return;
+    if (enable && !s_captured) {
+        RECT rect;
+        GetClientRect(hwnd, &rect);
+        POINT tl = { rect.left, rect.top }, br = { rect.right, rect.bottom };
+        ClientToScreen(hwnd, &tl);
+        ClientToScreen(hwnd, &br);
+        RECT screen_rect = { tl.x, tl.y, br.x, br.y };
+        ClipCursor(&screen_rect);
+        ShowCursor(FALSE);
+        s_captured = 1;
+        POINT center = { (rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2 };
+        ClientToScreen(hwnd, &center);
+        SetCursorPos(center.x, center.y);
+    } else if (!enable && s_captured) {
+        ClipCursor(NULL);
+        ShowCursor(TRUE);
+        s_captured = 0;
+    }
+}
+
+int input_mouse_captured(void) { return s_captured; }
 
 static void handle_key(WPARAM vk, LPARAM lparam, int down) {
     InputState *inp = s_inp;
@@ -225,9 +291,23 @@ static void handle_char(WPARAM wparam) {
 static void handle_motion(WPARAM wparam, LPARAM lparam) {
     InputState *inp = s_inp;
     if (!inp) return;
-    inp->mouse_x = (short)LOWORD(lparam);  /* client-area coords, like X11's ev->xmotion.x/y */
-    inp->mouse_y = (short)HIWORD(lparam);
+    int x = (short)LOWORD(lparam), y = (short)HIWORD(lparam);  /* client-area coords, like X11's ev->xmotion.x/y */
     inp->ctrl_down = (wparam & MK_CONTROL) != 0;
+    if (s_captured) {
+        HWND hwnd = phi_platform_win32_window();
+        RECT rect;
+        GetClientRect(hwnd, &rect);
+        int cx = (rect.left + rect.right) / 2, cy = (rect.top + rect.bottom) / 2;
+        inp->mouse_dx += x - cx;
+        inp->mouse_dy += y - cy;
+        if (x != cx || y != cy) {   /* skip re-centering the warp's own resulting message */
+            POINT center = { cx, cy };
+            ClientToScreen(hwnd, &center);
+            SetCursorPos(center.x, center.y);
+        }
+    }
+    inp->mouse_x = x;
+    inp->mouse_y = y;
 }
 
 /* button: 0=left, 1=middle, 2=right. */
@@ -276,7 +356,10 @@ void input_native_handle_event(void *msgptr) {
         case WM_RBUTTONDOWN: handle_button(2, 1, m->wParam, m->lParam);   break;
         case WM_RBUTTONUP:   handle_button(2, 0, m->wParam, m->lParam);   break;
         case WM_MOUSEWHEEL:  handle_wheel(m->wParam);                     break;
-        case WM_KILLFOCUS:   if (s_inp) reset_held_buttons_win32(s_inp); break;
+        case WM_KILLFOCUS:
+            if (s_inp) reset_held_buttons_win32(s_inp);
+            input_capture_mouse(0);
+            break;
         default: break;
     }
 }
@@ -294,6 +377,8 @@ void input_native_handle_event(void *msgptr) {
 
 static InputState *s_inp = NULL;
 static int         s_key_down[256];   /* indexed by raw X11 keycode, for edge detection below */
+static int         s_captured = 0;
+static Cursor      s_blank_cursor = None;
 
 static void reset_held_buttons_native(InputState *inp) {
     inp->lmb_down = inp->rmb_down = inp->mmb_down = 0;
@@ -332,6 +417,47 @@ void input_install_callbacks(InputState *inp) {
     XkbSetDetectableAutoRepeat(phi_platform_native_display(), True, NULL);
 }
 
+/* A fully transparent 1x1 cursor -- XGrabPointer below still needs a real
+ * Cursor resource to "hide" the pointer with; there's no simpler
+ * "just hide it" Xlib call. Created once, lazily, and kept for the
+ * process's lifetime (same "never freed, process exit reclaims it"
+ * convention this codebase's other one-off X11 resources already use). */
+static Cursor get_blank_cursor(Display *dpy, Window win) {
+    if (s_blank_cursor != None) return s_blank_cursor;
+    char data[1] = {0};
+    Pixmap blank_pixmap = XCreateBitmapFromData(dpy, win, data, 1, 1);
+    XColor black = {0};
+    s_blank_cursor = XCreatePixmapCursor(dpy, blank_pixmap, blank_pixmap, &black, &black, 0, 0);
+    XFreePixmap(dpy, blank_pixmap);
+    return s_blank_cursor;
+}
+
+/* Real XGrabPointer-based capture -- see input.h's own comment for the
+ * full technique (confine + hide + warp-to-center each real motion
+ * event, in handle_motion below). Escape release is a player_main.c
+ * policy decision (it calls this with 0 when it sees escape_edge), not
+ * handled automatically in here -- this function is purely mechanical. */
+void input_capture_mouse(int enable) {
+    Display *dpy = phi_platform_native_display();
+    Window win = phi_platform_native_window();
+    if (!dpy) return;
+    if (enable && !s_captured) {
+        Cursor blank = get_blank_cursor(dpy, win);
+        XGrabPointer(dpy, win, True, ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                     GrabModeAsync, GrabModeAsync, win, blank, CurrentTime);
+        s_captured = 1;
+        XWindowAttributes attrs;
+        XGetWindowAttributes(dpy, win, &attrs);
+        XWarpPointer(dpy, None, win, 0, 0, 0, 0, attrs.width / 2, attrs.height / 2);
+        XSync(dpy, False);
+    } else if (!enable && s_captured) {
+        XUngrabPointer(dpy, CurrentTime);
+        s_captured = 0;
+    }
+}
+
+int input_mouse_captured(void) { return s_captured; }
+
 static void handle_key(XKeyEvent *e, int down) {
     InputState *inp = s_inp;
     if (!inp) return;
@@ -367,9 +493,25 @@ static void handle_key(XKeyEvent *e, int down) {
 static void handle_motion(XMotionEvent *e) {
     InputState *inp = s_inp;
     if (!inp) return;
+    inp->ctrl_down = (e->state & ControlMask) != 0;
+    if (s_captured) {
+        Display *dpy = phi_platform_native_display();
+        Window win = phi_platform_native_window();
+        XWindowAttributes attrs;
+        XGetWindowAttributes(dpy, win, &attrs);
+        int cx = attrs.width / 2, cy = attrs.height / 2;
+        inp->mouse_dx += e->x - cx;
+        inp->mouse_dy += e->y - cy;
+        /* Re-center every real event except the warp's own resulting one
+         * (which lands exactly on center -- see input.h's own comment on
+         * why that needs no special-casing beyond this equality check,
+         * which just avoids an infinite warp->motion->warp loop). */
+        if (e->x != cx || e->y != cy) {
+            XWarpPointer(dpy, None, win, 0, 0, 0, 0, cx, cy);
+        }
+    }
     inp->mouse_x = e->x;
     inp->mouse_y = e->y;
-    inp->ctrl_down = (e->state & ControlMask) != 0;
 }
 
 static void handle_button(XButtonEvent *e, int down) {
@@ -402,7 +544,10 @@ void input_native_handle_event(void *xevent) {
         case MotionNotify:  handle_motion(&ev->xmotion);  break;
         case ButtonPress:   handle_button(&ev->xbutton, 1); break;
         case ButtonRelease: handle_button(&ev->xbutton, 0); break;
-        case FocusOut:      if (s_inp) reset_held_buttons_native(s_inp); break;
+        case FocusOut:
+            if (s_inp) reset_held_buttons_native(s_inp);
+            input_capture_mouse(0);   /* alt-tabbing away with a hidden/confined cursor would strand the user in another window otherwise */
+            break;
         default: break;
     }
 }

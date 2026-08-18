@@ -298,7 +298,7 @@ ENGINE_CORE_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native player run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test node_graph_test mp_node_test phi_h_test render_hooks_test input_gamepad_test mp_phase9_gap_test audio_wav_test
+.PHONY: all wasm native player player_wasm run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test node_graph_test mp_node_test phi_h_test render_hooks_test input_gamepad_test mp_phase9_gap_test audio_wav_test
 
 all: wasm native
 
@@ -434,6 +434,62 @@ player: $(OUT_PLAYER)
 $(OUT_PLAYER): $(PLAYER_SRCS) $(HDRS) | $(BUILDDIR)
 	$(NATIVE_CC) $(PLAYER_CFLAGS) $(PLAYER_SRCS) -o $(OUT_PLAYER) $(NATIVE_LDFLAGS)
 	@echo "player build complete -> $(OUT_PLAYER)"
+
+# ---------------------------------------------------------------
+# Player, wasm build -- NOT part of Phase 9's actual shipped-game
+# Distribution Model (see phi.md: a shipped standalone game is native-
+# only, since Steam ships a real local toolchain and doesn't need a
+# browser channel) -- this exists purely so `game/src/main.c`/`game/
+# main.py` can be demoed over a real URL, served by the same server.py
+# the editor already uses, without needing anyone to have a native build
+# environment at all. Same ENGINE_CORE_SRCS + wasm platform/GL/gamepad/
+# audio backends as the editor's own `wasm` target, player_main.c in
+# place of editor_main.c, plus whatever's in game/src/ (reuses GAME_SRC_
+# FILES/PHI_GAME_HAS_C_ENTRY, defined just above for the native player --
+# this target must stay below that definition, not next to the editor's
+# own `wasm` target above, or these two variables would still be empty/
+# undefined at the point Make expands them here). A separate EMFLAGS
+# variant (PLAYER_EMFLAGS) drops _net_connect_js from EXPORTED_FUNCTIONS
+# -- that JS-callable export is editor_main.c's own symbol (the
+# WebSocket-URL-from-JS callback for its live server connection), which
+# player_main.c never defines; everything else net.c itself still needs
+# at the wasm link level (the --js-library/-lwebsocket.js flags) stays,
+# same "net.c isn't trimmed out of ENGINE_CORE_SRCS yet, so its own link
+# requirements still apply even though player_main.c never calls net_
+# connect" reasoning PLAYER_SRCS' own comment above already gives for the
+# native player and ws_client_native.c.
+# ---------------------------------------------------------------
+PLAYER_WASM_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/player_main.c $(SRCDIR)/phi_platform_wasm.c $(SRCDIR)/gbuffer.c $(SRCDIR)/input_gamepad_wasm.c $(SRCDIR)/audio_wasm.c $(GAME_SRC_FILES)
+
+PLAYER_WASM_CFLAGS := $(WASM_CFLAGS) $(PHI_GAME_HAS_C_ENTRY)
+
+PLAYER_EMFLAGS := \
+	-s WASM=1 \
+	-s USE_WEBGL2=1 \
+	-s LEGACY_GL_EMULATION=0 \
+	-s FULL_ES3=1 \
+	-s USE_PTHREADS=0 \
+	-s ALLOW_MEMORY_GROWTH=1 \
+	-s INITIAL_MEMORY=134217728 \
+	-s EXPORTED_FUNCTIONS='["_main","_malloc","_free"]' \
+	-s EXPORTED_RUNTIME_METHODS='["allocateUTF8","ccall","cwrap"]' \
+	-s NO_EXIT_RUNTIME=1 \
+	-s MODULARIZE=0 \
+	-s ENVIRONMENT=web \
+	--js-library $(SRCDIR)/library_ws_stub.js \
+	--embed-file assets@assets \
+	-lGL \
+	-lwebsocket.js \
+	-lm
+
+OUT_PLAYER_JS   := $(WWWDIR)/player.js
+OUT_PLAYER_WASM := $(WWWDIR)/player.wasm
+
+player_wasm: $(WWWDIR) $(OUT_PLAYER_JS)
+
+$(OUT_PLAYER_JS): $(PLAYER_WASM_SRCS) $(HDRS) assets/cube.gltf assets/cube.bin | $(WWWDIR)
+	$(WASM_CC) $(PLAYER_WASM_CFLAGS) $(PLAYER_EMFLAGS) $(PLAYER_WASM_SRCS) -o $(OUT_PLAYER_JS)
+	@echo "player_wasm build complete -> $(OUT_PLAYER_JS) + $(OUT_PLAYER_WASM)"
 
 # ---------------------------------------------------------------
 # Win32 (WGL, OpenGL 3.3 core) — built via a Windows-side MinGW-w64

@@ -2,6 +2,9 @@
 www/game.js
 www/game.wasm
 www/game.wasm.map
+www/player.js
+www/player.wasm
+www/player.wasm.map
 build/
 
 # Python

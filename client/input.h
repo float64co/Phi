@@ -105,16 +105,60 @@ typedef struct {
      * key-down/key-up events, same as lmb_down/rmb_down/mmb_down already
      * do for mouse buttons. */
     int   keys_down[PHI_KEY_COUNT];
+
+    /* Relative mouse motion, accumulated since the last time player_
+     * main.c drained it (same accumulate-then-drain convention scroll_
+     * delta already uses) -- real, meaningful values ONLY while the
+     * pointer is captured (see input_capture_mouse below); while
+     * uncaptured this just mirrors ordinary mouse_x/y deltas, which a
+     * caller generally shouldn't rely on (they're absolute-position-
+     * derived, not raw device motion). Added for FPS-style mouse look
+     * (2026-08-18) -- game/src/main.c's own first cut at this computed
+     * deltas from mouse_x/y by hand, which breaks under real pointer
+     * capture (native: the pointer gets warped back to center every
+     * frame, so absolute position is meaningless; wasm: the browser
+     * still reports it, but real relative motion -- movementX/Y -- is
+     * both more correct and the standard way to read it). */
+    int   mouse_dx, mouse_dy;
 } InputState;
 
 void input_init(InputState *inp);
 void input_install_callbacks(InputState *inp);  /* registers JS event listeners */
 
+/* Real pointer capture ("FPS mouse look") -- confines and hides the
+ * cursor and switches mouse_dx/dy to real relative-motion values (see
+ * that field's own comment). Added 2026-08-18 for the FPS demo (see
+ * phi.md's Phase 9 notes) -- input.h's own top-of-struct comment already
+ * mentions Qek's predecessor field this replaces (`pointer_locked`,
+ * removed along with the rest of Qek's gameplay-specific InputState
+ * fields when this became a UI-focused struct); this is a real,
+ * deliberate re-addition for the player build's own genuine FPS-style
+ * needs, not a resurrection of unused code.
+ *   Native (X11): XGrabPointer confines the cursor to the window and a
+ *     blank cursor hides it; mouse_dx/dy come from diffing each real
+ *     XMotionEvent against window-center, then warping the pointer back
+ *     to center (the standard technique -- the warp's own resulting
+ *     MotionNotify lands exactly on center, contributing a harmless
+ *     (0,0) to the next frame's accumulation, no special-casing needed).
+ *   wasm: the browser's real Pointer Lock API (emscripten_request_
+ *     pointerlock, deferred until the next in-page event so it's still
+ *     honored despite not being called synchronously inside a user-
+ *     gesture handler) -- mouse_dx/dy come from the DOM's own real
+ *     movementX/movementY. Must be requested from within code that runs
+ *     as a consequence of a real user gesture (a click) -- browsers
+ *     refuse an unprompted pointer-lock request.
+ * Not meaningful in a UI/panel context -- the editor never calls this.
+ * Released automatically on Escape: natively, player_main.c calls
+ * input_capture_mouse(0) when it sees escape_edge; in the browser, the
+ * Pointer Lock API itself already exits on Escape with no code needed. */
+void input_capture_mouse(int enable);
+int  input_mouse_captured(void);
+
 #ifndef __EMSCRIPTEN__
-/* Called by phi_platform_native.c's event pump for every XEvent it doesn't
- * itself handle (resize/close). Takes `void *` rather than `XEvent *` so
- * this header doesn't need to pull in <X11/Xlib.h> for callers that only
- * ever see the wasm build. No-op today — real key/mouse translation is a
- * separate, not-yet-landed piece of native input support. */
+/* Called by phi_platform_native.c's event pump for every XEvent it
+ * doesn't itself handle (resize/close). Takes `void *` rather than
+ * `XEvent *` so this header doesn't need to pull in <X11/Xlib.h> for
+ * callers that only ever see the wasm build. Real key/mouse/pointer-
+ * capture handling lives in input.c's native branch. */
 void input_native_handle_event(void *xevent);
 #endif

@@ -29,8 +29,8 @@
  *     phi_mp_exec, then a real tick(dt) Python call every frame.
  *
  * phi.md also documents a THIRD shape -- a game/main.py-driven game with
- * ADDITIONAL game/src/*.c files exposed back into Python as custom phi.*-
- * style bound functions, for hand-written performance-critical code from
+ * ADDITIONAL game/src/ *.c files exposed back into Python as custom
+ * phi.*-style bound functions, for hand-written performance-critical code from
  * a mostly-Python game. That needs a real binding-registration mechanism
  * (something like mp_port.c's own MP_DEFINE_CONST_FUN_OBJ pattern, but
  * driven by user code rather than engine code) that does not exist yet --
@@ -48,6 +48,7 @@
 #include "phi_audio.h"
 #include "vec3.h"
 #include <math.h>
+#include <stdlib.h>   /* malloc/free -- read_whole_file below needs this unconditionally, not just in the #else (Python) branch; a real bug clang caught (implicit-declaration error) that GCC had silently let through as a warning */
 
 #ifdef PHI_GAME_HAS_C_ENTRY
 /* Provided by the user's own game/src/main.c -- statically linked into
@@ -58,8 +59,8 @@
  * actually needs immediate access to (Phase 9 gap-closing, 2026-08-18 --
  * see phi.md's Phase 9 "Known gaps" and phi.h's own input.h/renderer.h
  * comments) -- the same real renderer/physics-world/input state the
- * Python path reaches via phi.set_camera/phi.object_*/phi.key_down,
- * handed over directly instead, since there's no MicroPython round trip
+ * Python path reaches via phi.set_camera, phi.object_enable_physics, and
+ * phi.key_down, handed over directly instead, since there's no MicroPython round trip
  * on this path at all. game_tick/game_shutdown take no parameters --
  * game code is expected to stash whatever pointers it needs during
  * game_init, the same "capture once, use every frame" shape player_
@@ -69,7 +70,6 @@ extern void  game_tick(float dt);
 extern void  game_shutdown(void);
 #else
 #include "mp_port.h"
-#include <stdlib.h>
 #endif
 
 #ifdef __EMSCRIPTEN__
@@ -212,6 +212,21 @@ static void player_loop(void *userdata) {
         }
     }
 
+    /* Mouse capture policy ("steal the mouse until Escape" -- see input.h's
+     * own input_capture_mouse comment for the real per-platform mechanism):
+     * click to engage, Escape to release. A real, deliberate policy choice
+     * that lives here (player_main.c), not in input.c -- input.c only
+     * knows HOW to grab/hide/warp the pointer, not WHEN a game should want
+     * that to happen. The very click that engages capture is consumed
+     * here (not left for game code to also see) so it doesn't
+     * additionally register as e.g. a "shoot" action the same frame. */
+    if (!input_mouse_captured() && g_inp.lmb_click) {
+        input_capture_mouse(1);
+        g_inp.lmb_click = 0;
+    } else if (input_mouse_captured() && g_inp.escape_edge) {
+        input_capture_mouse(0);
+    }
+
 #ifdef PHI_GAME_HAS_C_ENTRY
     game_tick(dt);
 #else
@@ -223,6 +238,24 @@ static void player_loop(void *userdata) {
         free(out);
     }
 #endif
+
+    /* Drains every one-shot InputState field (see input.h's own "producer
+     * sets, consumer clears" convention) once per frame, AFTER game code
+     * has had a chance to read them -- in the editor, ui.c's click
+     * routing is that consumer; there is no ui.c here, so nothing was
+     * ever clearing these in the player build until now, meaning e.g.
+     * lmb_click would latch to 1 forever after the very first click
+     * (real bug: a game/src/main.c reading it for "click to shoot" would
+     * fire every single frame after the first click, not once). Held
+     * state (lmb_down/keys_down/mouse_x/y) is untouched -- only the
+     * real one-shot edges/queues. */
+    g_inp.lmb_click = g_inp.rmb_click = g_inp.mmb_click = 0;
+    g_inp.enter_edge = g_inp.backspace_edge = 0;
+    g_inp.histup_edge = g_inp.histdown_edge = 0;
+    g_inp.tab_edge = g_inp.escape_edge = 0;
+    g_inp.scroll_delta = 0;
+    g_inp.typed_count = 0;
+    g_inp.mouse_dx = g_inp.mouse_dy = 0;
 
     player_render();
 }
