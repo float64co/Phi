@@ -1347,6 +1347,7 @@ MIME = {
     '.glb':  'model/gltf-binary',
     '.gltf': 'model/gltf+json',
     '.bin':  'application/octet-stream',
+    '.ttf':  'font/ttf',
 }
 
 def parse_request(sock):

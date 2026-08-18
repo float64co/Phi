@@ -5,6 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Phi Player</title>
 <style>
+  /* IBM Plex Sans Bold -- the exact same file (and weight -- see ui.c's
+     draw_branding_bar: the "Phi" pill specifically uses g_ui.font_bold,
+     IBMPlexSans-Bold.ttf, not the BoldItalic "Float64" pill sits next to)
+     the editor's own in-canvas branding bar renders "Phi" with, so this
+     chromeless build's loading title matches it exactly too, even though
+     there's no branding bar here to compare it against directly. Served
+     from the real project-root assets/fonts/ the C-side font.c already
+     loads from -- one real file, not two. */
+  @font-face {
+    font-family: 'IBM Plex Sans';
+    src: url('/assets/fonts/IBMPlexSans-Bold.ttf') format('truetype');
+    font-weight: bold;
+    font-style: normal;
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: #0a0a0f;
@@ -29,9 +43,11 @@
     gap: 28px;
   }
   #loading-title {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-weight: bold;
     font-size: 2.8rem;
     letter-spacing: 0.35em;
-    color: #00bfff;
+    color: #ffffff;
     text-shadow: 0 0 40px #00bfff66;
     user-select: none;
   }
