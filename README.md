@@ -3,6 +3,7 @@
 **A browser-native and desktop game engine with a Blender-style editor, Python scripting, and Claude built in as a first-class editor participant.**
 
 ![Phi editor screenshot](docs/screenshot.png)
+![Phi player screenshot](docs/phi_player.png)
 
 Phi ships as a single opaque `engine.wasm` (or a native executable on
 Linux/Windows/macOS) that is the mesh editor, the animation editor, and the
