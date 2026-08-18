@@ -34,7 +34,14 @@ Audio API in the browser, positional 3D sound included. And a game built
 this way ships chromeless: `player_main.c` is an independent driver with no
 editor UI, no Asset Browser, no live server connection — a real camera, real
 input, real physics, real sound, and `./game/` loaded into a real per-frame
-gameplay loop.
+gameplay loop. `game/src/main.c` ships a real, playable demo of all of it: a
+minimal first-person shooter — WASD, mouse look under real OS/browser
+pointer capture (`input_capture_mouse`, click to engage, Escape to release),
+click to shoot real dynamic-physics targets — written entirely in C, no
+MicroPython round trip anywhere in the hot path. `make player_wasm` builds
+the same game for the browser too (not part of the actual shipping story —
+a real Steam release stays native-only — just the easiest way to try it
+without a native build environment).
 
 ```
 Language:    C (Emscripten -> WASM, or native via glext.h — no SDL/GLFW)
@@ -83,13 +90,15 @@ render-pass hooks, vendored-SDL2 gamepad/Steam Deck support, camera control,
 whole-object transforms, keyboard/mouse input, and object-id-keyed physics)
 and Phase 10 (audio — WAV decode/mixing, native ALSA, wasm Web Audio, a
 win32 stub, real Python bindings) are both landed and build-verified; a
-shipped game can genuinely be seen, moved, driven, and heard today. The
-Asset Browser's "mark this asset for `./game/`" UI, and win32 for both the
-player target and native audio, are the real pieces still outstanding (all
-three unverified in this project's build environment so far, not unbuilt in
-principle). See [`phi.md`](phi.md) for the complete phase-by-phase
-engineering brief, including exactly what's verified vs. still a known gap
-at any given point.
+shipped game can genuinely be seen, moved, driven, and heard today. Real OS/
+browser pointer capture (`input_capture_mouse`) and a playable first-person
+shooter demo (`game/src/main.c`, `make player`/`make player_wasm`) prove all
+of it end to end. The Asset Browser's "mark this asset for `./game/`" UI,
+and win32 for both the player target and native audio, are the real pieces
+still outstanding (all three unverified in this project's build environment
+so far, not unbuilt in principle). See [`phi.md`](phi.md) for the complete
+phase-by-phase engineering brief, including exactly what's verified vs.
+still a known gap at any given point.
 
 ## Quick start
 
@@ -102,7 +111,16 @@ make wasm       # browser editor build -> www/game.js + www/game.wasm
 make win32       # cross-compiled Windows editor binary -> build/phi_win32.exe
 make player      # standalone chromeless game binary -> build/phi_player
                  # (native only; boots ./game/main.py or ./game/src/main.c)
+make player_wasm # same game, browser build -> www/player.js + www/player.wasm
+                 # (not part of the real shipping story -- see Status -- just
+                 #  the easiest way to try it without a native build environment)
 ```
+
+A checked-in example ships in `./game/` right now: a minimal first-person
+shooter (`game/src/main.c`) with real physics targets and real OS/browser
+mouse capture. `make player && ./build/phi_player`, or `make player_wasm`
+then open `player.html` (see Run, below) — click the canvas to lock the
+mouse, WASD to move, click to shoot, Escape to let go.
 
 ### Run
 
@@ -110,9 +128,11 @@ make player      # standalone chromeless game binary -> build/phi_player
 cd server && python3 server.py
 ```
 
-Then open `http://localhost:8765` for the browser build, or run
-`build/phi_native` directly for the native one. Both talk to the same
-server over the same WebSocket protocol.
+Then open `http://localhost:8765` for the browser editor, or
+`http://localhost:8765/player.html` for the browser player build (`make
+player_wasm`), or run `build/phi_native`/`build/phi_player` directly for the
+native ones. The same `server.py` serves all of it — the player build talks
+to no live server at runtime (see Status), it's just files on disk either way.
 
 ### Talk to Claude in the editor
 
@@ -140,8 +160,16 @@ client/     Engine + editor, plain C (compiles unchanged with gcc or emcc)
 server/     Pure-Python stdlib HTTP + WebSocket server, asset DB, and the
             Anthropic tool-use loop the Chat panel talks to
 
-www/        Browser shell (index.html + the emcc-generated game.js/game.wasm)
+www/        Browser shells: index.html (editor) + player.html (player),
+            both loading their own emcc-generated .js/.wasm
 assets/     glTF test assets + the uploaded asset library
+
+game/       A real, checked-in example game -- what `make player`/
+            `make player_wasm` actually boot
+  src/main.c   the FPS demo (game_init/game_tick/game_shutdown, no MicroPython)
+  main.py      an equivalent, earlier Python-driven example (mutually
+               exclusive with src/main.c at build time -- see phi.md's
+               Phase 9 "./game/ directory" section)
 ```
 
 ## Full engineering brief
