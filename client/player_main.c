@@ -44,15 +44,27 @@
 #include "node_graph.h"
 #include "render_hooks.h"
 #include "input_gamepad.h"
+#include "input.h"
+#include "phi_audio.h"
 #include "vec3.h"
+#include <math.h>
 
 #ifdef PHI_GAME_HAS_C_ENTRY
 /* Provided by the user's own game/src/main.c -- statically linked into
  * this exact binary (see this file's own top comment and the Makefile's
  * PLAYER_SRCS). Not declared in phi.h: these are symbols the GAME
  * exports to the engine, the reverse direction of everything else phi.h
- * declares. */
-extern void  game_init(void);
+ * declares. game_init receives the three live engine instances a C game
+ * actually needs immediate access to (Phase 9 gap-closing, 2026-08-18 --
+ * see phi.md's Phase 9 "Known gaps" and phi.h's own input.h/renderer.h
+ * comments) -- the same real renderer/physics-world/input state the
+ * Python path reaches via phi.set_camera/phi.object_*/phi.key_down,
+ * handed over directly instead, since there's no MicroPython round trip
+ * on this path at all. game_tick/game_shutdown take no parameters --
+ * game code is expected to stash whatever pointers it needs during
+ * game_init, the same "capture once, use every frame" shape player_
+ * main.c's own g_renderer/g_phys_world/g_inp already follow. */
+extern void  game_init(Renderer *renderer, PhiPhysicsWorld *phys_world, const InputState *input);
 extern void  game_tick(float dt);
 extern void  game_shutdown(void);
 #else
@@ -73,6 +85,17 @@ static Renderer        *g_renderer   = NULL;
 static GBuffer          *g_gbuf       = NULL;
 static PhiPhysicsWorld  *g_phys_world = NULL;
 static double            g_last_t     = 0.0;
+static InputState        g_inp;
+
+#ifndef PHI_GAME_HAS_C_ENTRY
+/* phi.set_camera's real callback (Phase 9 gap-closing, 2026-08-18 -- see
+ * phi.md's Phase 9 "Known gaps" and mp_port.h's phi_mp_register_camera_
+ * callback comment for why this is a function pointer, not a raw
+ * Renderer* handed to mp_port.c directly). */
+static void player_set_camera(Vec3f eye, float yaw, float pitch) {
+    renderer_set_camera(g_renderer, eye, yaw, pitch);
+}
+#endif
 
 #ifndef PHI_GAME_HAS_C_ENTRY
 /* Set once at startup: whether game/main.py defined a real, callable
@@ -99,6 +122,26 @@ static char *read_whole_file(const char *path) {
     fclose(f);
     buf[got] = 0;
     return buf;
+}
+
+/* Keeps phi_audio.h's 3D listener in sync with the real, current camera
+ * every frame (Phase 10, see phi.md's "Phase 10 -- Audio") -- so
+ * positional audio (phi.play_sound_3d) automatically tracks wherever the
+ * camera actually is, including a script's own phi.set_camera calls,
+ * with no separate Python-side bookkeeping needed (see mp_port.h's
+ * phi_mp_register_audio_callbacks comment). fwd/right derived from cam_
+ * yaw/cam_pitch via the identical basis formula editor_main.c's own
+ * cam_basis uses (renderer.c's build_vp/mat4_look_dir), so panning is
+ * consistent with whatever's actually rendered, not a separately-
+ * invented convention. */
+static void update_audio_listener(void) {
+    float yaw = g_renderer->cam_yaw, pitch = g_renderer->cam_pitch;
+    float sy = sinf(yaw), cy = cosf(yaw);
+    float sp = sinf(pitch), cp = cosf(pitch);
+    Vec3f fwd   = { -sy*cp, sp, -cy*cp };
+    Vec3f right = { cy, 0.0f, -sy };
+    Vec3f pos = { g_renderer->cam_pos[0], g_renderer->cam_pos[1], g_renderer->cam_pos[2] };
+    phi_audio_set_listener(pos, fwd, right);
 }
 
 static void player_render(void) {
@@ -152,6 +195,7 @@ static void player_loop(void *userdata) {
     if (dt > 0.05f) dt = 0.05f;   /* cap at 50ms -- same convention as editor_main.c's main_loop */
 
     phi_gamepad_poll();
+    update_audio_listener();
 
     phi_physics_world_step(g_phys_world, dt);
     {
@@ -197,16 +241,45 @@ int main(void) {
     g_renderer = renderer_create(w, h);
     g_gbuf = gbuffer_create(w, h);
 
+    /* Real, non-degenerate starting vantage point (Phase 9 gap-closing,
+     * 2026-08-18 -- see phi.md's Phase 9 "Known gaps": this used to be
+     * left at renderer_create's calloc-zeroed default, (0,0,0) looking
+     * nowhere in particular, which is why nothing was ever watchable in
+     * this build before). Not meant to suit every game -- a real game
+     * overrides it via phi.set_camera (Python) or renderer_set_camera
+     * directly (C, via phi.h) -- just a sane fallback so an otherwise-
+     * untouched scene is actually visible rather than a black/undefined
+     * frame. Values chosen to echo editor_main.c's own initial vantage
+     * (g_cam_pivot/g_cam_distance's starting values there), not derived
+     * from them -- the player has no cam_recompute_pos orbit state to
+     * share. */
+    renderer_set_camera(g_renderer, (Vec3f){128.0f, 120.0f, 40.0f}, 0.0f, -0.4f);
+
     scene_objects_init();
     phi_graph_system_init();
     render_hooks_init();
     phi_gamepad_init();
 
+    /* Keyboard/mouse input (Phase 9 gap-closing, 2026-08-18 -- see
+     * phi.md's Phase 9 "Known gaps": this build had no input source at
+     * all before this). Real platform event callbacks, same input.c
+     * mechanism editor_main.c already uses -- phi_platform's own main-
+     * loop event pump (see phi_platform_native.c) drives it automatically
+     * every frame from here on, no per-frame poll call needed. */
+    input_init(&g_inp);
+    input_install_callbacks(&g_inp);
+
     g_phys_world = phi_physics_world_create();
+
+    /* Audio (Phase 10, see phi.md's "Phase 10 -- Audio") -- real ALSA
+     * playback if this build has it (see the Makefile's ALSA_HEADER
+     * detection), a real honest "no device" fallback otherwise; sounds
+     * still load/decode for real either way. */
+    phi_audio_init();
 
 #ifdef PHI_GAME_HAS_C_ENTRY
     printf("[player] game/src/main.c entry point -- calling game_init()\n");
-    game_init();
+    game_init(g_renderer, g_phys_world, &g_inp);
 #else
     /* mp_stack_top_marker's ADDRESS (not value) is the conservative GC
      * stack-scan boundary -- see mp_port.h's phi_mp_init() comment for
@@ -215,6 +288,21 @@ int main(void) {
      * valid at this exact stack depth, matching editor_main.c's own
      * mp_stack_top convention. */
     phi_mp_init(&mp_stack_top_marker);
+
+    /* Phase 9 gap-closing (2026-08-18, see phi.md's Phase 9 "Known
+     * gaps"): registers phi.set_camera, phi.object_enable_physics/
+     * apply_impulse/get_velocity/set_velocity, phi.key_down/mouse_pos/
+     * mouse_button_down, and phi.gamepad_count/connected/button/axis --
+     * see mp_port.h's own comments on each for why these are the right
+     * shape (function-pointer handoffs for camera/gamepad, a borrowed
+     * live pointer for input, reusing s_phys_world for physics) rather
+     * than phi_mp_register_targets, which needs a "selected object"
+     * concept this chromeless build doesn't have at all. */
+    phi_mp_register_camera_callback(player_set_camera);
+    phi_mp_register_physics_world(g_phys_world);
+    phi_mp_register_input(&g_inp);
+    phi_mp_register_gamepad_callbacks(phi_gamepad_count, phi_gamepad_get_state);
+    phi_mp_register_audio_callbacks(phi_audio_load_sound, phi_audio_play, phi_audio_play_3d, phi_audio_stop);
 
     char *script = read_whole_file("game/main.py");
     if (script) {
@@ -245,6 +333,7 @@ int main(void) {
 #ifdef PHI_GAME_HAS_C_ENTRY
     game_shutdown();
 #endif
+    phi_audio_shutdown();
     phi_platform_shutdown();
     return 0;
 }

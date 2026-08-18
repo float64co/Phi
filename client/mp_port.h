@@ -1,6 +1,9 @@
 #pragma once
 #include <stddef.h>
 #include "meshobject.h"
+#include "input.h"
+#include "input_gamepad.h"
+#include "phi_audio.h"
 
 /* Phi's own thin API over the embedded MicroPython interpreter (see
  * mp_port.c) -- wraps the exact init/exec pattern client/mp_test_main.c
@@ -68,6 +71,78 @@ char *phi_mp_exec(const char *code);
  * PHYSICS handler and main_loop's step/sync use, not a separate one. */
 void phi_mp_register_targets(MeshObject *(*get_selected_object)(void), const int *edit_face,
                               PhiPhysicsWorld *phys_world);
+
+/* Phase 9 gap-closing (2026-08-18, see phi.md's Phase 9 "Known gaps") --
+ * three independent registrations, each a plain pointer handoff like
+ * phi_mp_register_targets above, but each usable on its own without the
+ * selection concept that function bundles in: player_main.c (no
+ * selection, no editor UI) calls these directly; editor_main.c doesn't
+ * need phi_mp_register_input or phi_mp_register_camera_callback (it
+ * drives its own camera and input handling itself) but DOES still reach
+ * the object-id-keyed transform/physics bindings for free, since those
+ * aren't tied to any of these three registrations. */
+
+/* phi.set_camera(x, y, z, yaw, pitch) -- a function-pointer handoff, NOT
+ * a raw Renderer* (deliberately: mp_port.c/mp_port.h must never need
+ * renderer.h's real GL-touching renderer.c linked in, the same "thin API,
+ * no heavy link dependency" discipline this header's own top comment and
+ * mp_geometry_test/mp_node_test's Makefile targets already depend on --
+ * see mp_port.c's own comment at the registration site). player_main.c
+ * passes a small wrapper that calls the real renderer_set_camera. */
+void phi_mp_register_camera_callback(void (*set_camera)(Vec3f eye, float yaw, float pitch));
+
+/* phi.object_enable_physics/object_apply_impulse/object_get_velocity/
+ * object_set_velocity -- the object-id-keyed physics functions. Reuses
+ * the same underlying physics-world pointer phi_mp_register_targets sets
+ * (see mp_port.c) rather than a second one to keep in sync; call this
+ * INSTEAD of phi_mp_register_targets when there's no selection concept
+ * to register (player_main.c), or leave it uncalled where phi_mp_
+ * register_targets already covers it (editor_main.c). */
+void phi_mp_register_physics_world(PhiPhysicsWorld *phys_world);
+
+/* phi.key_down/mouse_pos/mouse_button_down -- reads live InputState
+ * (see input.h). `inp` is borrowed, not copied -- must outlive every
+ * subsequent phi_mp_exec call, same "read fresh every call, not
+ * snapshotted" convention phi_mp_register_targets' get_selected_object
+ * callback already uses for its own live state. Safe to include input.h
+ * here: it's just a struct type + prototypes, no function this file
+ * calls, so it adds no link dependency (unlike input_gamepad.h below,
+ * which IS called directly -- see that one's own comment for why it
+ * needs the function-pointer treatment instead). */
+void phi_mp_register_input(const InputState *inp);
+
+/* phi.gamepad_count/gamepad_connected/gamepad_button/gamepad_axis --
+ * function-pointer handoff, NOT calling phi_gamepad_count/phi_gamepad_
+ * get_state (input_gamepad.h) directly, for the identical reason phi_mp_
+ * register_camera_callback above doesn't call renderer_set_camera
+ * directly: those real functions are only ever DEFINED by a real backend
+ * (input_gamepad_native.c, which pulls in the entire vendored SDL2 tree)
+ * -- linking that into mp_geometry_test/mp_node_test's lightweight,
+ * intentionally-GL-and-SDL2-free Makefile targets is exactly the
+ * regression this indirection avoids. player_main.c passes phi_gamepad_
+ * count/phi_gamepad_get_state themselves as the two callbacks -- same
+ * functions, just handed over by pointer instead of called directly. */
+void phi_mp_register_gamepad_callbacks(int (*count)(void), const PhiGamepadState *(*get_state)(int index));
+
+/* phi.load_sound/play_sound/play_sound_3d/stop_sound (Phase 10, see
+ * phi.md's "Phase 10 -- Audio"). Function-pointer handoff, NOT calling
+ * phi_audio_load_sound/play/play_3d/stop directly, for the identical
+ * reason phi_mp_register_camera_callback/_gamepad_callbacks above don't
+ * call their own real functions directly -- audio_native.c may pull in
+ * real ALSA; mp_geometry_test/mp_node_test/mp_phase9_gap_test must never
+ * need that linked in. player_main.c hands over those exact four real
+ * functions by pointer, same shape as the gamepad registration just
+ * above. phi_audio_set_listener is NOT exposed to Python -- player_
+ * main.c calls it directly, every frame, from the camera's own current
+ * position/basis, so 3D positional audio automatically tracks whatever
+ * the camera is doing (including a script's own phi.set_camera calls)
+ * with no separate Python-side bookkeeping needed. */
+void phi_mp_register_audio_callbacks(
+    PhiSound *(*load_sound)(const char *path),
+    PhiAudioVoice (*play)(PhiSound *sound, float volume, int loop),
+    PhiAudioVoice (*play_3d)(PhiSound *sound, Vec3f position, float volume, int loop),
+    void (*stop)(PhiAudioVoice voice)
+);
 
 /* Registers the real render-a-still-frame callback phi.render() calls
  * (see mp_port.c's native_render) -- main.c passes its own render_

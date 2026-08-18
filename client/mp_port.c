@@ -41,6 +41,9 @@
 #include "scene_objects.h"
 #include "mesh_edit.h"
 #include "node_graph.h"
+#include "input.h"
+#include "input_gamepad.h"
+#include "phi_audio.h"
 
 mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
     mp_raise_OSError(ENOENT);
@@ -246,6 +249,412 @@ static mp_obj_t native_set_velocity(mp_obj_t v_obj) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(native_set_velocity_obj, native_set_velocity);
+
+/* ---- Camera control (Phase 9 gap-closing, 2026-08-18 -- see phi.md's
+ * Phase 9 "Known gaps": the player build had no way to move the camera
+ * at all, from C or Python). Function-pointer handoff, NOT a raw
+ * Renderer* -- see mp_port.h's phi_mp_register_camera_callback comment
+ * for why (keeps mp_port.c from ever needing renderer.c/GL linked into
+ * the lightweight mp_geometry_test/mp_node_test Makefile targets).
+ * Registered only by player_main.c (the editor drives its camera from
+ * mouse orbit/pan via its own cam_recompute_pos, see editor_main.c; a
+ * Python override there would fight that every frame, so this stays
+ * player-only on purpose), same shape phi_mp_register_render_callback/
+ * _ragdoll_callback below already use for main.c-owned logic. */
+static void (*s_set_camera_cb)(Vec3f eye, float yaw, float pitch) = NULL;
+
+void phi_mp_register_camera_callback(void (*set_camera)(Vec3f eye, float yaw, float pitch)) {
+    s_set_camera_cb = set_camera;
+}
+
+static mp_obj_t native_set_camera(size_t n_args, const mp_obj_t *args) {
+    if (!s_set_camera_cb) mp_raise_ValueError(MP_ERROR_TEXT("phi.set_camera: not available (no camera callback registered)"));
+    Vec3f eye = {
+        (float)mp_obj_get_float(args[0]), (float)mp_obj_get_float(args[1]), (float)mp_obj_get_float(args[2])
+    };
+    float yaw   = (float)mp_obj_get_float(args[3]);
+    float pitch = (float)mp_obj_get_float(args[4]);
+    s_set_camera_cb(eye, yaw, pitch);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_set_camera_obj, 5, 5, native_set_camera);
+
+/* ---- Whole-object transforms, exposed to Python and keyed by object id
+ * (Phase 9 gap-closing, 2026-08-18 -- see phi.md's Phase 9 "Known gaps":
+ * phi.mesh_object() placed an object once, at creation, with no way for
+ * a script to move/rotate/scale it afterward -- the only lever was
+ * mutating raw vertex positions directly. Object-id-keyed like phi.
+ * get_vertices/set_vertices etc. above, NOT selection-keyed like phi.
+ * enable_physics/prop_get('object', ...) -- these need to work from a
+ * shipped game, which has no selection concept at all (see player_
+ * main.c's own top comment). */
+
+static mp_obj_t native_get_object_position(mp_obj_t id_obj) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(id_obj));
+    if (!obj) mp_raise_ValueError(MP_ERROR_TEXT("phi.get_object_position: no such object"));
+    mp_obj_t items[3] = { mp_obj_new_float(obj->position.x), mp_obj_new_float(obj->position.y), mp_obj_new_float(obj->position.z) };
+    return mp_obj_new_tuple(3, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_get_object_position_obj, native_get_object_position);
+
+static mp_obj_t native_set_object_position(size_t n_args, const mp_obj_t *args) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(args[0]));
+    if (!obj) mp_raise_ValueError(MP_ERROR_TEXT("phi.set_object_position: no such object"));
+    obj->position.x = (float)mp_obj_get_float(args[1]);
+    obj->position.y = (float)mp_obj_get_float(args[2]);
+    obj->position.z = (float)mp_obj_get_float(args[3]);
+    /* A kinematic/static sync, not a physics push -- matches gizmo drag's
+     * own "the transform IS the new ground truth" behavior on a static
+     * object (see transform_op.c). A DYNAMIC body would just have its
+     * own simulated transform overwrite this again next physics step;
+     * real "move a physics object by script" goes through phi.object_
+     * apply_impulse/set_velocity instead, same division of labor
+     * phi.apply_impulse vs. a gizmo drag already has today. */
+    if (obj->phys_body) {
+        float orientation[4] = { obj->orientation.x, obj->orientation.y, obj->orientation.z, obj->orientation.w };
+        phi_physics_set_transform(obj->phys_body, obj->position, orientation);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_set_object_position_obj, 4, 4, native_set_object_position);
+
+static mp_obj_t native_get_object_rotation(mp_obj_t id_obj) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(id_obj));
+    if (!obj) mp_raise_ValueError(MP_ERROR_TEXT("phi.get_object_rotation: no such object"));
+    mp_obj_t items[4] = {
+        mp_obj_new_float(obj->orientation.x), mp_obj_new_float(obj->orientation.y),
+        mp_obj_new_float(obj->orientation.z), mp_obj_new_float(obj->orientation.w)
+    };
+    return mp_obj_new_tuple(4, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_get_object_rotation_obj, native_get_object_rotation);
+
+static mp_obj_t native_set_object_rotation(size_t n_args, const mp_obj_t *args) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(args[0]));
+    if (!obj) mp_raise_ValueError(MP_ERROR_TEXT("phi.set_object_rotation: no such object"));
+    obj->orientation.x = (float)mp_obj_get_float(args[1]);
+    obj->orientation.y = (float)mp_obj_get_float(args[2]);
+    obj->orientation.z = (float)mp_obj_get_float(args[3]);
+    obj->orientation.w = (float)mp_obj_get_float(args[4]);
+    if (obj->phys_body) {
+        float orientation[4] = { obj->orientation.x, obj->orientation.y, obj->orientation.z, obj->orientation.w };
+        phi_physics_set_transform(obj->phys_body, obj->position, orientation);
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_set_object_rotation_obj, 5, 5, native_set_object_rotation);
+
+static mp_obj_t native_get_object_scale(mp_obj_t id_obj) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(id_obj));
+    if (!obj) mp_raise_ValueError(MP_ERROR_TEXT("phi.get_object_scale: no such object"));
+    mp_obj_t items[3] = { mp_obj_new_float(obj->scale.x), mp_obj_new_float(obj->scale.y), mp_obj_new_float(obj->scale.z) };
+    return mp_obj_new_tuple(3, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_get_object_scale_obj, native_get_object_scale);
+
+static mp_obj_t native_set_object_scale(size_t n_args, const mp_obj_t *args) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(args[0]));
+    if (!obj) mp_raise_ValueError(MP_ERROR_TEXT("phi.set_object_scale: no such object"));
+    /* Zeroed scale is a real, previously-hit degenerate case elsewhere in
+     * this codebase (see meshobject.h's own scale comment) -- guarded the
+     * same way here rather than silently producing a collapsed object. */
+    float sx = (float)mp_obj_get_float(args[1]), sy = (float)mp_obj_get_float(args[2]), sz = (float)mp_obj_get_float(args[3]);
+    if (sx == 0.0f || sy == 0.0f || sz == 0.0f) mp_raise_ValueError(MP_ERROR_TEXT("phi.set_object_scale: scale components must be non-zero"));
+    obj->scale.x = sx; obj->scale.y = sy; obj->scale.z = sz;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_set_object_scale_obj, 4, 4, native_set_object_scale);
+
+/* ---- Object-id-keyed physics, exposed to Python (Phase 9 gap-closing,
+ * 2026-08-18 -- see phi.md's Phase 9 "Known gaps": phi.enable_physics/
+ * apply_impulse/get_velocity/set_velocity above all resolve through the
+ * editor's "selected object" concept, which a shipped game has no
+ * equivalent of at all -- so game/main.py could never touch physics.
+ * These do the identical real work (same phi_physics.h calls, same
+ * convex-hull-from-mesh-vertices shape choice) but take an object id
+ * directly, same "id into scene_objects.c's registry" idiom phi.
+ * get_vertices/set_vertices/the transform functions above already use.
+ * phi_mp_register_physics_world below reuses s_phys_world (declared with
+ * phi_mp_register_targets, at the top of this physics section) rather
+ * than adding a second physics-world pointer to keep in sync -- the
+ * editor already sets it via phi_mp_register_targets; player_main.c,
+ * which has no selection to register, calls this instead. */
+
+void phi_mp_register_physics_world(PhiPhysicsWorld *phys_world) {
+    s_phys_world = phys_world;
+}
+
+static mp_obj_t native_object_enable_physics(size_t n_args, const mp_obj_t *args) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(args[0]));
+    if (!obj) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_enable_physics: no such object"));
+    if (obj->phys_body) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_enable_physics: already has a physics body"));
+    if (!obj->hem || obj->hem->vert_count < 4) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_enable_physics: not enough vertices for a hull (need a real 3D mesh)"));
+    HalfEdgeMesh *hem = obj->hem;
+    float *flat = (float *)malloc((size_t)hem->vert_count * 3 * sizeof(float));
+    for (int i = 0; i < hem->vert_count; i++) {
+        flat[i*3+0] = hem->verts[i].pos[0];
+        flat[i*3+1] = hem->verts[i].pos[1];
+        flat[i*3+2] = hem->verts[i].pos[2];
+    }
+    float orientation[4] = { obj->orientation.x, obj->orientation.y, obj->orientation.z, obj->orientation.w };
+    float mass = (float)mp_obj_get_float(args[1]);
+    float restitution = (float)mp_obj_get_float(args[2]);
+    obj->phys_body = phi_physics_add_convex_hull_body(s_phys_world, flat, hem->vert_count,
+                                                        obj->position, orientation, mass, restitution);
+    free(flat);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_object_enable_physics_obj, 3, 3, native_object_enable_physics);
+
+static mp_obj_t native_object_apply_impulse(size_t n_args, const mp_obj_t *args) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(args[0]));
+    if (!obj || !obj->phys_body) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_apply_impulse: no such object, or it has no physics body (call phi.object_enable_physics first)"));
+    size_t n; mp_obj_t *items;
+    mp_obj_get_array(args[1], &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_apply_impulse: expected a 3-element impulse vector"));
+    Vec3f impulse = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    mp_obj_get_array(args[2], &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_apply_impulse: expected a 3-element rel_pos vector"));
+    Vec3f rel_pos = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    phi_physics_apply_impulse(obj->phys_body, impulse, rel_pos);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_object_apply_impulse_obj, 3, 3, native_object_apply_impulse);
+
+static mp_obj_t native_object_get_velocity(mp_obj_t id_obj) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(id_obj));
+    if (!obj || !obj->phys_body) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_get_velocity: no such object, or it has no physics body (call phi.object_enable_physics first)"));
+    Vec3f v = phi_physics_get_linear_velocity(obj->phys_body);
+    mp_obj_t items[3] = { mp_obj_new_float(v.x), mp_obj_new_float(v.y), mp_obj_new_float(v.z) };
+    return mp_obj_new_tuple(3, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_object_get_velocity_obj, native_object_get_velocity);
+
+static mp_obj_t native_object_set_velocity(mp_obj_t id_obj, mp_obj_t v_obj) {
+    MeshObject *obj = scene_object_find(mp_obj_get_int(id_obj));
+    if (!obj || !obj->phys_body) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_set_velocity: no such object, or it has no physics body (call phi.object_enable_physics first)"));
+    size_t n; mp_obj_t *items;
+    mp_obj_get_array(v_obj, &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("phi.object_set_velocity: expected a 3-element velocity vector"));
+    Vec3f v = { (float)mp_obj_get_float(items[0]), (float)mp_obj_get_float(items[1]), (float)mp_obj_get_float(items[2]) };
+    phi_physics_set_linear_velocity(obj->phys_body, v);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_object_set_velocity_obj, native_object_set_velocity);
+
+/* ---- Keyboard/mouse input, exposed to Python (Phase 9 gap-closing,
+ * 2026-08-18 -- see phi.md's Phase 9 "Known gaps": the player build had
+ * NO input source at all before this -- input.c's own real, portable
+ * PhiKey/keys_down state (see input.h) now exists specifically to close
+ * this gap. Registered only by player_main.c, same "player-only, editor
+ * drives its own UI directly off InputState already" reasoning phi_mp_
+ * register_renderer above documents. */
+static const InputState *s_input = NULL;
+
+void phi_mp_register_input(const InputState *inp) {
+    s_input = inp;
+}
+
+/* Name -> PhiKey, so Python scripts write phi.key_down('w') rather than
+ * needing to know this enum's integer values -- same "string identifier,
+ * not a raw enum int" ergonomics phi.add_light('sun', ...)/phi.prop_get
+ * already establish. Single ASCII letters/digits map directly; anything
+ * else is spelled out. Returns -1 for an unrecognized name. */
+static int key_name_to_phikey(const char *name) {
+    size_t len = strlen(name);
+    if (len == 1) {
+        if (name[0] >= 'a' && name[0] <= 'z') return PHI_KEY_A + (name[0] - 'a');
+        if (name[0] >= 'A' && name[0] <= 'Z') return PHI_KEY_A + (name[0] - 'A');
+        if (name[0] >= '0' && name[0] <= '9') return PHI_KEY_0 + (name[0] - '0');
+        return -1;
+    }
+    if (strcmp(name, "space") == 0)  return PHI_KEY_SPACE;
+    if (strcmp(name, "shift") == 0)  return PHI_KEY_SHIFT;
+    if (strcmp(name, "ctrl") == 0)   return PHI_KEY_CTRL;
+    if (strcmp(name, "up") == 0)     return PHI_KEY_UP;
+    if (strcmp(name, "down") == 0)   return PHI_KEY_DOWN;
+    if (strcmp(name, "left") == 0)   return PHI_KEY_LEFT;
+    if (strcmp(name, "right") == 0)  return PHI_KEY_RIGHT;
+    if (strcmp(name, "enter") == 0)  return PHI_KEY_ENTER;
+    if (strcmp(name, "escape") == 0) return PHI_KEY_ESCAPE;
+    if (strcmp(name, "tab") == 0)    return PHI_KEY_TAB;
+    return -1;
+}
+
+static mp_obj_t native_key_down(mp_obj_t key_obj) {
+    if (!s_input) mp_raise_ValueError(MP_ERROR_TEXT("phi.key_down: not available (no input registered)"));
+    int pk = key_name_to_phikey(mp_obj_str_get_str(key_obj));
+    if (pk < 0) mp_raise_ValueError(MP_ERROR_TEXT("phi.key_down: unrecognized key name"));
+    return mp_obj_new_bool(s_input->keys_down[pk]);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_key_down_obj, native_key_down);
+
+static mp_obj_t native_mouse_pos(void) {
+    if (!s_input) mp_raise_ValueError(MP_ERROR_TEXT("phi.mouse_pos: not available (no input registered)"));
+    mp_obj_t items[2] = { mp_obj_new_int(s_input->mouse_x), mp_obj_new_int(s_input->mouse_y) };
+    return mp_obj_new_tuple(2, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_mouse_pos_obj, native_mouse_pos);
+
+static mp_obj_t native_mouse_button_down(mp_obj_t name_obj) {
+    if (!s_input) mp_raise_ValueError(MP_ERROR_TEXT("phi.mouse_button_down: not available (no input registered)"));
+    const char *name = mp_obj_str_get_str(name_obj);
+    if (strcmp(name, "left") == 0)   return mp_obj_new_bool(s_input->lmb_down);
+    if (strcmp(name, "right") == 0)  return mp_obj_new_bool(s_input->rmb_down);
+    if (strcmp(name, "middle") == 0) return mp_obj_new_bool(s_input->mmb_down);
+    mp_raise_ValueError(MP_ERROR_TEXT("phi.mouse_button_down: name must be 'left', 'right', or 'middle'"));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_mouse_button_down_obj, native_mouse_button_down);
+
+/* ---- Gamepad, exposed to Python (Phase 9 gap-closing, 2026-08-18 -- see
+ * phi.md's Phase 9 "Known gaps": input_gamepad.h was real and wired for
+ * C (game/src/*.c via phi.h) but had no Python binding at all).
+ * Function-pointer handoff, NOT calling phi_gamepad_count/phi_gamepad_
+ * get_state directly -- see mp_port.h's phi_mp_register_gamepad_
+ * callbacks comment for why (input_gamepad_native.c pulls in the entire
+ * vendored SDL2 tree; mp_geometry_test/mp_node_test must never need that
+ * linked in just to test unrelated bindings). player_main.c hands over
+ * those exact two real functions by pointer. */
+static int                     (*s_gamepad_count_cb)(void) = NULL;
+static const PhiGamepadState  *(*s_gamepad_get_state_cb)(int index) = NULL;
+
+void phi_mp_register_gamepad_callbacks(int (*count)(void), const PhiGamepadState *(*get_state)(int index)) {
+    s_gamepad_count_cb = count;
+    s_gamepad_get_state_cb = get_state;
+}
+
+static int gamepad_button_name_to_enum(const char *name) {
+    if (strcmp(name, "a") == 0) return PHI_GAMEPAD_BUTTON_A;
+    if (strcmp(name, "b") == 0) return PHI_GAMEPAD_BUTTON_B;
+    if (strcmp(name, "x") == 0) return PHI_GAMEPAD_BUTTON_X;
+    if (strcmp(name, "y") == 0) return PHI_GAMEPAD_BUTTON_Y;
+    if (strcmp(name, "back") == 0)  return PHI_GAMEPAD_BUTTON_BACK;
+    if (strcmp(name, "guide") == 0) return PHI_GAMEPAD_BUTTON_GUIDE;
+    if (strcmp(name, "start") == 0) return PHI_GAMEPAD_BUTTON_START;
+    if (strcmp(name, "leftstick") == 0)  return PHI_GAMEPAD_BUTTON_LEFTSTICK;
+    if (strcmp(name, "rightstick") == 0) return PHI_GAMEPAD_BUTTON_RIGHTSTICK;
+    if (strcmp(name, "leftshoulder") == 0)  return PHI_GAMEPAD_BUTTON_LEFTSHOULDER;
+    if (strcmp(name, "rightshoulder") == 0) return PHI_GAMEPAD_BUTTON_RIGHTSHOULDER;
+    if (strcmp(name, "dpad_up") == 0)    return PHI_GAMEPAD_BUTTON_DPAD_UP;
+    if (strcmp(name, "dpad_down") == 0)  return PHI_GAMEPAD_BUTTON_DPAD_DOWN;
+    if (strcmp(name, "dpad_left") == 0)  return PHI_GAMEPAD_BUTTON_DPAD_LEFT;
+    if (strcmp(name, "dpad_right") == 0) return PHI_GAMEPAD_BUTTON_DPAD_RIGHT;
+    return -1;
+}
+
+static int gamepad_axis_name_to_enum(const char *name) {
+    if (strcmp(name, "leftx") == 0)  return PHI_GAMEPAD_AXIS_LEFTX;
+    if (strcmp(name, "lefty") == 0)  return PHI_GAMEPAD_AXIS_LEFTY;
+    if (strcmp(name, "rightx") == 0) return PHI_GAMEPAD_AXIS_RIGHTX;
+    if (strcmp(name, "righty") == 0) return PHI_GAMEPAD_AXIS_RIGHTY;
+    if (strcmp(name, "lefttrigger") == 0)  return PHI_GAMEPAD_AXIS_LEFT_TRIGGER;
+    if (strcmp(name, "righttrigger") == 0) return PHI_GAMEPAD_AXIS_RIGHT_TRIGGER;
+    return -1;
+}
+
+static mp_obj_t native_gamepad_count(void) {
+    return mp_obj_new_int(s_gamepad_count_cb ? s_gamepad_count_cb() : 0);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(native_gamepad_count_obj, native_gamepad_count);
+
+static mp_obj_t native_gamepad_connected(mp_obj_t index_obj) {
+    const PhiGamepadState *s = s_gamepad_get_state_cb ? s_gamepad_get_state_cb(mp_obj_get_int(index_obj)) : NULL;
+    return mp_obj_new_bool(s && s->connected);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_gamepad_connected_obj, native_gamepad_connected);
+
+static mp_obj_t native_gamepad_button(mp_obj_t index_obj, mp_obj_t button_obj) {
+    const PhiGamepadState *s = s_gamepad_get_state_cb ? s_gamepad_get_state_cb(mp_obj_get_int(index_obj)) : NULL;
+    if (!s || !s->connected) return mp_obj_new_bool(false);
+    int btn = gamepad_button_name_to_enum(mp_obj_str_get_str(button_obj));
+    if (btn < 0) mp_raise_ValueError(MP_ERROR_TEXT("phi.gamepad_button: unrecognized button name"));
+    return mp_obj_new_bool(s->buttons[btn]);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_gamepad_button_obj, native_gamepad_button);
+
+static mp_obj_t native_gamepad_axis(mp_obj_t index_obj, mp_obj_t axis_obj) {
+    const PhiGamepadState *s = s_gamepad_get_state_cb ? s_gamepad_get_state_cb(mp_obj_get_int(index_obj)) : NULL;
+    if (!s || !s->connected) return mp_obj_new_float(0.0f);
+    int axis = gamepad_axis_name_to_enum(mp_obj_str_get_str(axis_obj));
+    if (axis < 0) mp_raise_ValueError(MP_ERROR_TEXT("phi.gamepad_axis: unrecognized axis name"));
+    return mp_obj_new_float((mp_float_t)s->axes[axis]);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(native_gamepad_axis_obj, native_gamepad_axis);
+
+/* ---- Audio, exposed to Python (Phase 10, see phi.md's "Phase 10 --
+ * Audio" -- a genuinely unaddressed system before this, not a gap in an
+ * existing phase). Function-pointer handoff for the same reason camera/
+ * gamepad above use one: the real backend (audio_native.c, which may
+ * pull in ALSA; audio_wasm.c; audio_win32_stub.c) must never need to be
+ * linked into mp_geometry_test/mp_node_test/mp_phase9_gap_test just to
+ * exercise unrelated bindings. Loaded sounds are tracked by a small
+ * int-handle registry here (s_loaded_sounds), the same "id, not a raw
+ * pointer, crosses into Python" idiom every other phi.* binding in this
+ * file already uses (scene object ids, light ids, graph ids) -- a
+ * PhiSound* is never itself visible to a Python script. */
+static PhiSound       *(*s_audio_load_cb)(const char *path) = NULL;
+static PhiAudioVoice    (*s_audio_play_cb)(PhiSound *sound, float volume, int loop) = NULL;
+static PhiAudioVoice    (*s_audio_play_3d_cb)(PhiSound *sound, Vec3f position, float volume, int loop) = NULL;
+static void             (*s_audio_stop_cb)(PhiAudioVoice voice) = NULL;
+
+void phi_mp_register_audio_callbacks(
+    PhiSound *(*load_sound)(const char *path),
+    PhiAudioVoice (*play)(PhiSound *sound, float volume, int loop),
+    PhiAudioVoice (*play_3d)(PhiSound *sound, Vec3f position, float volume, int loop),
+    void (*stop)(PhiAudioVoice voice)
+) {
+    s_audio_load_cb = load_sound;
+    s_audio_play_cb = play;
+    s_audio_play_3d_cb = play_3d;
+    s_audio_stop_cb = stop;
+}
+
+#define PHI_MP_MAX_LOADED_SOUNDS 64
+static PhiSound *s_loaded_sounds[PHI_MP_MAX_LOADED_SOUNDS];
+static int       s_loaded_sound_count = 0;
+
+static mp_obj_t native_load_sound(mp_obj_t path_obj) {
+    if (!s_audio_load_cb) mp_raise_ValueError(MP_ERROR_TEXT("phi.load_sound: not available (no audio backend registered)"));
+    if (s_loaded_sound_count >= PHI_MP_MAX_LOADED_SOUNDS) mp_raise_ValueError(MP_ERROR_TEXT("phi.load_sound: too many sounds already loaded (PHI_MP_MAX_LOADED_SOUNDS)"));
+    PhiSound *s = s_audio_load_cb(mp_obj_str_get_str(path_obj));
+    if (!s) mp_raise_ValueError(MP_ERROR_TEXT("phi.load_sound: failed to load (missing file, not a WAV, or an unsupported PCM layout)"));
+    int handle = s_loaded_sound_count++;
+    s_loaded_sounds[handle] = s;
+    return mp_obj_new_int(handle);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_load_sound_obj, native_load_sound);
+
+static PhiSound *resolve_sound(int handle) {
+    if (handle < 0 || handle >= s_loaded_sound_count) return NULL;
+    return s_loaded_sounds[handle];
+}
+
+static mp_obj_t native_play_sound(size_t n_args, const mp_obj_t *args) {
+    PhiSound *s = resolve_sound(mp_obj_get_int(args[0]));
+    if (!s) mp_raise_ValueError(MP_ERROR_TEXT("phi.play_sound: no such loaded sound handle"));
+    if (!s_audio_play_cb) mp_raise_ValueError(MP_ERROR_TEXT("phi.play_sound: not available (no audio backend registered)"));
+    float volume = n_args > 1 ? (float)mp_obj_get_float(args[1]) : 1.0f;
+    int loop = n_args > 2 ? mp_obj_is_true(args[2]) : 0;
+    return mp_obj_new_int(s_audio_play_cb(s, volume, loop));
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_play_sound_obj, 1, 3, native_play_sound);
+
+static mp_obj_t native_play_sound_3d(size_t n_args, const mp_obj_t *args) {
+    PhiSound *s = resolve_sound(mp_obj_get_int(args[0]));
+    if (!s) mp_raise_ValueError(MP_ERROR_TEXT("phi.play_sound_3d: no such loaded sound handle"));
+    if (!s_audio_play_3d_cb) mp_raise_ValueError(MP_ERROR_TEXT("phi.play_sound_3d: not available (no audio backend registered)"));
+    Vec3f pos = { (float)mp_obj_get_float(args[1]), (float)mp_obj_get_float(args[2]), (float)mp_obj_get_float(args[3]) };
+    float volume = n_args > 4 ? (float)mp_obj_get_float(args[4]) : 1.0f;
+    int loop = n_args > 5 ? mp_obj_is_true(args[5]) : 0;
+    return mp_obj_new_int(s_audio_play_3d_cb(s, pos, volume, loop));
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(native_play_sound_3d_obj, 4, 6, native_play_sound_3d);
+
+static mp_obj_t native_stop_sound(mp_obj_t voice_obj) {
+    if (s_audio_stop_cb) s_audio_stop_cb(mp_obj_get_int(voice_obj));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(native_stop_sound_obj, native_stop_sound);
 
 /* ---- Light objects, exposed to Python (light.h) -- spawn/delete/list
  * live outside the generic phi.prop_get/set surface since they add or
@@ -1229,6 +1638,32 @@ static const char *PHI_BOOTSTRAP =
     "phi.apply_impulse = _native_apply_impulse\n"
     "phi.get_velocity = _native_get_velocity\n"
     "phi.set_velocity = _native_set_velocity\n"
+    /* Phase 9 gap-closing (2026-08-18) -- camera, whole-object transforms,
+     * object-id-keyed physics, keyboard/mouse, and gamepad. See phi.md's
+     * Phase 9 "Known gaps" for what each of these closes and why. */
+    "phi.set_camera = _native_set_camera\n"
+    "phi.get_object_position = _native_get_object_position\n"
+    "phi.set_object_position = _native_set_object_position\n"
+    "phi.get_object_rotation = _native_get_object_rotation\n"
+    "phi.set_object_rotation = _native_set_object_rotation\n"
+    "phi.get_object_scale = _native_get_object_scale\n"
+    "phi.set_object_scale = _native_set_object_scale\n"
+    "phi.object_enable_physics = _native_object_enable_physics\n"
+    "phi.object_apply_impulse = _native_object_apply_impulse\n"
+    "phi.object_get_velocity = _native_object_get_velocity\n"
+    "phi.object_set_velocity = _native_object_set_velocity\n"
+    "phi.key_down = _native_key_down\n"
+    "phi.mouse_pos = _native_mouse_pos\n"
+    "phi.mouse_button_down = _native_mouse_button_down\n"
+    "phi.gamepad_count = _native_gamepad_count\n"
+    "phi.gamepad_connected = _native_gamepad_connected\n"
+    "phi.gamepad_button = _native_gamepad_button\n"
+    "phi.gamepad_axis = _native_gamepad_axis\n"
+    /* Phase 10 (2026-08-18) -- audio, see phi.md's "Phase 10 -- Audio". */
+    "phi.load_sound = _native_load_sound\n"
+    "phi.play_sound = _native_play_sound\n"
+    "phi.play_sound_3d = _native_play_sound_3d\n"
+    "phi.stop_sound = _native_stop_sound\n"
     "phi.add_light = _native_add_light\n"
     "phi.delete_light = _native_delete_light\n"
     "phi.list_lights = _native_list_lights\n"
@@ -1426,6 +1861,28 @@ static void phi_mp_install_bindings(void) {
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_apply_impulse")), MP_OBJ_FROM_PTR(&native_apply_impulse_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_velocity")), MP_OBJ_FROM_PTR(&native_get_velocity_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_velocity")), MP_OBJ_FROM_PTR(&native_set_velocity_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_camera")), MP_OBJ_FROM_PTR(&native_set_camera_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_object_position")), MP_OBJ_FROM_PTR(&native_get_object_position_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_object_position")), MP_OBJ_FROM_PTR(&native_set_object_position_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_object_rotation")), MP_OBJ_FROM_PTR(&native_get_object_rotation_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_object_rotation")), MP_OBJ_FROM_PTR(&native_set_object_rotation_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_get_object_scale")), MP_OBJ_FROM_PTR(&native_get_object_scale_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_set_object_scale")), MP_OBJ_FROM_PTR(&native_set_object_scale_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_object_enable_physics")), MP_OBJ_FROM_PTR(&native_object_enable_physics_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_object_apply_impulse")), MP_OBJ_FROM_PTR(&native_object_apply_impulse_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_object_get_velocity")), MP_OBJ_FROM_PTR(&native_object_get_velocity_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_object_set_velocity")), MP_OBJ_FROM_PTR(&native_object_set_velocity_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_key_down")), MP_OBJ_FROM_PTR(&native_key_down_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_mouse_pos")), MP_OBJ_FROM_PTR(&native_mouse_pos_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_mouse_button_down")), MP_OBJ_FROM_PTR(&native_mouse_button_down_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_gamepad_count")), MP_OBJ_FROM_PTR(&native_gamepad_count_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_gamepad_connected")), MP_OBJ_FROM_PTR(&native_gamepad_connected_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_gamepad_button")), MP_OBJ_FROM_PTR(&native_gamepad_button_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_gamepad_axis")), MP_OBJ_FROM_PTR(&native_gamepad_axis_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_load_sound")), MP_OBJ_FROM_PTR(&native_load_sound_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_play_sound")), MP_OBJ_FROM_PTR(&native_play_sound_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_play_sound_3d")), MP_OBJ_FROM_PTR(&native_play_sound_3d_obj));
+    mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_stop_sound")), MP_OBJ_FROM_PTR(&native_stop_sound_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_add_light")), MP_OBJ_FROM_PTR(&native_add_light_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_delete_light")), MP_OBJ_FROM_PTR(&native_delete_light_obj));
     mp_obj_dict_store(MP_OBJ_FROM_PTR(globals), MP_OBJ_NEW_QSTR(qstr_from_str("_native_list_lights")), MP_OBJ_FROM_PTR(&native_list_lights_obj));

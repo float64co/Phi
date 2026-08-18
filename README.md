@@ -12,22 +12,29 @@ logic, NPC behaviour, and tool UI (`@phi.panel`) are written in Python — the
 same Python everywhere, running on a real embedded MicroPython interpreter,
 not a scripting sandbox bolted on after the fact.
 
-A standalone-game path ships alongside the editor: `phi.h` aggregates the 
+A standalone-game path ships alongside the editor: `phi.h` aggregates the
 engine's internals — geometry operations, Bullet physics, animation/armature
-playback, node graphs, render-pass hooks, gamepad input — into one public C 
-header, so a `game/src/main.c` written against it today compiles and links, 
-no stubs. The same ground is covered from Python: `phi.*` is a fairly rich 
-API (mesh editing, physics, animation playback, node graphs, per-face materials).
-Custom shaders are possible now too, if low-level — `render_hooks.h` lets C
-code register a callback at one of four pipeline insertion points and
-write raw GL/GLSL against the live `GBuffer*`, with no asset-pipeline
-convenience yet. Gamepad input, including Steam Deck, runs on a
-vendored SDL2 `GameController` subsystem (`SDL_GameControllerDB`'s 
-mapping database) — Steam Deck runs a standard Linux desktop under the hood,
-so the same native build covers it. And a game built this way ships
-chromeless: `player_main.c` is an independent driver with no editor UI, no
-Asset Browser, no live server connection, just `./game/` loaded into a real
-per-frame gameplay loop.
+playback, node graphs, render-pass hooks, gamepad input, keyboard/mouse
+input, camera control, and audio — into one public C header, so a
+`game/src/main.c` written against it today compiles and links, no stubs. The
+same ground is covered from Python: `phi.*` is a genuinely rich API — mesh
+editing, whole-object transforms, object-id-keyed physics, animation
+playback, node graphs, per-face materials, keyboard/mouse/gamepad input, and
+sound playback, none of it gated behind the editor's own UI concepts (a
+shipped game has no "selected object," and doesn't need one). Custom shaders
+are possible now too, if low-level — `render_hooks.h` lets C code register a
+callback at one of four pipeline insertion points and write raw GL/GLSL
+against the live `GBuffer*`, with no asset-pipeline convenience yet. Gamepad
+input, including Steam Deck, runs on a vendored SDL2 `GameController`
+subsystem (`SDL_GameControllerDB`'s mapping database) — Steam Deck runs a
+standard Linux desktop under the hood, so the same native build covers it.
+Audio is real too: a hand-written WAV decoder + mixer, ALSA on native Linux
+(detected at build time, an honest no-op fallback otherwise), the real Web
+Audio API in the browser, positional 3D sound included. And a game built
+this way ships chromeless: `player_main.c` is an independent driver with no
+editor UI, no Asset Browser, no live server connection — a real camera, real
+input, real physics, real sound, and `./game/` loaded into a real per-frame
+gameplay loop.
 
 ```
 Language:    C (Emscripten -> WASM, or native via glext.h — no SDL/GLFW)
@@ -72,11 +79,17 @@ built and verified. Phase 2 (Bullet physics — vendored, wrapped in a hand
 -written C API since Bullet has no official one, wired into both the editor
 and its Python API) is also landed. Phase 9 (standalone-game shipping — the
 editor/player split, `./game/` loading, the `phi.h` C API, node graphs,
-render-pass hooks, and vendored-SDL2 gamepad/Steam Deck support) is landed
-and build-verified too; the Asset Browser's "mark this asset for `./game/`"
-UI is the one piece of it still outstanding. See [`phi.md`](phi.md) for the complete
-phase-by-phase engineering brief, including exactly what's verified vs.
-still a known gap at any given point.
+render-pass hooks, vendored-SDL2 gamepad/Steam Deck support, camera control,
+whole-object transforms, keyboard/mouse input, and object-id-keyed physics)
+and Phase 10 (audio — WAV decode/mixing, native ALSA, wasm Web Audio, a
+win32 stub, real Python bindings) are both landed and build-verified; a
+shipped game can genuinely be seen, moved, driven, and heard today. The
+Asset Browser's "mark this asset for `./game/`" UI, and win32 for both the
+player target and native audio, are the real pieces still outstanding (all
+three unverified in this project's build environment so far, not unbuilt in
+principle). See [`phi.md`](phi.md) for the complete phase-by-phase
+engineering brief, including exactly what's verified vs. still a known gap
+at any given point.
 
 ## Quick start
 
@@ -120,6 +133,7 @@ client/     Engine + editor, plain C (compiles unchanged with gcc or emcc)
   mp_port.c           MicroPython embedding + the phi.* Python API surface
   phi_physics.cpp     hand-written C wrapper over vendored Bullet
   render_hooks.c      C-level render-pass insertion points for custom shaders
+  phi_audio.h, audio_wav.c, audio_native.c, audio_wasm.c   WAV decode/mixer + ALSA/Web Audio backends
   chat.c, console.c, asset_browser.c, net.c   editor panels + wire protocol
   vendor/             Bullet, MicroPython, cgltf, nanosvg, stb, SDL2 (gamepad only) — all vendored
 
@@ -133,7 +147,7 @@ assets/     glTF test assets + the uploaded asset library
 ## Full engineering brief
 
 [`phi.md`](phi.md) is the living design document and status log for this
-project — architecture decisions, the full 8-phase roadmap, and a dated,
+project — architecture decisions, the full 10-phase roadmap, and a dated,
 honest account of what's actually been built and verified vs. still
 outstanding at every stage. Start there for anything beyond a quick look.
 

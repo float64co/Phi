@@ -16,6 +16,29 @@ static void push_typed_char(InputState *inp, const char *key) {
     }
 }
 
+/* DOM KeyboardEvent.code -> PhiKey (see input.h) -- "code" is the physical
+ * key, layout-independent (unlike .key, which push_typed_char above uses
+ * on purpose for real typed text), the right choice for game bindings
+ * (W stays W on an AZERTY layout too). Returns -1 for anything outside
+ * this codebase's deliberately-scoped key set. */
+static int wasm_code_to_phikey(const char *code) {
+    if (code[0] == 'K' && code[1] == 'e' && code[2] == 'y' && code[4] == '\0')
+        return PHI_KEY_A + (code[3] - 'A');
+    if (code[0] == 'D' && code[1] == 'i' && code[2] == 'g' && code[3] == 'i' && code[4] == 't' && code[6] == '\0')
+        return PHI_KEY_0 + (code[5] - '0');
+    if (strcmp(code, "Space") == 0)                            return PHI_KEY_SPACE;
+    if (strcmp(code, "ShiftLeft") == 0 || strcmp(code, "ShiftRight") == 0)     return PHI_KEY_SHIFT;
+    if (strcmp(code, "ControlLeft") == 0 || strcmp(code, "ControlRight") == 0) return PHI_KEY_CTRL;
+    if (strcmp(code, "ArrowUp") == 0)    return PHI_KEY_UP;
+    if (strcmp(code, "ArrowDown") == 0)  return PHI_KEY_DOWN;
+    if (strcmp(code, "ArrowLeft") == 0)  return PHI_KEY_LEFT;
+    if (strcmp(code, "ArrowRight") == 0) return PHI_KEY_RIGHT;
+    if (strcmp(code, "Enter") == 0 || strcmp(code, "NumpadEnter") == 0) return PHI_KEY_ENTER;
+    if (strcmp(code, "Escape") == 0) return PHI_KEY_ESCAPE;
+    if (strcmp(code, "Tab") == 0)    return PHI_KEY_TAB;
+    return -1;
+}
+
 static EM_BOOL key_down(int type, const EmscriptenKeyboardEvent *e, void *ud) {
     (void)type; (void)ud;
     InputState *inp = s_inp;
@@ -33,11 +56,17 @@ static EM_BOOL key_down(int type, const EmscriptenKeyboardEvent *e, void *ud) {
         if (strcmp(e->code,"Escape")==0)     inp->escape_edge   = 1;
     }
     if (strcmp(e->code,"Backspace")==0) inp->backspace_edge = 1;  /* natural OS repeat-delete */
+    int pk = wasm_code_to_phikey(e->code);
+    if (pk >= 0) inp->keys_down[pk] = 1;
     return EM_TRUE;
 }
 
 static EM_BOOL key_up(int type, const EmscriptenKeyboardEvent *e, void *ud) {
-    (void)type; (void)e; (void)ud;
+    (void)type; (void)ud;
+    InputState *inp = s_inp;
+    if (!inp) return EM_FALSE;
+    int pk = wasm_code_to_phikey(e->code);
+    if (pk >= 0) inp->keys_down[pk] = 0;
     return EM_TRUE;
 }
 
@@ -96,6 +125,7 @@ static EM_BOOL wheel_move(int type, const EmscriptenWheelEvent *e, void *ud) {
  * mouseup ever arrives), e.g. leaving a gizmo drag stuck active. */
 static void reset_held_buttons(InputState *inp) {
     inp->lmb_down = inp->rmb_down = inp->mmb_down = 0;
+    memset(inp->keys_down, 0, sizeof(inp->keys_down));
 }
 
 static EM_BOOL on_blur(int type, const EmscriptenFocusEvent *e, void *ud) {
@@ -126,6 +156,28 @@ static InputState *s_inp  = NULL;
 
 static void reset_held_buttons_win32(InputState *inp) {
     inp->lmb_down = inp->rmb_down = inp->mmb_down = 0;
+    memset(inp->keys_down, 0, sizeof(inp->keys_down));
+}
+
+/* Windows virtual-key code -> PhiKey (see input.h). VK_A..VK_Z (0x41-0x5A)
+ * and VK_0..VK_9 (0x30-0x39) already equal their ASCII letter/digit
+ * values, same shortcut handle_char below already relies on for WM_CHAR. */
+static int win32_vk_to_phikey(WPARAM vk) {
+    if (vk >= 'A' && vk <= 'Z') return PHI_KEY_A + (int)(vk - 'A');
+    if (vk >= '0' && vk <= '9') return PHI_KEY_0 + (int)(vk - '0');
+    switch (vk) {
+        case VK_SPACE:   return PHI_KEY_SPACE;
+        case VK_SHIFT:   return PHI_KEY_SHIFT;
+        case VK_CONTROL: return PHI_KEY_CTRL;
+        case VK_UP:      return PHI_KEY_UP;
+        case VK_DOWN:    return PHI_KEY_DOWN;
+        case VK_LEFT:    return PHI_KEY_LEFT;
+        case VK_RIGHT:   return PHI_KEY_RIGHT;
+        case VK_RETURN:  return PHI_KEY_ENTER;
+        case VK_ESCAPE:  return PHI_KEY_ESCAPE;
+        case VK_TAB:     return PHI_KEY_TAB;
+        default: return -1;
+    }
 }
 
 void input_install_callbacks(InputState *inp) {
@@ -150,6 +202,9 @@ static void handle_key(WPARAM vk, LPARAM lparam, int down) {
         if (vk == VK_ESCAPE) inp->escape_edge    = 1;
     }
     if (down && vk == VK_BACK) inp->backspace_edge = 1;  /* natural OS repeat-delete */
+
+    int pk = win32_vk_to_phikey(vk);
+    if (pk >= 0) inp->keys_down[pk] = down;
 }
 
 /* WM_CHAR gives the actual translated character (handles shift/layout the
@@ -242,6 +297,28 @@ static int         s_key_down[256];   /* indexed by raw X11 keycode, for edge de
 
 static void reset_held_buttons_native(InputState *inp) {
     inp->lmb_down = inp->rmb_down = inp->mmb_down = 0;
+    memset(inp->keys_down, 0, sizeof(inp->keys_down));
+}
+
+/* X11 KeySym -> PhiKey (see input.h). XK_a..XK_z/XK_0..XK_9 are already
+ * their own lowercase-ASCII/digit values in X11's keysymdef.h, same
+ * shortcut win32_vk_to_phikey takes for VK_A.. above. */
+static int x11_keysym_to_phikey(KeySym ks) {
+    if (ks >= XK_a && ks <= XK_z) return PHI_KEY_A + (int)(ks - XK_a);
+    if (ks >= XK_0 && ks <= XK_9) return PHI_KEY_0 + (int)(ks - XK_0);
+    switch (ks) {
+        case XK_space:     return PHI_KEY_SPACE;
+        case XK_Shift_L: case XK_Shift_R:     return PHI_KEY_SHIFT;
+        case XK_Control_L: case XK_Control_R: return PHI_KEY_CTRL;
+        case XK_Up:    return PHI_KEY_UP;
+        case XK_Down:  return PHI_KEY_DOWN;
+        case XK_Left:  return PHI_KEY_LEFT;
+        case XK_Right: return PHI_KEY_RIGHT;
+        case XK_Return: case XK_KP_Enter: return PHI_KEY_ENTER;
+        case XK_Escape: return PHI_KEY_ESCAPE;
+        case XK_Tab:    return PHI_KEY_TAB;
+        default: return -1;
+    }
 }
 
 void input_install_callbacks(InputState *inp) {
@@ -263,6 +340,9 @@ static void handle_key(XKeyEvent *e, int down) {
     s_key_down[kc] = down;
 
     KeySym ks = XLookupKeysym(e, 0);
+
+    int pk = x11_keysym_to_phikey(ks);
+    if (pk >= 0) inp->keys_down[pk] = down;
 
     /* Python-panel text entry: always-focused, no reserved game-binding
      * letters competing with typing anymore (see the wasm branch's

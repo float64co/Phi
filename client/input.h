@@ -3,6 +3,30 @@
 
 #define TYPED_CHAR_QUEUE_SIZE 32
 
+/* Portable held-key state (Phase 9 gap-closing, 2026-08-18 — see phi.md's
+ * Phase 9 "Known gaps": the player build had no general keyboard input at
+ * all, only the text-entry-oriented edges below). A-Z, 0-9, and the
+ * common gameplay/menu keys — NOT a full keyboard (no F-keys, no
+ * punctuation), a real, stated MVP scope matching PhiGamepadButton's own
+ * "classic stable set, not everything" precedent in input_gamepad.h.
+ * Portable across all three backends: each one's own raw keycode/keysym/
+ * JS-code is translated to this enum at the point where it already
+ * handles key events, so nothing outside input.c ever sees a
+ * platform-specific key code. */
+typedef enum {
+    PHI_KEY_A, PHI_KEY_B, PHI_KEY_C, PHI_KEY_D, PHI_KEY_E, PHI_KEY_F,
+    PHI_KEY_G, PHI_KEY_H, PHI_KEY_I, PHI_KEY_J, PHI_KEY_K, PHI_KEY_L,
+    PHI_KEY_M, PHI_KEY_N, PHI_KEY_O, PHI_KEY_P, PHI_KEY_Q, PHI_KEY_R,
+    PHI_KEY_S, PHI_KEY_T, PHI_KEY_U, PHI_KEY_V, PHI_KEY_W, PHI_KEY_X,
+    PHI_KEY_Y, PHI_KEY_Z,
+    PHI_KEY_0, PHI_KEY_1, PHI_KEY_2, PHI_KEY_3, PHI_KEY_4,
+    PHI_KEY_5, PHI_KEY_6, PHI_KEY_7, PHI_KEY_8, PHI_KEY_9,
+    PHI_KEY_SPACE, PHI_KEY_SHIFT, PHI_KEY_CTRL,
+    PHI_KEY_UP, PHI_KEY_DOWN, PHI_KEY_LEFT, PHI_KEY_RIGHT,
+    PHI_KEY_ENTER, PHI_KEY_ESCAPE, PHI_KEY_TAB,
+    PHI_KEY_COUNT,
+} PhiKey;
+
 /* Mouse/keyboard input state -- previously also carried Qek's FPS
  * movement/look/combat fields (forward/back/left/right/jump/fire/yaw/
  * pitch/sensitivity/pointer_locked/input_seq) and its octree-editor
@@ -73,6 +97,14 @@ typedef struct {
      * wired to anything (see input.c's own history here) -- now consumed
      * by ui_on_mouse_wheel for the Chat panel's scrollback. */
     int   scroll_delta;
+
+    /* Held-state, 1/0, indexed by PhiKey above -- NOT cleared on read (a
+     * game polls "is W held right now" every frame, unlike the one-shot
+     * *_edge fields above which the UI drains). Real state, not a stub:
+     * every backend below sets/clears these on the platform's own real
+     * key-down/key-up events, same as lmb_down/rmb_down/mmb_down already
+     * do for mouse buttons. */
+    int   keys_down[PHI_KEY_COUNT];
 } InputState;
 
 void input_init(InputState *inp);

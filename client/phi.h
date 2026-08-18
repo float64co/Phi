@@ -103,3 +103,34 @@
  * wired up yet). The interface itself is fully portable either way; only
  * the backend a given target links determines whether it does anything. */
 #include "input_gamepad.h"
+
+/* Keyboard/mouse: real, portable held-key state (see input.h's own
+ * PhiKey/InputState comment). Added alongside phi.md's Phase 9 "Known
+ * gaps" close, 2026-08-18 -- the player build had no keyboard/mouse
+ * input source of any kind before this. player_main.c's game_init(...)
+ * call (see this file's own top comment) hands a `const InputState *`
+ * straight through -- the real, live instance its own platform event
+ * callbacks feed every frame -- so a game/src/main.c author reads it the
+ * same way mp_port.c's phi.key_down/mouse_pos/mouse_button_down do
+ * internally, just without the Python round trip. */
+#include "input.h"
+
+/* Camera control: renderer_set_camera/renderer_get_sky_color/etc. -- see
+ * renderer.h's own comment on the Renderer struct's real fields (cam_pos/
+ * cam_yaw/cam_pitch among them). Added alongside phi.md's Phase 9 "Known
+ * gaps" close, 2026-08-18: player_main.c's game_init(...) call hands the
+ * real, live Renderer* straight through, so a game/src/main.c author can
+ * call renderer_set_camera on it directly -- no Python, no phi.
+ * set_camera round trip needed on this path. */
+#include "renderer.h"
+
+/* Audio (Phase 10, see phi.md's "Phase 10 -- Audio" -- a genuinely
+ * unaddressed system before this, not a gap in an existing phase):
+ * phi_audio_load_sound/play/play_3d/stop/set_listener. Real ALSA
+ * playback on native Linux IF this build environment has libasound2-dev
+ * installed (checked at `make` time, see the Makefile's ALSA_HEADER
+ * comment); sounds still load and decode for real either way (audio_
+ * wav.c has no ALSA dependency at all), only actual playback is
+ * affected. win32 is a real, honest stub for now (see audio_win32_
+ * stub.c), matching input_gamepad_win32_stub.c's own precedent. */
+#include "phi_audio.h"

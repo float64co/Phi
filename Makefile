@@ -226,6 +226,25 @@ SDL2_JOYSTICK_SRCS := \
 	$(SRCDIR)/vendor/SDL2/src/video/yuv2rgb/yuv_rgb_sse.c \
 	$(SRCDIR)/vendor/SDL2/src/video/yuv2rgb/yuv_rgb_std.c
 
+# Phase 10 (see phi.md's "Phase 10 -- Audio"): real ALSA playback on
+# native Linux IF this build environment actually has libasound2-dev's
+# headers -- checked here, once, via a real filesystem wildcard rather
+# than assumed, same "detect, don't assume" reasoning PHI_HAVE_HTTP_
+# CLIENT's own #if in editor_main.c already applies to the native HTTP
+# client. Without the header, client/audio_native.c itself still
+# compiles and links cleanly (see its own #ifdef PHI_HAVE_ALSA branch) --
+# sounds load and decode for real either way, only actual playback is
+# affected. Install libasound2-dev and re-run `make` to pick up real
+# native audio without any other change needed.
+ALSA_HEADER := $(wildcard /usr/include/alsa/asoundlib.h /usr/include/*/alsa/asoundlib.h)
+ifneq ($(ALSA_HEADER),)
+ALSA_CFLAGS  := -DPHI_HAVE_ALSA
+ALSA_LDFLAGS := -lasound
+else
+ALSA_CFLAGS  :=
+ALSA_LDFLAGS :=
+endif
+
 # Phase 9 (see phi.md's "Shipping a Standalone Game"): renamed from
 # COMMON_SRCS -- this is the shared engine core BOTH drivers link
 # (editor_main.c, today's full-chrome editor, and player_main.c, the new
@@ -253,6 +272,7 @@ ENGINE_CORE_SRCS := \
 	$(SRCDIR)/meshobject.c    \
 	$(SRCDIR)/mesh_edit.c     \
 	$(SRCDIR)/node_graph.c    \
+	$(SRCDIR)/audio_wav.c     \
 	$(SRCDIR)/render_hooks.c  \
 	$(SRCDIR)/fracture.c      \
 	$(SRCDIR)/armature.c      \
@@ -278,7 +298,7 @@ ENGINE_CORE_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native player run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test node_graph_test mp_node_test phi_h_test render_hooks_test input_gamepad_test
+.PHONY: all wasm native player run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test node_graph_test mp_node_test phi_h_test render_hooks_test input_gamepad_test mp_phase9_gap_test audio_wav_test
 
 all: wasm native
 
@@ -286,7 +306,7 @@ all: wasm native
 # WASM (Emscripten / WebGL1)
 # ---------------------------------------------------------------
 WASM_CC   := emcc
-WASM_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/editor_main.c $(SRCDIR)/phi_platform_wasm.c $(SRCDIR)/gbuffer.c $(SRCDIR)/input_gamepad_wasm.c
+WASM_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/editor_main.c $(SRCDIR)/phi_platform_wasm.c $(SRCDIR)/gbuffer.c $(SRCDIR)/input_gamepad_wasm.c $(SRCDIR)/audio_wasm.c
 
 WASM_CFLAGS := \
 	-O2 \
@@ -343,7 +363,7 @@ run: wasm
 # ---------------------------------------------------------------
 NATIVE_CC   := gcc
 NATIVE_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/editor_main.c $(SRCDIR)/phi_platform_native.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_native.c $(SRCDIR)/http_client_native.c \
-               $(SRCDIR)/input_gamepad_native.c $(SDL2_JOYSTICK_SRCS)
+               $(SRCDIR)/input_gamepad_native.c $(SDL2_JOYSTICK_SRCS) $(SRCDIR)/audio_native.c
 
 NATIVE_CFLAGS := \
 	-O2 \
@@ -353,11 +373,15 @@ NATIVE_CFLAGS := \
 	-I$(SRCDIR) \
 	$(MP_INCLUDES) \
 	$(BULLET_INCLUDES) \
-	$(SDL2_INCLUDES)
+	$(SDL2_INCLUDES) \
+	$(ALSA_CFLAGS)
 
 # -lpthread/-ldl/-lrt: real SDL2 dependencies (pthread thread backend,
 # dlopen-based loadso, POSIX timer), see client/vendor/SDL2/VENDORED.md.
-NATIVE_LDFLAGS := -lX11 -lGL -lm -lcrypto -lstdc++ -lpthread -ldl -lrt
+# -lasound: only added when ALSA_LDFLAGS is non-empty (see ALSA_HEADER's
+# own detection comment above) -- audio_native.c's mixer thread also
+# needs -lpthread, already present here for SDL2's own sake.
+NATIVE_LDFLAGS := -lX11 -lGL -lm -lcrypto -lstdc++ -lpthread -ldl -lrt $(ALSA_LDFLAGS)
 
 OUT_NATIVE := $(BUILDDIR)/phi_native
 
@@ -399,7 +423,7 @@ endif
 # symbols -- both included here purely to satisfy the linker, matching
 # NATIVE_SRCS' own set for exactly the same reason.
 PLAYER_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/player_main.c $(SRCDIR)/phi_platform_native.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_native.c $(SRCDIR)/http_client_native.c \
-               $(SRCDIR)/input_gamepad_native.c $(SDL2_JOYSTICK_SRCS) $(GAME_SRC_FILES)
+               $(SRCDIR)/input_gamepad_native.c $(SDL2_JOYSTICK_SRCS) $(SRCDIR)/audio_native.c $(GAME_SRC_FILES)
 
 PLAYER_CFLAGS := $(NATIVE_CFLAGS) $(PHI_GAME_HAS_C_ENTRY)
 
@@ -418,7 +442,7 @@ $(OUT_PLAYER): $(PLAYER_SRCS) $(HDRS) | $(BUILDDIR)
 # Winsock networking yet (see phi_platform_win32.c's header comment).
 # ---------------------------------------------------------------
 WIN32_CC   := /mnt/c/msys64/mingw64/bin/gcc.exe
-WIN32_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/editor_main.c $(SRCDIR)/phi_platform_win32.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_win32.c $(SRCDIR)/input_gamepad_win32_stub.c
+WIN32_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/editor_main.c $(SRCDIR)/phi_platform_win32.c $(SRCDIR)/gl_native.c $(SRCDIR)/gbuffer.c $(SRCDIR)/ws_client_win32.c $(SRCDIR)/input_gamepad_win32_stub.c $(SRCDIR)/audio_win32_stub.c
 
 WIN32_CFLAGS := \
 	-O2 \
@@ -665,6 +689,20 @@ $(OUT_INPUT_GAMEPAD_TEST): $(INPUT_GAMEPAD_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(SDL2_INCLUDES) $(INPUT_GAMEPAD_TEST_SRCS) -o $(OUT_INPUT_GAMEPAD_TEST) -lpthread -ldl -lm -lrt
 	@echo "input_gamepad_test build complete -> $(OUT_INPUT_GAMEPAD_TEST)"
 
+# Phase 10's real WAV decode + resample logic (audio_wav.c, shared by
+# every phi_audio.h backend -- see that file's own top comment) -- no GL,
+# no ALSA, no MicroPython, same no-dependency self-test precedent as
+# every other client/*_test_main.c here.
+AUDIO_WAV_TEST_SRCS := $(SRCDIR)/audio_wav_test_main.c $(SRCDIR)/audio_wav.c
+OUT_AUDIO_WAV_TEST := $(BUILDDIR)/audio_wav_test
+
+audio_wav_test: $(OUT_AUDIO_WAV_TEST)
+	./$(OUT_AUDIO_WAV_TEST)
+
+$(OUT_AUDIO_WAV_TEST): $(AUDIO_WAV_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(AUDIO_WAV_TEST_SRCS) -o $(OUT_AUDIO_WAV_TEST) -lm
+	@echo "audio_wav_test build complete -> $(OUT_AUDIO_WAV_TEST)"
+
 # The Python physics API surface (phi.enable_physics/apply_impulse/
 # get_velocity/set_velocity, see mp_port.c) against a REAL embedded
 # interpreter driving REAL Bullet simulation -- links MicroPython AND
@@ -672,7 +710,7 @@ $(OUT_INPUT_GAMEPAD_TEST): $(INPUT_GAMEPAD_TEST_SRCS) | $(BUILDDIR)
 # that actually proves the two subsystems this pass added work together,
 # not just each in isolation.
 MP_PHYSICS_TEST_SRCS := $(SRCDIR)/mp_physics_test_main.c $(SRCDIR)/mp_port.c \
-                         $(SRCDIR)/scene_objects.c \
+                         $(SRCDIR)/scene_objects.c $(SRCDIR)/mesh_edit.c $(SRCDIR)/node_graph.c \
                          $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
                          $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
                          $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c \
@@ -686,6 +724,30 @@ mp_physics_test: $(OUT_MP_PHYSICS_TEST)
 $(OUT_MP_PHYSICS_TEST): $(MP_PHYSICS_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(MP_INCLUDES) $(BULLET_INCLUDES) $(MP_PHYSICS_TEST_SRCS) -o $(OUT_MP_PHYSICS_TEST) -lstdc++ -lm
 	@echo "mp_physics_test build complete -> $(OUT_MP_PHYSICS_TEST)"
+
+# Phase 9 gap-closing bindings (camera, whole-object transforms,
+# object-id-keyed physics, keyboard/mouse input, gamepad -- see phi.md's
+# Phase 9 "Known gaps" and mp_phase9_gap_test_main.c's own top comment).
+# Same real-MicroPython-plus-real-Bullet shape as MP_PHYSICS_TEST_SRCS
+# above (needs the same node_graph.c/mesh_edit.c symbols mp_port.c always
+# references) -- no renderer.c/GL, no input.c/X11, no input_gamepad_
+# native.c/SDL2, all three deliberately kept out via the function-pointer
+# handoffs mp_port.h documents.
+MP_PHASE9_GAP_TEST_SRCS := $(SRCDIR)/mp_phase9_gap_test_main.c $(SRCDIR)/mp_port.c \
+                            $(SRCDIR)/scene_objects.c $(SRCDIR)/mesh_edit.c $(SRCDIR)/node_graph.c \
+                            $(SRCDIR)/phi_prop.c $(SRCDIR)/phi_prop_registry.c \
+                            $(SRCDIR)/light.c $(SRCDIR)/scene_target.c \
+                            $(SRCDIR)/phi_physics.cpp $(SRCDIR)/meshobject.c \
+                            $(SRCDIR)/halfedge.c $(SRCDIR)/halfedge_gltf.c \
+                            $(MP_EMBED_SRCS) $(BULLET_SRCS)
+OUT_MP_PHASE9_GAP_TEST := $(BUILDDIR)/mp_phase9_gap_test
+
+mp_phase9_gap_test: $(OUT_MP_PHASE9_GAP_TEST)
+	./$(OUT_MP_PHASE9_GAP_TEST)
+
+$(OUT_MP_PHASE9_GAP_TEST): $(MP_PHASE9_GAP_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -w -I$(SRCDIR) $(MP_INCLUDES) $(BULLET_INCLUDES) $(MP_PHASE9_GAP_TEST_SRCS) -o $(OUT_MP_PHASE9_GAP_TEST) -lstdc++ -lm
+	@echo "mp_phase9_gap_test build complete -> $(OUT_MP_PHASE9_GAP_TEST)"
 
 # Voronoi fracture (client/fracture.c) topology/volume self-test -- same
 # no-GL-dependency rationale as mesh_edit_test above.

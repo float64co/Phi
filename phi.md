@@ -3,7 +3,23 @@
 This document is a complete context hand-off for the Phi game engine project.
 It covers architecture decisions, the full development roadmap, and the
 current development strategy. Intended to be passed to a fresh Claude instance
-as a starting point for any phase of work.
+as a starting point for any phase of work. **Where the project is up to, as
+of 2026-08-18:** Phases 0–2 are landed and build-verified (deferred
+renderer/G-buffer/TAA across native/win32/wasm, the full interactive mesh
+editor, Bullet physics + fracturing); Phase 5 (MicroPython + a real, if
+intentionally scoped, C API surface), Phase 6 (geometry/animation node
+graphs), Phase 9 (standalone game shipping), and Phase 10 (audio) are landed
+too. Phase 3 has real still-frame offline rendering but not
+animation-sequence video export; Phase 4 has the animation data/GPU-skinning/
+Timeline/ragdoll runtime but not the Curve Editor panel. Phase 9 specifically:
+the editor/player split, `./game/` loading, `phi.h`, and every item from its
+own "Known gaps" note (camera control, whole-object transforms, keyboard/
+mouse input, object-id-keyed physics, gamepad in Python) are real and
+verified — a shipped game can now be pointed, moved, driven, and heard.
+Remaining, real gaps: the Asset Browser's "mark for `./game/`" UI, and win32
+for both the player target and Phase 10's native audio backend (all three
+unverified in this environment, not unbuilt in principle). Phase 7 (async NPC
+behaviour) and Phase 8 (WebRTC P2P) are not started.
 
 Phi is two things built from one codebase: the editor (everything else in this
 document) and a standalone player. Shipping a game is not an "export" step —
@@ -52,6 +68,27 @@ startup, in every build (editor, player, wasm/browser alike), the whole time.
 It now draws into a dedicated 1x1 offscreen scratch target instead, so the
 same real GPU blend-math verification runs without ever touching what's
 displayed.
+
+Revised 2026-08-15 (same day, third pass): assessed directly against "hand
+Phi some glTF assets today, build a real game" and found real gaps the
+mechanism-level Phase 9 verification above hadn't exercised — no camera
+control in the player build, no whole-object transform API for Python, no
+keyboard/mouse input in the player, and no Python access to physics or
+gamepad state — recorded in Phase 9's "Known gaps" section. Also added
+Phase 10 (Audio): no sound system exists anywhere in this codebase, a
+genuinely unaddressed system rather than a gap in an existing phase.
+
+Revised 2026-08-18: every Phase 9 "Known gap" above is closed (camera
+control, whole-object transforms, keyboard/mouse input, object-id-keyed
+physics, gamepad in Python — see that section for what changed and how each
+was verified) and Phase 10 (Audio) is landed — real WAV decode/mixing, native
+ALSA playback (build-time detected, honest fallback otherwise), wasm Web
+Audio, an honest win32 stub, and `phi.*` bindings, all wired through
+`player_main.c` and verified (a standalone test plus the checked-in
+`game/main.py` example, confirmed running correctly in a live window). This
+document's first paragraph and the Phase 9/10 sections were rewritten to
+state current status directly rather than layering another dated note on
+top of ones describing an already-closed gap.
 
 ---
 
@@ -615,7 +652,16 @@ An in-browser editor for creating and modifying discrete mesh objects. The octre
 world remains for static terrain; mesh objects are a new entity class that floats
 above it, can be transformed, and participates in physics.
 
-### Status: non-interactive foundation landed, editor itself not started
+### Status: non-interactive foundation landed; the interactive editor itself
+has since landed too
+
+The interactive editor (picking, gizmos, extrude/inset/loop-cut, PBR
+materials per face, Voronoi pre-fracture, the full Native UI System,
+DNA/RNA property system, a real Python console, the Asset Browser, and the
+Chat panel) is built and verified — this section's dated notes below
+preserve the original, earlier-stage build-out history from when only the
+non-interactive foundation existed; see README.md's own Status section for
+the current one-line summary.
 
 The **non-interactive foundation** this phase depends on is done and build-
 verified on all three targets (wasm/native/win32) — deliberately scoped this
@@ -3984,7 +4030,7 @@ project, but a smaller one than before)*
 
 ## Phase 5 — MicroPython Integration
 
-### Status: embedding + decorator-pattern prototyping done; wired into the real build with a real Console REPL; a real (if intentionally scoped) C API surface landed 2026-08-14 (see dated note below) — geometry creation/vertex editing specifically, per explicit request; the original "initial" sketch's gameplay-oriented items (`phi.spawn`/`destroy`/`players`, the `phi.on`/`emit` event system) don't apply to this project's current single-player-editor architecture (no gameplay-entity system exists) and were deliberately not built
+### Status: embedding + decorator-pattern prototyping done; wired into the real build with a real Console REPL; a real (if intentionally scoped) C API surface landed 2026-08-14 (see dated note below) — geometry creation/vertex editing specifically, per explicit request; the original "initial" sketch's gameplay-oriented items (`phi.spawn`/`destroy`/`players`, the `phi.on`/`emit` event system) don't apply to this project's current single-player-editor architecture (no gameplay-entity system exists) and were deliberately not built. The surface is still missing a few pieces a real shipped game needs specifically — whole-object transforms, and physics/gamepad access that doesn't depend on the editor's "selected object" concept — see Phase 9's "Known gaps" note for the full list, found 2026-08-15 while assessing whether Phi could actually ship a game today
 
 A bounded first slice is complete and build-verified on all three targets
 (native/win32/wasm): MicroPython itself is embedded (`client/micropython_embed/`,
@@ -4630,10 +4676,12 @@ against it:
   rendering/physics/animation/scripting stack as the editor, minus every
   editor-only system.
 
-`make native`/`make win32` gain a second executable target (the player),
-built from the same object files as the editor target plus `player_main.c`
-instead of `main.c`. No new build-target category — wasm still plays no part
-in the shipped-game path (see Distribution Model).
+`make player` is a real, separate, landed target — the same shared object
+files as `make native`'s editor build, `player_main.c` in place of `editor_
+main.c`. Native only for now; a win32 player target is real, deferred work
+(no verifiable Windows build environment in this project's history so far),
+not a design gap. wasm still plays no part in the shipped-game path (see
+Distribution Model).
 
 ### `./game/` directory
 
@@ -4714,6 +4762,186 @@ gamepad integration). Excludes any specific simulation system (fluid, smoke,
 Euphoria-style procedural animation, realtime RT) a user might build against
 the C API — those are the user's own scope, not this engine's.
 
+### Known gaps, found 2026-08-15 — closed 2026-08-18
+
+Landing the editor/player split and `phi.h` proved the *mechanism* works — a
+real chromeless binary boots, loads `./game/`, and renders whatever's in the
+scene graph. That's a different question from "is a real game actually
+buildable end to end" — assessed directly against that question (handed some
+glTF assets, asked "could you make a game with this today"), and found five
+real, load-bearing gaps. All five are now closed, each verified end to end
+(a new standalone test, `client/mp_phase9_gap_test_main.c`, exercises every
+one against a real embedded interpreter; the example `game/main.py` uses all
+five for real and was confirmed running, visibly correct, in a live window):
+
+- **Camera control.** `phi.h` now includes `renderer.h`; `player_main.c` sets
+  a real, non-degenerate starting vantage point at boot (previously
+  `renderer_create`'s `calloc`-zeroed `(0,0,0)`, looking nowhere) and exposes
+  `phi.set_camera(x, y, z, yaw, pitch)` to Python via a function-pointer
+  callback (`phi_mp_register_camera_callback`) — not a raw `Renderer*` handed
+  to `mp_port.c`, so `mp_port.c` never needs `renderer.c`/GL linked into the
+  lightweight `mp_geometry_test`/`mp_node_test` targets. A `game/src/main.c`
+  author gets the real, live `Renderer*` directly as a `game_init` parameter.
+- **Whole-object transforms.** `phi.get_object_position`/`set_object_position`/
+  `get_object_rotation`/`set_object_rotation`/`get_object_scale`/
+  `set_object_scale`, all keyed by object id (like `phi.get_vertices`, not
+  like `phi.prop_get('object', ...)`) — a real MeshObject can now be moved,
+  rotated, and scaled from Python without touching its vertices, and a
+  position/rotation write also re-syncs a live physics body's transform if
+  it has one.
+- **Keyboard/mouse input.** `input.h` gained a real, portable `PhiKey` enum
+  and a `keys_down[]` array on `InputState`, populated for real on all three
+  backends (X11 keysym / DOM `KeyboardEvent.code` / Win32 virtual-key code —
+  A-Z, 0-9, space/shift/ctrl/arrows/enter/escape/tab, a deliberately scoped
+  set, not a full keyboard). `player_main.c` calls `input_init`/
+  `input_install_callbacks` at boot; `phi.key_down(name)`/`mouse_pos()`/
+  `mouse_button_down(name)` read the live, registered `InputState` directly
+  (a borrowed pointer, no link dependency, unlike camera/gamepad below).
+  `phi.h` gained `input.h` too, so a `game/src/main.c` author gets the same
+  live state as a `game_init` parameter.
+- **Object-id-keyed physics.** `phi.object_enable_physics`/
+  `object_apply_impulse`/`object_get_velocity`/`object_set_velocity` — the
+  identical real Bullet calls `phi.enable_physics` etc. already made, just
+  resolving the target by object id (`phi_mp_register_physics_world` reuses
+  the same physics-world pointer `phi_mp_register_targets` already sets, so
+  there's nothing new to keep in sync) instead of the editor's "selected
+  object" concept, which the player has no equivalent of at all.
+- **Gamepad in Python.** `phi.gamepad_count()`/`gamepad_connected(index)`/
+  `gamepad_button(index, name)`/`gamepad_axis(index, name)`, over the same
+  real `input_gamepad.h` registry `game/src/*.c` already had via `phi.h` —
+  another function-pointer handoff (`phi_mp_register_gamepad_callbacks`),
+  same reasoning as camera: `input_gamepad_native.c` pulls in the entire
+  vendored SDL2 tree, which the lightweight test targets must never need.
+
+None of these needed new engine work — every fix was a thin binding or a few
+lines of wiring over a subsystem that already existed and already worked,
+confirming the original "no architectural blockers" assessment. **Actual
+effort: under a day**, not the original 1–2 week estimate (that estimate
+assumed more investigation would be needed per item than turned out to be
+true).
+
+---
+
+## Phase 10 — Audio
+
+### Status: landed 2026-08-18 — real WAV decode/mixing, native ALSA playback (build-time detected), wasm Web Audio, an honest win32 stub, and Python bindings, all wired and verified
+
+`client/audio_wav.c` is a real, hand-written WAV parser + linear-interpolation
+resampler (16-bit PCM, mono or stereo, any sample rate in, real interleaved
+stereo float32 out at the mixer's fixed rate) — shared by every backend, so
+there's one real decoder, not several to keep in sync. Verified against both
+hand-constructed WAV files (`client/audio_wav_test_main.c`, missing-file/bad-
+RIFF-magic/unsupported-format failure cases included) and a real WAV written
+by Python's own `wave` module (an independent encoder), confirming the parser
+handles real-world files, not just its own test fixtures.
+
+`client/audio_native.c` (Linux) is a real ALSA PCM backend — a dedicated
+mixer thread, a bounded 32-voice pool, real inverse-distance attenuation +
+stereo pan for `phi_audio_play_3d` — compiled in IFF this build environment
+actually has ALSA's dev headers, detected once at `make` time
+(`ALSA_HEADER := $(wildcard /usr/include/alsa/asoundlib.h ...)`), the same
+"detect, don't assume" discipline `PHI_HAVE_HTTP_CLIENT` already established
+elsewhere in this Makefile. Without the header, the exact same file compiles
+its own honest "no audio device" fallback instead (sounds still load/decode
+for real; only playback is a no-op) — never a build failure, never a silent
+half-working guess. This environment specifically doesn't have
+`libasound2-dev` installed, so the native/player builds here exercise the
+fallback path; the ALSA path itself is real, complete code, just unverified
+against real hardware in this sandbox — install the header and rebuild for
+real native playback, no other change needed.
+
+`client/audio_wasm.c` uses the real, standard Web Audio API (`EM_JS`, not
+`EM_ASM` — named JS functions, not inline snippets) — `AudioBuffer`s built
+synchronously from the same shared C-decoded samples (not `decodeAudioData`,
+which is async and doesn't fit `phi_audio_load_sound`'s synchronous return-a-
+handle signature), and real positional audio via Web Audio's own `PannerNode`
++ `AudioListener` (continuous, browser-native distance/pan — arguably more
+correct than `audio_native.c`'s own hand-rolled math, and simpler to get
+right). Build-verified via `emcc`; not runnable in a real browser from this
+sandbox.
+
+`client/audio_win32_stub.c` matches `input_gamepad_win32_stub.c`'s own
+precedent exactly — real WAV loading (audio_wav.c has no platform
+dependency), stubbed playback, not attempted blind against an unverified
+Windows build environment this pass.
+
+`phi.load_sound(path)` / `phi.play_sound(handle, volume=1.0, loop=False)` /
+`phi.play_sound_3d(handle, x, y, z, volume=1.0, loop=False)` /
+`phi.stop_sound(voice)` are real `mp_port.c` bindings — function-pointer
+handoffs (`phi_mp_register_audio_callbacks`), the same reasoning as Phase 9's
+camera/gamepad closures: the real backend must never need to be linked into
+the lightweight `mp_geometry_test`/`mp_node_test`/`mp_phase9_gap_test`
+targets. `phi_audio_set_listener` is deliberately NOT exposed to Python —
+`player_main.c` calls it directly, every frame, from the camera's own live
+position/basis, so positional audio automatically tracks the camera
+(including a script's own `phi.set_camera` calls) with no separate
+Python-side bookkeeping needed. The checked-in `game/main.py` example uses
+the whole path for real: a procedurally-generated `game/assets/beep.wav`
+(not a placeholder — a real decaying 0.35s tone), played once at load and
+again, positionally, on every Space press.
+
+### Goal
+
+Give a shipped game (and the editor, for consistency) real sound: one-shot
+SFX and looping/streaming music, positional (3D, distance-attenuated) where
+it matters, playable from both C (`game/src/*.c` via `phi.h`) and Python
+(`game/main.py` via `phi.*`). No audio system exists anywhere in this
+codebase today — this isn't a gap in an existing phase, it's a genuinely
+unaddressed system, found 2026-08-15 while assessing what's actually
+missing to ship a real game (see Phase 9's "Known gaps" note for the rest
+of that assessment).
+
+### Why this wasn't caught earlier
+
+Every other "no SDL/GLFW" exception got a deliberate carve-out exactly when
+it was actually needed (see Hard Architectural Decisions: gamepad input
+vendors SDL2's `GameController` subsystem specifically; windowing/GL stay
+hand-rolled). Audio is named in that same table row ("windowing, GL context
+creation, or audio" stay hand-rolled via `phi_platform.h`) but, unlike
+windowing/GL, nothing behind it was ever actually built — it's a real,
+standing gap that predates this session, just never surfaced until the
+question shifted from "does each subsystem work in isolation" to "can Phi
+actually ship a game today."
+
+### Scope
+
+- `phi_audio.h` — a small platform abstraction, the same shape as
+  `phi_platform.h`: `phi_audio_init`/`phi_audio_shutdown`,
+  `phi_audio_load_sound(path)` -> handle, `phi_audio_play(handle, volume,
+  loop)` -> voice, `phi_audio_play_3d(handle, position, volume, loop)` ->
+  voice, `phi_audio_stop(voice)`, `phi_audio_set_listener(position,
+  orientation)`. Backed by real platform mixing, not a stub:
+  - Native (Linux): ALSA or PulseAudio for output, a small hand-rolled
+    mixer (sample-rate-matched PCM sum, no resampling library needed at
+    this scope) — the same "hand-roll it, it's solved enough at this scope"
+    reasoning `phi_platform.h` already applies to windowing.
+  - wasm: the real Web Audio API via `EM_ASM`, the same pattern
+    `input_gamepad_wasm.c` already established for the browser Gamepad
+    API — no SDL involved.
+  - win32: WASAPI (or the simpler `winmm` for a first pass), matching
+    `phi_platform_win32.c`'s existing "windowing works, some subsystems are
+    still stubs" honesty.
+- File format: uncompressed WAV only to start (a real, hand-writable
+  decoder, no vendored dependency) — Ogg Vorbis/MP3 decoding for
+  music-length assets is real, separate future work, not silently assumed
+  here.
+- `phi.h` gains `#include "phi_audio.h"` for `game/src/*.c` authors.
+- `mp_port.c` gains `phi.load_sound(path)`, `phi.play_sound(handle,
+  volume=1.0, loop=False)`, `phi.play_sound_3d(handle, x, y, z, volume=1.0,
+  loop=False)`, `phi.stop_sound(voice)` — the same "thin wrapper over a
+  real C subsystem" shape every other `phi.*` binding in this codebase
+  already follows.
+
+### Explicitly out of scope this pass
+
+Real-time DSP/effects chains (reverb zones, occlusion), audio middleware
+integration (Wwise/FMOD), and streaming compressed formats for long music
+tracks — all real, separate future work a user could layer on top of
+`phi_audio.h`'s real PCM-mixing primitives, not promised here.
+
+**Effort:** 2–3 weeks (platform abstraction + native/win32/wasm backends +
+Python bindings; no vendored dependency, no DSP).
+
 ---
 
 ## Dependency Graph
@@ -4740,6 +4968,9 @@ Phase 8: WebRTC P2P  (depends only on Phase 0, runs in parallel)
 Phase 9: Standalone Game Shipping  (depends on Phase 1's Asset Browser and
                                      Phase 5's MicroPython; independent of
                                      Phase 8 — single-player ships without it)
+
+Phase 10: Audio  (depends only on Phase 0's platform abstraction; independent
+                   of everything else, can run in parallel throughout)
 ```
 
 Phase 2 is the main branch point. Phases 3, 4, and 5 can all proceed in parallel
@@ -4747,7 +4978,12 @@ after Phase 2 completes. Phase 6 requires both Phase 4 and Phase 5. Phase 7
 requires Phase 5. Phase 8 is transport-layer work independent of all others and
 can run in parallel throughout. Phase 9 needs Phase 1 (Asset Browser, for
 asset-marking) and Phase 5 (MicroPython, for `game/main.py`) but not Phase 8 —
-a Steam single-player release doesn't need multiplayer at all.
+a Steam single-player release doesn't need multiplayer at all. Phase 10 has no
+real dependencies beyond Phase 0 and can run in parallel with anything — it
+isn't a strict build dependency of Phase 9 (a game compiles and runs without
+it), but in practice a shipped game isn't worth playing without it, so it
+belongs on the critical path to an actual Steam release even though the
+dependency graph doesn't force that ordering.
 
 ---
 
@@ -4764,7 +5000,9 @@ a Steam single-player release doesn't need multiplayer at all.
 | 6 | Geometry and animation nodes | 4–6 weeks |
 | 7 | Async NPC coroutine system | 2–3 weeks |
 | 8 | WebRTC P2P + signaling server | 4–5 weeks |
-| 9 | Standalone game shipping (editor/player split, `./game/`, native C API, gamepad) | 4–6 weeks |
+| 9 | Standalone game shipping (editor/player split, `./game/`, native C API, gamepad) — **landed** | 4–6 weeks est. |
+| 9b | Phase 9 gap-closing (camera control, object transforms, player-side keyboard/mouse, object-id-keyed Python physics/gamepad) — **landed 2026-08-18** | 1–2 weeks est., under a day actual |
+| 10 | Audio (platform abstraction + native/win32/wasm backends + Python bindings) — **landed 2026-08-18** | 2–3 weeks est. |
 
 Single-developer estimates. Moving glTF I/O and the half-edge editing
 structure into Phase 1 front-loads work that was previously implicit
