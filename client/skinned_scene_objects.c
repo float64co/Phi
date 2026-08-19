@@ -5,6 +5,7 @@
 #include <GLES3/gl3.h>
 #else
 #include <GL/gl.h>
+#include "gl_native.h"
 #endif
 
 typedef struct {

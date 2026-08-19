@@ -9,7 +9,7 @@
  * platform-specific dependency at all) -- only actual playback is
  * stubbed, so game code that checks phi_audio_load_sound's return value
  * still exercises its own real asset-pipeline error handling on this
- * target, it just never hears anything. Every phi_audio_play*/stop call
+ * target, it just never hears anything. Every phi_audio_play/stop call
  * still does something real (bounds-appropriate, non-crashing), it just
  * never has a device to report -- same "real, valid, non-crashing
  * answer, not a build failure or silent wrong answer" contract input_

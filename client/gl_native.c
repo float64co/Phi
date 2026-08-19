@@ -20,6 +20,7 @@
     X(PFNGLDELETESHADERPROC,             glDeleteShader) \
     X(PFNGLDELETEPROGRAMPROC,            glDeleteProgram) \
     X(PFNGLGENBUFFERSPROC,               glGenBuffers) \
+    X(PFNGLDELETEBUFFERSPROC,            glDeleteBuffers) \
     X(PFNGLBINDBUFFERPROC,               glBindBuffer) \
     X(PFNGLBUFFERDATAPROC,               glBufferData) \
     X(PFNGLGETUNIFORMLOCATIONPROC,       glGetUniformLocation) \

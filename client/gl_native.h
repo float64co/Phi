@@ -30,6 +30,7 @@
     X(PFNGLDELETESHADERPROC,             glDeleteShader) \
     X(PFNGLDELETEPROGRAMPROC,            glDeleteProgram) \
     X(PFNGLGENBUFFERSPROC,               glGenBuffers) \
+    X(PFNGLDELETEBUFFERSPROC,            glDeleteBuffers) \
     X(PFNGLBINDBUFFERPROC,               glBindBuffer) \
     X(PFNGLBUFFERDATAPROC,               glBufferData) \
     X(PFNGLGETUNIFORMLOCATIONPROC,       glGetUniformLocation) \
@@ -76,6 +77,7 @@ GL_NATIVE_PROC_LIST
 #define glDeleteShader                glDeleteShader_native
 #define glDeleteProgram               glDeleteProgram_native
 #define glGenBuffers                  glGenBuffers_native
+#define glDeleteBuffers                glDeleteBuffers_native
 #define glBindBuffer                  glBindBuffer_native
 #define glBufferData                  glBufferData_native
 #define glGetUniformLocation          glGetUniformLocation_native
