@@ -20,6 +20,7 @@
 #include "fracture_body.h"
 #include "scene_objects.h"
 #include "skinned_scene_objects.h"
+#include "frame_pacer.h"
 #include "node_graph.h"
 #include "render_hooks.h"
 #include "input_gamepad.h"
@@ -345,7 +346,7 @@ static void scene_content_cb(void *userdata) {
 
     /* Every live skinned scene object (skinned_scene_objects.h) -- the
      * registry-based twin of the MeshObject loop above, added 2026-08-19
-     * so game/src/*.c code (or any future editor feature) that spawns a
+     * so game/src/ *.c code (or any future editor feature) that spawns a
      * real animated character gets it drawn automatically, the same way
      * a MeshObject already does, rather than needing its own one-off
      * hardcoded slot the way g_skinned_test_obj above still is. Object-id
@@ -778,6 +779,13 @@ static void try_pick_object(float scene_x, float scene_y, float scene_w, float s
 /* ---- Main loop ---- */
 static void main_loop(void *userdata) {
     (void)userdata;
+    /* CPU-load capping (frame_pacer.h) -- brackets this frame's real work
+     * (physics/animation/render, ending right after phi_platform_swap()
+     * below), NOT the same thing as the dt clamp two lines down: that
+     * clamp bounds physics/animation STEP SIZE after a slow frame, this
+     * bounds actual CPU BUSY TIME every frame, always -- see frame_
+     * pacer.h's own top comment for why this codebase had neither before. */
+    frame_pacer_begin();
     double now = phi_platform_now();
     float dt = (float)(now - g_last_t);
     g_last_t = now;
@@ -1611,6 +1619,7 @@ static void main_loop(void *userdata) {
     }
 
     phi_platform_swap();
+    frame_pacer_end();
 }
 
 /* Answers PKT_SCENE_STATE_REQUEST (see net.h's own comment on why this

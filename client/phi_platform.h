@@ -41,6 +41,13 @@ void phi_platform_get_window_size(int *w, int *h);
 /* Seconds, monotonic, arbitrary epoch — only deltas are meaningful. */
 double phi_platform_now(void);
 
+/* Blocks the calling thread for `seconds` (fractional, e.g. 0.004 = 4ms).
+ * Native only (wasm has no implementation -- see frame_pacer.h's own
+ * comment on why: blocking the browser's main thread would freeze the
+ * tab, so wasm's own CPU-load-capping path uses emscripten_set_main_
+ * loop_timing instead, never this function). A no-op if seconds <= 0. */
+void phi_platform_sleep(double seconds);
+
 /* Native: true once the window close button / WM close request fires.
  * Wasm: always false (browser tabs don't get closed by the app). */
 int phi_platform_should_close(void);

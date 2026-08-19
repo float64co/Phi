@@ -262,6 +262,7 @@ endif
 ENGINE_CORE_SRCS := \
 	$(SRCDIR)/octree_render.c \
 	$(SRCDIR)/renderer.c      \
+	$(SRCDIR)/frame_pacer.c   \
 	$(SRCDIR)/net.c           \
 	$(SRCDIR)/input.c         \
 	$(SRCDIR)/console.c       \

@@ -41,6 +41,7 @@
 #include "scene_objects.h"
 #include "skinned_scene_objects.h"
 #include "light.h"
+#include "frame_pacer.h"
 #include "meshobject.h"
 #include "halfedge_gltf.h"
 #include "skinned_mesh.h"
@@ -246,6 +247,11 @@ static void player_render(void) {
 
 static void player_loop(void *userdata) {
     (void)userdata;
+    /* CPU-load capping (frame_pacer.h) -- see editor_main.c's own main_
+     * loop comment for why this is NOT the same thing as the dt clamp two
+     * lines down. Brackets this frame's real work through player_render()
+     * at the very end of this function. */
+    frame_pacer_begin();
     double now = phi_platform_now();
     float dt = (float)(now - g_last_t);
     g_last_t = now;
@@ -323,6 +329,7 @@ static void player_loop(void *userdata) {
     g_inp.mouse_dx = g_inp.mouse_dy = 0;
 
     player_render();
+    frame_pacer_end();
 }
 
 int main(void) {

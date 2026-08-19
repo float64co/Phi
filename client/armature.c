@@ -1,26 +1,17 @@
 #include "armature.h"
+#include "vecmath_simd.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 
-/* Column-major 4x4 multiply, out = a*b -- identical formula to renderer.c's
- * own mat4_mul, deliberately duplicated here (not #include "renderer.h")
- * rather than shared: renderer.c pulls in real GL calls, and this module
- * needs to stay GL-free so it can be linked into a standalone no-window
- * test harness (animation_test_main.c), same "small enough to duplicate
- * per translation unit beats a shared header with an unwanted dependency"
- * precedent meshobject.c's own vec3_* helpers already established. */
-static void mat4_mul(float *out, const float *a, const float *b) {
-    float tmp[16];
-    for (int col = 0; col < 4; col++)
-    for (int row = 0; row < 4; row++) {
-        float sum = 0.0f;
-        for (int k = 0; k < 4; k++)
-            sum += a[k*4 + row] * b[col*4 + k];
-        tmp[col*4 + row] = sum;
-    }
-    memcpy(out, tmp, 16 * sizeof(float));
-}
+/* mat4_mul now comes from vecmath_simd.h (see its own top comment) --
+ * GL-free/header-only, so it's safe here despite this module needing to
+ * stay linkable into a standalone no-window test harness (animation_
+ * test_main.c). SSE2-accelerated on native x86 builds; this is the real
+ * per-frame hot path that motivated adding that acceleration in the
+ * first place -- see armature_compute_world_transforms/_skinning_
+ * matrices below, up to ARMATURE_MAX_BONES calls each, per skinned
+ * object, every frame. */
 
 /* Composes a column-major T*R*S matrix directly (equivalent to, but
  * cheaper than, three separate mat4_mul calls) -- standard OpenGL
@@ -216,7 +207,7 @@ int armature_load_from_skin(const cgltf_skin *skin, Armature *out) {
             cgltf_node_transform_world(node->parent, ancestor_world);
             float joint_local[16], composed[16];
             mat4_from_trs(b->rest_translation, b->rest_rotation, b->rest_scale, joint_local);
-            mat4_mul(composed, ancestor_world, joint_local);
+            phi_mat4_mul(composed, ancestor_world, joint_local);
             mat4_decompose_trs(composed, &b->rest_translation, &b->rest_rotation, &b->rest_scale);
         }
 
@@ -262,12 +253,12 @@ void armature_compute_world_transforms(const Armature *arm,
              * armature_load_from_skin's topological sort), so
              * out_world[parent] is already valid here -- a single
              * forward pass, no recursion needed. */
-            mat4_mul(out_world[i], out_world[parent], local);
+            phi_mat4_mul(out_world[i], out_world[parent], local);
         }
     }
 }
 
 void armature_compute_skinning_matrices(const Armature *arm, const float world[][16], float out_skin[][16]) {
     for (int i = 0; i < arm->bone_count; i++)
-        mat4_mul(out_skin[i], world[i], arm->bones[i].inverse_bind);
+        phi_mat4_mul(out_skin[i], world[i], arm->bones[i].inverse_bind);
 }

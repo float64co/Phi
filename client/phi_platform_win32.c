@@ -187,6 +187,21 @@ int phi_platform_should_close(void) {
     return s_should_close;
 }
 
+/* Mirrors phi_platform_native.c's own nanosleep-based implementation
+ * structurally (see phi_platform.h's own comment) -- written but
+ * UNVERIFIED, same honest flag this codebase's other win32-only code
+ * already carries (e.g. the win32 pointer-capture path), since there's
+ * no Windows machine available to actually run this on. Sleep()'s
+ * granularity is coarser than nanosleep's (typically ~1-15ms depending
+ * on the system timer resolution, vs. nanosecond-requested on Linux) --
+ * a real, honest platform difference, not something this can paper over
+ * without a Windows machine to tune it against. */
+void phi_platform_sleep(double seconds) {
+    if (seconds <= 0.0) return;
+    DWORD ms = (DWORD)(seconds * 1000.0);
+    if (ms > 0) Sleep(ms);
+}
+
 void *phi_gl_get_proc(const char *name) {
     void *p = (void *)wglGetProcAddress(name);
     /* wglGetProcAddress doesn't resolve pre-1.2 functions (those are

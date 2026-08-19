@@ -7,6 +7,7 @@
 #include <GL/glx.h>
 #include <GL/glxext.h>
 #include <time.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -160,6 +161,18 @@ double phi_platform_now(void) {
 
 int phi_platform_should_close(void) {
     return s_should_close;
+}
+
+void phi_platform_sleep(double seconds) {
+    if (seconds <= 0.0) return;
+    struct timespec ts;
+    ts.tv_sec = (time_t)seconds;
+    ts.tv_nsec = (long)((seconds - (double)ts.tv_sec) * 1e9);
+    /* nanosleep can return early on a signal (EINTR) -- loop the
+     * remainder rather than under-sleeping, same defensive pattern any
+     * real frame-pacing sleep needs (a partial sleep here would mean the
+     * CPU-cap frame_pacer.c enforces is quietly weaker than intended). */
+    while (nanosleep(&ts, &ts) == -1 && errno == EINTR) { }
 }
 
 void *phi_gl_get_proc(const char *name) {

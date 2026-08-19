@@ -1,5 +1,7 @@
 #include "skinned_mesh_object.h"
 #include "cgltf.h"
+#include "cgltf_util.h"
+#include "vecmath_simd.h"
 #include <string.h>
 
 int skinned_mesh_object_load(const char *path, Vec3f position, SkinnedMeshObject *out) {
@@ -19,14 +21,11 @@ int skinned_mesh_object_load(const char *path, Vec3f position, SkinnedMeshObject
      * own internal one -- both produce the identical bone set/names
      * (armature_load_from_skin's topological sort is deterministic for
      * a given file). */
-    cgltf_options options;
-    memset(&options, 0, sizeof(options));
-    cgltf_data *data = NULL;
-    if (cgltf_parse_file(&options, path, &data) == cgltf_result_success &&
-        cgltf_load_buffers(&options, data, path) == cgltf_result_success) {
+    cgltf_data *data = cgltf_parse_and_load(path, NULL);
+    if (data) {
         out->clip_count = animation_load_clips(data, &out->arm, out->clips, 8);
+        cgltf_free(data);
     }
-    if (data) cgltf_free(data);
 
     out->position = position;
     out->orientation = quat_identity();
@@ -79,16 +78,10 @@ void skinned_mesh_object_free(SkinnedMeshObject *obj) {
     memset(obj, 0, sizeof(*obj));
 }
 
-/* p' = M * p (column-major 4x4), same convention/formula as halfedge_
- * gltf.c's/skinned_mesh.c's own mat4_transform_point -- duplicated here
- * rather than shared for the same reason armature.c's own mat4_mul is
- * duplicated (see its comment): this file needs to stay GL-free/no-
- * external-header for the same no-window test harness linkage. */
-static void mat4_transform_point(const float m[16], const float p[3], float out[3]) {
-    out[0] = m[0]*p[0] + m[4]*p[1] + m[8]*p[2]  + m[12];
-    out[1] = m[1]*p[0] + m[5]*p[1] + m[9]*p[2]  + m[13];
-    out[2] = m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14];
-}
+/* mat4_transform_point now comes from vecmath_simd.h as phi_mat4_
+ * transform_point (see its own top comment) -- GL-free/header-only, so
+ * it's safe here despite this file needing to stay linkable into a
+ * no-window test harness (phi_h_test). */
 
 int skinned_mesh_object_local_aabb(const SkinnedMeshObject *obj, Vec3f *out_min, Vec3f *out_max) {
     if (!obj || obj->mesh.vert_count <= 0) return 0;
@@ -108,7 +101,7 @@ int skinned_mesh_object_local_aabb(const SkinnedMeshObject *obj, Vec3f *out_min,
                     + v->bone_wgt[3] * obj->skin[v->bone_idx[3]][k];
         }
         float p[3];
-        mat4_transform_point(skin, v->pos, p);
+        phi_mat4_transform_point(skin, v->pos, p);
         if (!have_bounds) {
             mn[0] = mx[0] = p[0]; mn[1] = mx[1] = p[1]; mn[2] = mx[2] = p[2];
             have_bounds = 1;

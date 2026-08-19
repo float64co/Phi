@@ -1,5 +1,6 @@
 #include "gbuffer.h"
 #include "render_hooks.h"
+#include "vecmath_simd.h"
 #ifdef __EMSCRIPTEN__
 #include <GLES3/gl3.h>   /* not GLES2/gl2.h — MRT/FBO/integer-texture support (GLES2/WebGL1 had none of it) */
 #else
@@ -31,16 +32,10 @@
  * comments), so this reuses it rather than re-deriving and risking the
  * same mistake twice. ---- */
 
-static void mat4_mul(float *out, const float *a, const float *b) {
-    float tmp[16];
-    for (int col = 0; col < 4; col++)
-    for (int row = 0; row < 4; row++) {
-        float s = 0;
-        for (int k = 0; k < 4; k++) s += a[k*4+row] * b[col*4+k];
-        tmp[col*4+row] = s;
-    }
-    memcpy(out, tmp, sizeof(tmp));
-}
+/* mat4_mul itself now comes from vecmath_simd.h (phi_mat4_mul, GL-free/
+ * header-only, SSE2-accelerated on native x86) -- only one call site here
+ * (light_vp below), negligible per-frame call volume, migrated for real
+ * de-duplication rather than any expected speedup. */
 
 static void mat4_ortho(float *m, float left, float right, float bottom, float top,
                         float near_, float far_) {
@@ -764,7 +759,7 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
     float light_view[16], light_proj[16];
     mat4_look_at(light_view, ex, ey, ez, scene_cx, scene_cy, scene_cz);
     mat4_ortho(light_proj, -350.0f, 350.0f, -350.0f, 350.0f, 10.0f, 1200.0f);
-    mat4_mul(gb->light_vp, light_proj, light_view);
+    phi_mat4_mul(gb->light_vp, light_proj, light_view);
 
     glBindFramebuffer(GL_FRAMEBUFFER, gb->shadow_fbo);
     glViewport(0, 0, gb->shadow_size, gb->shadow_size);

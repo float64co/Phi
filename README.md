@@ -75,6 +75,13 @@ Mesh format: glTF 2.0 (.glb/.gltf) — no bespoke format
   first and is reconciled by an authoritative server, the same pattern this
   codebase's predecessor project (`qek`, a multiplayer octree-editor arena
   shooter) established.
+- **Real CPU-load capping, on all three platforms.** The engine measures
+  its own per-frame work and keeps CPU busy time at or below 70% (native:
+  a real sleep between frames; wasm: throttling the browser's own callback
+  cadence, since a browser tab's main thread can't be blocked outright) —
+  one shared implementation reused by the editor and the standalone player
+  alike, not three platform-specific ones. Idea credited to Ty Clifford
+  <ty@tyclifford.com>.
 
 ## Status
 
@@ -178,4 +185,4 @@ Start there for anything beyond a quick look.
 
 ---
 
-Float64 LLC
+Float64

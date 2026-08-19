@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "octree_render.h"
 #include "meshobject.h"
+#include "vecmath_simd.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -485,16 +486,19 @@ void mat4_identity(float *m) {
     m[0] = m[5] = m[10] = m[15] = 1.0f;
 }
 
+/* Real, exported public API (see renderer.h's own "Math helpers exposed
+ * for main.c" section) -- can't just become a same-named static inline
+ * from vecmath_simd.h (that would conflict with this file's own
+ * external-linkage definition), so this stays a real function whose body
+ * delegates to the shared, SSE2-accelerated implementation instead --
+ * same public symbol, same behavior, real speedup. See vecmath_simd.h's
+ * own top comment for why the shared function is named phi_mat4_mul, not
+ * mat4_mul, and this codebase's own mat4_inverse comment for the
+ * "verified numerically before use" bar phi_mat4_mul was held to before
+ * any caller (including every call site in this file, all unchanged --
+ * they still just call mat4_mul) was migrated to it. */
 void mat4_mul(float *out, const float *a, const float *b) {
-    float tmp[16];
-    for (int col = 0; col < 4; col++)
-    for (int row = 0; row < 4; row++) {
-        float s = 0;
-        for (int k = 0; k < 4; k++)
-            s += a[k*4 + row] * b[col*4 + k];
-        tmp[col*4 + row] = s;
-    }
-    memcpy(out, tmp, 16 * sizeof(float));
+    phi_mat4_mul(out, a, b);
 }
 
 void mat4_perspective(float *m, float fovy, float aspect, float znear, float zfar) {
@@ -580,57 +584,49 @@ static unsigned int compile_shader(GLenum type, const char *src) {
     return s;
 }
 
-static unsigned int link_program(const char *vsrc, const char *fsrc) {
+/* Shared compile+attach+bind-attribs+link+error-check+delete-shader
+ * sequence -- link_program/link_pbr_program/link_skinned_program below
+ * used to each repeat this verbatim, differing only in which attribute
+ * names bind to which locations (location == that name's index in
+ * attrib_names) and the label used in diagnostics. error_label appears
+ * in both the link-failure printf and the gl_check tag, matching each
+ * caller's own previous distinct wording. */
+static unsigned int link_program_with_attribs(const char *vsrc, const char *fsrc,
+                                               const char *const *attrib_names, int attrib_count,
+                                               const char *error_label) {
     unsigned int vs = compile_shader(GL_VERTEX_SHADER,   vsrc);
     unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fsrc);
     unsigned int p  = glCreateProgram();
     glAttachShader(p, vs);
     glAttachShader(p, fs);
     /* Bind locations before linking */
-    glBindAttribLocation(p, 0, "a_pos");
-    glBindAttribLocation(p, 1, "a_normal");
-    glBindAttribLocation(p, 2, "a_mat_id");
+    for (int i = 0; i < attrib_count; i++)
+        glBindAttribLocation(p, i, attrib_names[i]);
     glLinkProgram(p);
     int ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[512]; glGetProgramInfoLog(p, 512, NULL, log);
-        printf("[renderer] Program link error: %s\n", log);
+        printf("[renderer] %s link error: %s\n", error_label, log);
     }
     glDeleteShader(vs);
     glDeleteShader(fs);
-    gl_check("link_program");
+    gl_check(error_label);
     return p;
+}
+
+static unsigned int link_program(const char *vsrc, const char *fsrc) {
+    static const char *const attribs[] = {"a_pos", "a_normal", "a_mat_id"};
+    return link_program_with_attribs(vsrc, fsrc, attribs, 3, "link_program");
 }
 
 /* Same shape as link_program, but binds MeshObject's own PBR attribute set
  * (see PBR_VERT_SRC/PBR_FRAG_SRC's own comment) instead of a_pos/a_normal/
- * a_mat_id -- kept as a separate function rather than parameterizing
- * link_program's attribute list, since this is the only other program
- * this renderer ever links and a one-off list doesn't earn a shared
- * general mechanism. */
+ * a_mat_id. */
 static unsigned int link_pbr_program(const char *vsrc, const char *fsrc) {
-    unsigned int vs = compile_shader(GL_VERTEX_SHADER,   vsrc);
-    unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fsrc);
-    unsigned int p  = glCreateProgram();
-    glAttachShader(p, vs);
-    glAttachShader(p, fs);
-    glBindAttribLocation(p, 0, "a_pos");
-    glBindAttribLocation(p, 1, "a_normal");
-    glBindAttribLocation(p, 2, "a_base_color");
-    glBindAttribLocation(p, 3, "a_metallic");
-    glBindAttribLocation(p, 4, "a_roughness");
-    glBindAttribLocation(p, 5, "a_emission");
-    glBindAttribLocation(p, 6, "a_uv");
-    glLinkProgram(p);
-    int ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512]; glGetProgramInfoLog(p, 512, NULL, log);
-        printf("[renderer] PBR program link error: %s\n", log);
-    }
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    gl_check("link_pbr_program");
-    return p;
+    static const char *const attribs[] = {
+        "a_pos", "a_normal", "a_base_color", "a_metallic", "a_roughness", "a_emission", "a_uv"
+    };
+    return link_program_with_attribs(vsrc, fsrc, attribs, 7, "link_pbr_program");
 }
 
 /* Same shape again, for Phase 4's skinned-mesh program -- formats
@@ -640,26 +636,8 @@ static unsigned int link_pbr_program(const char *vsrc, const char *fsrc) {
 static unsigned int link_skinned_program(const char *vsrc_fmt, const char *fsrc) {
     char vsrc[4096];
     snprintf(vsrc, sizeof(vsrc), vsrc_fmt, SKINNED_SHADER_MAX_BONES);
-    unsigned int vs = compile_shader(GL_VERTEX_SHADER,   vsrc);
-    unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fsrc);
-    unsigned int p  = glCreateProgram();
-    glAttachShader(p, vs);
-    glAttachShader(p, fs);
-    glBindAttribLocation(p, 0, "a_pos");
-    glBindAttribLocation(p, 1, "a_normal");
-    glBindAttribLocation(p, 2, "a_bone_idx");
-    glBindAttribLocation(p, 3, "a_bone_wgt");
-    glBindAttribLocation(p, 4, "a_uv");
-    glLinkProgram(p);
-    int ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512]; glGetProgramInfoLog(p, 512, NULL, log);
-        printf("[renderer] Skinned program link error: %s\n", log);
-    }
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    gl_check("link_skinned_program");
-    return p;
+    static const char *const attribs[] = {"a_pos", "a_normal", "a_bone_idx", "a_bone_wgt", "a_uv"};
+    return link_program_with_attribs(vsrc, fsrc, attribs, 5, "link_skinned_program");
 }
 
 static void build_vp(const Renderer *r, float *vp);  /* defined below, needed by renderer_create/renderer_end_frame */
@@ -1075,6 +1053,43 @@ void renderer_draw_lights(Renderer *r) {
 
 static unsigned int s_wire_vbo = 0;
 
+/* Shared tail every "full-bright helper geometry" draw call in this file
+ * (wire box, solid box, grid -- all built from the same pos3+normal3,
+ * normal==light-dir-always vertex format, see each caller's own comment)
+ * used to repeat verbatim: set r->cur_object_id, build the VP matrix,
+ * bind program/VAO/uniforms, bind vbo, set attrib pointers 0/1 (stride
+ * always 6 floats -- pos3+normal3, inherent to this shared vertex
+ * format), draw, disable attribs 0/1. Only the VBO, draw mode/count, and
+ * object id genuinely differ between callers. */
+static void draw_helper_geometry(Renderer *r, unsigned int vbo, unsigned int mode, int vertex_count,
+                                  unsigned int object_id, float cr, float cg, float cb) {
+    r->cur_object_id = object_id;
+
+    float vp[16]; build_vp(r, vp);
+    glUseProgram(r->program);
+    bind_renderer_vao(r);
+    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
+    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);
+    glUniform3f(r->u_mat_color, cr, cg, cb);
+    float ld[3] = {0.577f, 0.577f, 0.577f};
+    glUniform3fv(r->u_light_dir, 1, ld);
+    glUniform1ui(r->u_object_id, r->cur_object_id);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    int stride = 6 * (int)sizeof(float);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+    glDisableVertexAttribArray(2);
+    glVertexAttrib1f(2, 0.0f);
+
+    glDrawArrays(mode, 0, vertex_count);
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+}
+
 void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
                             float cr, float cg, float cb) {
     if (!s_wire_vbo) glGenBuffers(1, &s_wire_vbo);
@@ -1105,34 +1120,12 @@ void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
     glBindBuffer(GL_ARRAY_BUFFER, s_wire_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
 
-    r->cur_object_id = 3;
-
-    float vp[16]; build_vp(r, vp);
-    glUseProgram(r->program);
-    bind_renderer_vao(r);
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
-    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);  /* world space, no model matrix — see draw_world */
-    glUniform3f(r->u_mat_color, cr, cg, cb);
-    float ld[3] = {0.577f, 0.577f, 0.577f};
-    glUniform3fv(r->u_light_dir, 1, ld);
     /* Safe on both backends now that wasm is WebGL2/GLES3, which has
      * glUniform1ui (GLES2/WebGL1 didn't — GLSL ES 1.00 has no uint type,
      * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
-     * that reason). */
-    glUniform1ui(r->u_object_id, r->cur_object_id);
-
-    int stride = 6 * (int)sizeof(float);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glDisableVertexAttribArray(2);
-    glVertexAttrib1f(2, 0.0f);
-
-    glDrawArrays(GL_LINES, 0, 24);
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
+     * that reason). object id 3 = wire-box convention, world space (no
+     * model matrix — see draw_world). */
+    draw_helper_geometry(r, s_wire_vbo, GL_LINES, 24, 3u, cr, cg, cb);
 }
 
 static unsigned int s_solid_box_vbo = 0;
@@ -1181,30 +1174,7 @@ void renderer_draw_solid_box(Renderer *r, Vec3f bmin, Vec3f bmax,
     glBindBuffer(GL_ARRAY_BUFFER, s_solid_box_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
 
-    r->cur_object_id = 3;
-
-    float vp[16]; build_vp(r, vp);
-    glUseProgram(r->program);
-    bind_renderer_vao(r);
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
-    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);
-    glUniform3f(r->u_mat_color, cr, cg, cb);
-    float ld[3] = {0.577f, 0.577f, 0.577f};
-    glUniform3fv(r->u_light_dir, 1, ld);
-    glUniform1ui(r->u_object_id, r->cur_object_id);
-
-    int stride = 6 * (int)sizeof(float);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glDisableVertexAttribArray(2);
-    glVertexAttrib1f(2, 0.0f);
-
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
+    draw_helper_geometry(r, s_solid_box_vbo, GL_TRIANGLES, 36, 3u, cr, cg, cb);
 }
 
 static unsigned int s_grid_vbo = 0;
@@ -1267,30 +1237,8 @@ void renderer_draw_grid(Renderer *r, Vec3f center, float half_extent,
         free(verts);
     }
 
-    r->cur_object_id = 0;   /* non-pickable world geometry, same convention as renderer.c's own default */
-
-    float vp[16]; build_vp(r, vp);
-    glUseProgram(r->program);
-    bind_renderer_vao(r);
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
-    glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);
-    glUniform3f(r->u_mat_color, cr, cg, cb);
-    float ld[3] = {0.577f, 0.577f, 0.577f};
-    glUniform3fv(r->u_light_dir, 1, ld);
-    glUniform1ui(r->u_object_id, r->cur_object_id);
-
-    glBindBuffer(GL_ARRAY_BUFFER, s_grid_vbo);
-    int stride = 6 * (int)sizeof(float);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glDisableVertexAttribArray(2);
-    glVertexAttrib1f(2, 0.0f);
-
-    glDrawArrays(GL_TRIANGLES, 0, s_grid_vert_count);
+    /* object id 0 = non-pickable world geometry, same convention as
+     * renderer.c's own default. */
+    draw_helper_geometry(r, s_grid_vbo, GL_TRIANGLES, s_grid_vert_count, 0u, cr, cg, cb);
     gl_check("draw_grid");
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
 }

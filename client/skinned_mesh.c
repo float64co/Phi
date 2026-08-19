@@ -1,5 +1,7 @@
 #include "skinned_mesh.h"
 #include "cgltf.h"
+#include "cgltf_util.h"
+#include "vecmath_simd.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -22,19 +24,18 @@ static const cgltf_accessor *find_attribute(const cgltf_primitive *prim, cgltf_a
 }
 
 /* Real GL name transform + material resolution -- deliberately a near-
- * duplicate of halfedge_gltf.c's own mat4_transform_point/resolve_
- * material/resolve_relative_path rather than a shared header: these are
- * two genuinely independent loaders (static vs. skinned), the shared
- * logic is small (well under a hundred lines total), and a real shared
- * abstraction would couple them for no functional benefit -- the same
- * "small, well-justified duplication beats a forced shared module"
- * judgment call this codebase's own gl_native.h/.c X-macro lists already
- * make for a similar-sized case. */
-static void mat4_transform_point(const cgltf_float m[16], const cgltf_float p[3], float out[3]) {
-    out[0] = m[0]*p[0] + m[4]*p[1] + m[8]*p[2]  + m[12];
-    out[1] = m[1]*p[0] + m[5]*p[1] + m[9]*p[2]  + m[13];
-    out[2] = m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14];
-}
+ * duplicate of halfedge_gltf.c's own resolve_material/resolve_relative_
+ * path rather than a shared header: these are two genuinely independent
+ * loaders (static vs. skinned), the shared logic is small (well under a
+ * hundred lines total), and a real shared abstraction would couple them
+ * for no functional benefit -- the same "small, well-justified
+ * duplication beats a forced shared module" judgment call this
+ * codebase's own gl_native.h/.c X-macro lists already make for a
+ * similar-sized case. mat4_transform_point itself, though, now comes
+ * from vecmath_simd.h as phi_mat4_transform_point (see its own top
+ * comment) -- that one specific function WAS genuinely identical,
+ * general-purpose 4x4 point-transform math with zero coupling risk,
+ * unlike resolve_material/resolve_relative_path's real per-loader logic. */
 
 static char *resolve_relative_path(const char *base_file, const char *rel_uri) {
     const char *slash = strrchr(base_file, '/');
@@ -123,7 +124,7 @@ static void append_primitive(SkinnedMesh *out_mesh, int *vert_cap, int *index_ca
         SkinnedVertex *sv = &out_mesh->verts[base_vertex + v];
         memset(sv, 0, sizeof(*sv));
         float p[3]; cgltf_accessor_read_float(pos_acc, (cgltf_size)v, p, 3);
-        if (world) mat4_transform_point(world, p, sv->pos);
+        if (world) phi_mat4_transform_point(world, p, sv->pos);
         else { sv->pos[0] = p[0]; sv->pos[1] = p[1]; sv->pos[2] = p[2]; }
         cgltf_accessor_read_float(norm_acc, (cgltf_size)v, sv->normal, 3);
         if (uv_acc) cgltf_accessor_read_float(uv_acc, (cgltf_size)v, sv->uv, 2);
@@ -213,18 +214,8 @@ int skinned_mesh_load_gltf(const char *path, Armature *out_arm, SkinnedMesh *out
     if (!path || !out_arm || !out_mesh) return 0;
     memset(out_mesh, 0, sizeof(*out_mesh));
 
-    cgltf_options options;
-    memset(&options, 0, sizeof(options));
-    cgltf_data *data = NULL;
-    if (cgltf_parse_file(&options, path, &data) != cgltf_result_success) {
-        printf("[skinned_mesh] failed to parse %s\n", path);
-        return 0;
-    }
-    if (cgltf_load_buffers(&options, data, path) != cgltf_result_success) {
-        printf("[skinned_mesh] failed to load buffers for %s\n", path);
-        cgltf_free(data);
-        return 0;
-    }
+    cgltf_data *data = cgltf_parse_and_load(path, "skinned_mesh");
+    if (!data) return 0;
     if (data->skins_count == 0) {
         printf("[skinned_mesh] %s has no skin\n", path);
         cgltf_free(data);

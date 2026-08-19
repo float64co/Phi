@@ -3,6 +3,8 @@
  * function bodies (not just declarations) — this is that one. */
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
+#include "cgltf_util.h"
+#include "vecmath_simd.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,18 +34,16 @@ void halfedge_gltf_register_texture_loader(unsigned int (*load_texture)(const ch
  * mesh/primitive in the file, positioned by its owning node's real world
  * transform, not just the first one found. ---- */
 
-/* p' = M * p (column-major 4x4, matching cgltf_node_transform_world's own
- * output layout, which is glTF's own matrix convention). Normals are NOT
- * transformed here -- meshobject_build_render_mesh_from_halfedge derives
- * flat per-face normals from the (already work-transformed) triangle
- * positions themselves, the same "no NORMAL attribute stored on
- * HEVertex at all" design this loader already had before this change,
- * so a separate normal-matrix transform was never needed. */
-static void mat4_transform_point(const cgltf_float m[16], const cgltf_float p[3], float out[3]) {
-    out[0] = m[0]*p[0] + m[4]*p[1] + m[8]*p[2]  + m[12];
-    out[1] = m[1]*p[0] + m[5]*p[1] + m[9]*p[2]  + m[13];
-    out[2] = m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14];
-}
+/* Point transform (p' = M*p, column-major 4x4, matching cgltf_node_
+ * transform_world's own output layout, which is glTF's own matrix
+ * convention) now comes from vecmath_simd.h as phi_mat4_transform_point
+ * -- cgltf_float IS float (see cgltf.h's own typedef), so no cast needed
+ * at call sites. Normals are NOT transformed here -- meshobject_build_
+ * render_mesh_from_halfedge derives flat per-face normals from the
+ * (already work-transformed) triangle positions themselves, the same
+ * "no NORMAL attribute stored on HEVertex at all" design this loader
+ * already had before this change, so a separate normal-matrix transform
+ * was never needed. */
 
 /* "<dir-of-base_file>/<decoded rel_uri>" -- glTF texture URIs are always
  * relative to the .gltf file's own directory, never to the process's
@@ -119,7 +119,7 @@ static void append_primitive(HalfEdgeMesh *hem, const cgltf_primitive *prim,
     int pos_count = (int)pos_acc->count;
     for (int v = 0; v < pos_count; v++) {
         float p[3]; cgltf_accessor_read_float(pos_acc, (cgltf_size)v, p, 3);
-        float wp[3]; mat4_transform_point(world, p, wp);
+        float wp[3]; phi_mat4_transform_point(world, p, wp);
         int idx = halfedge_add_vertex(hem, wp[0], wp[1], wp[2]);
         if (uv_acc) {
             float uv[2]; cgltf_accessor_read_float(uv_acc, (cgltf_size)v, uv, 2);
@@ -164,19 +164,8 @@ static void walk_node(HalfEdgeMesh *hem, const cgltf_node *node, const char *glt
 }
 
 HalfEdgeMesh *halfedge_load_gltf(const char *path) {
-    cgltf_options options;
-    memset(&options, 0, sizeof(options));
-    cgltf_data *data = NULL;
-
-    if (cgltf_parse_file(&options, path, &data) != cgltf_result_success) {
-        printf("[halfedge_gltf] failed to parse %s\n", path);
-        return NULL;
-    }
-    if (cgltf_load_buffers(&options, data, path) != cgltf_result_success) {
-        printf("[halfedge_gltf] failed to load buffers for %s\n", path);
-        cgltf_free(data);
-        return NULL;
-    }
+    cgltf_data *data = cgltf_parse_and_load(path, "halfedge_gltf");
+    if (!data) return NULL;
 
     /* The default scene if the file declares one; falling back to scene
      * 0 (most real files have exactly one scene either way), and finally
@@ -205,6 +194,25 @@ HalfEdgeMesh *halfedge_load_gltf(const char *path) {
     printf("[halfedge_gltf] loaded %s: %d vertices, %d faces\n", path, hem->vert_count, hem->face_count);
     cgltf_free(data);
     return hem;
+}
+
+/* Real position-only AABB scan, shared by halfedge_save_gltf and halfedge_
+ * save_glb_buffer below -- both need it (glTF's own accessor min/max are
+ * required fields for a POSITION accessor per spec), previously computed
+ * as two separately-written identical loops. positions is a flat xyz
+ * array of pos_count vertices (pos_count must be >= 1 -- both callers
+ * already guarantee this before calling). */
+static void compute_pos_bounds(const float *positions, int pos_count, float pmin[3], float pmax[3]) {
+    pmin[0] = pmax[0] = positions[0];
+    pmin[1] = pmax[1] = positions[1];
+    pmin[2] = pmax[2] = positions[2];
+    for (int i = 1; i < pos_count; i++) {
+        for (int a = 0; a < 3; a++) {
+            float v = positions[i*3+a];
+            if (v < pmin[a]) pmin[a] = v;
+            if (v > pmax[a]) pmax[a] = v;
+        }
+    }
 }
 
 /* Derives "<dir>/<base>.bin" from a "<dir>/<base>.gltf"-shaped path (or
@@ -243,16 +251,7 @@ int halfedge_save_gltf(const HalfEdgeMesh *hem, const char *gltf_path) {
     fclose(bf);
 
     float pmin[3], pmax[3];
-    pmin[0] = pmax[0] = positions[0];
-    pmin[1] = pmax[1] = positions[1];
-    pmin[2] = pmax[2] = positions[2];
-    for (int i = 1; i < pos_count; i++) {
-        for (int a = 0; a < 3; a++) {
-            float v = positions[i*3+a];
-            if (v < pmin[a]) pmin[a] = v;
-            if (v > pmax[a]) pmax[a] = v;
-        }
-    }
+    compute_pos_bounds(positions, pos_count, pmin, pmax);
 
     FILE *gf = fopen(gltf_path, "w");
     if (!gf) {
@@ -308,16 +307,7 @@ int halfedge_save_glb_buffer(const HalfEdgeMesh *hem, uint8_t **out_data, int *o
     size_t bin_bytes = pos_bytes + idx_bytes;
 
     float pmin[3], pmax[3];
-    pmin[0] = pmax[0] = positions[0];
-    pmin[1] = pmax[1] = positions[1];
-    pmin[2] = pmax[2] = positions[2];
-    for (int i = 1; i < pos_count; i++) {
-        for (int a = 0; a < 3; a++) {
-            float v = positions[i*3+a];
-            if (v < pmin[a]) pmin[a] = v;
-            if (v > pmax[a]) pmax[a] = v;
-        }
-    }
+    compute_pos_bounds(positions, pos_count, pmin, pmax);
 
     /* Same JSON shape halfedge_save_gltf emits above, minus the buffer's
      * "uri" -- GLB's buffer 0 is implicitly the BIN chunk that follows,
