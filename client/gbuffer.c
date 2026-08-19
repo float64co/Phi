@@ -161,6 +161,9 @@ static const char *LIGHTING_FRAG_SRC =
     "uniform vec3 u_light_dir;\n"
     "uniform vec3 u_sky_color;\n"
     "uniform vec3 u_cam_pos;\n"
+    "uniform int u_point_light_count;\n"
+    "uniform vec3 u_point_light_pos[%d];\n"
+    "uniform vec3 u_point_light_color[%d];\n"
     "out vec4 out_hdr;\n"
     "void main() {\n"
     /* Untouched/background pixels read back the far-plane depth this
@@ -206,6 +209,25 @@ static const char *LIGHTING_FRAG_SRC =
     "  vec3 specular = f0 * pow(ndoth, shininess) * (1.0 - roughness * 0.9) * shadow;\n"
     "  vec3 diffuse_albedo = albedo * (1.0 - metallic);\n"
     "  vec3 lit = diffuse_albedo * (ambient + diff * 0.7 * shadow) + specular + emissive;\n"
+    /* Real point lights (see gbuffer_set_point_lights) -- same Blinn-Phong
+     * terms as the directional sun above, just per-light and with a real
+     * inverse-square-ish falloff (the +1.0 keeps it finite right at the
+     * light's own position instead of dividing by ~0). No shadow test for
+     * these (this pass's one shadow map is fixed to the sun's own light
+     * space, see gbuffer_render_shadow_map) -- a real, honest scope limit,
+     * not a bug: a point light standing between two characters is still
+     * genuinely useful without also casting shadows from itself. */
+    "  for (int i = 0; i < u_point_light_count; i++) {\n"
+    "    vec3 to_light = u_point_light_pos[i] - world.xyz;\n"
+    "    float dist2 = dot(to_light, to_light);\n"
+    "    vec3 ldir = to_light * inversesqrt(max(dist2, 1e-6));\n"
+    "    float pdiff = max(dot(n, ldir), 0.0);\n"
+    "    vec3 phalf = normalize(ldir + view_dir);\n"
+    "    float pndoth = max(dot(n, phalf), 0.0);\n"
+    "    vec3 pspecular = f0 * pow(pndoth, shininess) * (1.0 - roughness * 0.9);\n"
+    "    float atten = 1.0 / (1.0 + dist2 * 0.05);\n"
+    "    lit += (diffuse_albedo * pdiff + pspecular) * u_point_light_color[i] * atten;\n"
+    "  }\n"
     "  out_hdr = vec4(lit, 1.0);\n"
     "}\n";
 
@@ -558,7 +580,15 @@ GBuffer *gbuffer_create(int w, int h) {
     glBindBuffer(GL_ARRAY_BUFFER, gb->quad_vbo);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
 
-    gb->lighting_program = link(QUAD_VERT_SRC, LIGHTING_FRAG_SRC);
+    {
+        /* LIGHTING_FRAG_SRC's own u_point_light_pos/color array sizes are
+         * templated (%d), not hardcoded twice, so they can never drift out
+         * of sync with GBUF_MAX_POINT_LIGHTS -- same reasoning renderer.c's
+         * link_skinned_program has for SKINNED_SHADER_MAX_BONES. */
+        char fsrc[4096];
+        snprintf(fsrc, sizeof(fsrc), LIGHTING_FRAG_SRC, GBUF_MAX_POINT_LIGHTS, GBUF_MAX_POINT_LIGHTS);
+        gb->lighting_program = link(QUAD_VERT_SRC, fsrc);
+    }
     gb->light_u_albedo        = glGetUniformLocation(gb->lighting_program, "u_albedo");
     gb->light_u_normal        = glGetUniformLocation(gb->lighting_program, "u_normal");
     gb->light_u_depth         = glGetUniformLocation(gb->lighting_program, "u_depth");
@@ -570,6 +600,10 @@ GBuffer *gbuffer_create(int w, int h) {
     gb->light_u_material      = glGetUniformLocation(gb->lighting_program, "u_material");
     gb->light_u_emissive      = glGetUniformLocation(gb->lighting_program, "u_emissive");
     gb->light_u_cam_pos       = glGetUniformLocation(gb->lighting_program, "u_cam_pos");
+    gb->light_u_point_light_count = glGetUniformLocation(gb->lighting_program, "u_point_light_count");
+    gb->light_u_point_light_pos   = glGetUniformLocation(gb->lighting_program, "u_point_light_pos");
+    gb->light_u_point_light_color = glGetUniformLocation(gb->lighting_program, "u_point_light_color");
+    gb->point_light_count = 0;
 
     gb->tonemap_program = link(QUAD_VERT_SRC, TONEMAP_FRAG_SRC);
     gb->tonemap_u_hdr = glGetUniformLocation(gb->tonemap_program, "u_hdr");
@@ -782,6 +816,16 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
 }
 
+void gbuffer_set_point_lights(GBuffer *gb, const Vec3f *positions, const Vec3f *colors, int count) {
+    if (count < 0) count = 0;
+    if (count > GBUF_MAX_POINT_LIGHTS) count = GBUF_MAX_POINT_LIGHTS;
+    for (int i = 0; i < count; i++) {
+        gb->point_light_pos[i] = positions[i];
+        gb->point_light_color[i] = colors[i];
+    }
+    gb->point_light_count = count;
+}
+
 void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color,
                       const float *inv_view_proj, const float *cam_pos) {
     /* Real C-level render-pass hook, see render_hooks.h -- geometry+
@@ -809,6 +853,11 @@ void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color
     glUniform3fv(gb->light_u_light_dir, 1, light_dir);
     glUniform3fv(gb->light_u_sky_color, 1, sky_color);
     glUniform3fv(gb->light_u_cam_pos, 1, cam_pos);
+    glUniform1i(gb->light_u_point_light_count, gb->point_light_count);
+    if (gb->point_light_count > 0) {
+        glUniform3fv(gb->light_u_point_light_pos, gb->point_light_count, (const float *)gb->point_light_pos);
+        glUniform3fv(gb->light_u_point_light_color, gb->point_light_count, (const float *)gb->point_light_color);
+    }
     glUniformMatrix4fv(gb->light_u_inv_view_proj, 1, GL_FALSE, inv_view_proj);
     glUniformMatrix4fv(gb->light_u_light_vp, 1, GL_FALSE, gb->light_vp);
     glBindVertexArray(gb->quad_vao);

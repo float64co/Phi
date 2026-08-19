@@ -40,6 +40,7 @@
 #include "gbuffer.h"
 #include "scene_objects.h"
 #include "skinned_scene_objects.h"
+#include "light.h"
 #include "meshobject.h"
 #include "halfedge_gltf.h"
 #include "skinned_mesh.h"
@@ -167,7 +168,51 @@ static void player_render(void) {
 
     float sky[3];
     renderer_get_sky_color(sky);
-    static const float light_dir[3] = {0.577f, 0.577f, 0.577f};
+    static const float default_light_dir[3] = {0.577f, 0.577f, 0.577f};
+    float light_dir[3];
+    light_dir[0] = default_light_dir[0]; light_dir[1] = default_light_dir[1]; light_dir[2] = default_light_dir[2];
+
+    /* Real lights (light.h) -- see gbuffer_set_point_lights' own comment
+     * on why this wasn't wired into the live deferred pass before. The
+     * FIRST live SUN light (if any) overrides the fallback direction
+     * above; every live POINT light feeds gbuffer_resolve's own per-pixel
+     * point-light loop. Gathered fresh every frame (cheap: PHI_MAX_LIGHTS
+     * is 16) rather than cached, so game code can move/add/remove lights
+     * at any time with no extra plumbing on its side. */
+    {
+        PhiLight *lights[PHI_MAX_LIGHTS];
+        int n_lights = light_get_all(lights);
+        Vec3f point_pos[GBUF_MAX_POINT_LIGHTS];
+        Vec3f point_color[GBUF_MAX_POINT_LIGHTS];
+        int n_points = 0;
+        for (int i = 0; i < n_lights; i++) {
+            if (lights[i]->type == LIGHT_TYPE_SUN) {
+                Vec3f d = lights[i]->direction;
+                float len = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z);
+                if (len > 1e-6f) {
+                    light_dir[0] = d.x / len; light_dir[1] = d.y / len; light_dir[2] = d.z / len;
+                }
+            } else if (lights[i]->type == LIGHT_TYPE_POINT && n_points < GBUF_MAX_POINT_LIGHTS) {
+                point_pos[n_points] = lights[i]->position;
+                /* PhiLight::energy is a Blender-Watts-ish value (see
+                 * light.h's own comment -- default 1000 for a point
+                 * light), calibrated for a properly-exposed/tonemapped
+                 * pipeline this renderer doesn't have yet (TONEMAP_
+                 * FRAG_SRC is a plain passthrough, see its own comment).
+                 * Feeding that raw into LIGHTING_FRAG_SRC's linear-light
+                 * accumulator would blow every nearby pixel out to solid
+                 * white. Rescaled so a default energy=1000 point light
+                 * lands at intensity 1.0 -- the same rough order of
+                 * magnitude the sun's own diff*0.7 term already uses --
+                 * a real, working calibration for THIS shader, not a
+                 * physically-calibrated photometric one. */
+                float intensity = lights[i]->energy / 1000.0f;
+                point_color[n_points] = (Vec3f){lights[i]->color.x * intensity, lights[i]->color.y * intensity, lights[i]->color.z * intensity};
+                n_points++;
+            }
+        }
+        gbuffer_set_point_lights(g_gbuf, point_pos, point_color, n_points);
+    }
 
     gbuffer_begin_geometry_pass(g_gbuf, sky);
     {
@@ -316,6 +361,7 @@ int main(void) {
 
     scene_objects_init();
     skinned_scene_objects_init();
+    light_system_init();
     phi_graph_system_init();
     render_hooks_init();
     phi_gamepad_init();

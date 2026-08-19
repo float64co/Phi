@@ -1,5 +1,14 @@
 #pragma once
 #include "octree_render.h"  /* RenderMesh, for gbuffer_render_shadow_map */
+#include "vec3.h"           /* Vec3f, for gbuffer_set_point_lights */
+
+/* Small, fixed cap on real point lights the lighting pass sums per pixel
+ * (see gbuffer_set_point_lights/LIGHTING_FRAG_SRC) -- a plain uniform-
+ * array loop, not tiled/clustered lighting, so this needs to stay small
+ * enough that a per-pixel loop over all of them is cheap; 8 is generous
+ * for this project's actual scene sizes (a handful of real lights, not
+ * hundreds) without needing that machinery. */
+#define GBUF_MAX_POINT_LIGHTS 8
 
 /* Deferred renderer G-buffer (Phase 0 — see phi.md's "Deferred Renderer
  * and G-Buffer" section for the target layout this implements). Compiles
@@ -145,6 +154,15 @@ typedef struct {
     int light_u_albedo, light_u_normal, light_u_depth, light_u_light_dir, light_u_sky_color;
     int light_u_inv_view_proj, light_u_light_vp, light_u_shadow_map;
     int light_u_material, light_u_emissive, light_u_cam_pos;
+    /* Real point lights (see gbuffer_set_point_lights) -- summed into the
+     * lighting pass alongside the single directional u_light_dir "sun"
+     * above, with real inverse-square-ish falloff (LIGHTING_FRAG_SRC).
+     * Set once per frame by whoever calls gbuffer_resolve (player_main.c/
+     * editor_main.c), read back out here at upload time. */
+    int light_u_point_light_count, light_u_point_light_pos, light_u_point_light_color;
+    Vec3f point_light_pos[GBUF_MAX_POINT_LIGHTS];
+    Vec3f point_light_color[GBUF_MAX_POINT_LIGHTS];   /* pre-multiplied by the light's own energy -- see gbuffer_set_point_lights */
+    int   point_light_count;
     int tonemap_u_hdr;
     int fxaa_u_tex, fxaa_u_resolution;
     int bright_u_tex, bright_u_threshold;
@@ -193,6 +211,20 @@ void gbuffer_render_shadow_map(GBuffer *gb, RenderMesh *mesh, const float *light
  * metallic/roughness (see LIGHTING_FRAG_SRC's own comment). */
 void gbuffer_resolve(GBuffer *gb, const float *light_dir, const float *sky_color,
                       const float *inv_view_proj, const float *cam_pos);
+
+/* Sets the real point lights the NEXT gbuffer_resolve call sums into its
+ * lighting pass (see LIGHTING_FRAG_SRC's own point-light loop) -- call
+ * once per frame, before gbuffer_resolve, same convention gbuffer_render_
+ * shadow_map's light_dir argument already has for the single directional
+ * "sun". count is clamped to GBUF_MAX_POINT_LIGHTS (extras silently
+ * dropped, not an error -- same honest-degradation convention this
+ * codebase's other small fixed-capacity registries use, e.g. light.h's
+ * own PHI_MAX_LIGHTS). colors should already be pre-multiplied by each
+ * light's own energy (this function doesn't know about PhiLight's own
+ * struct shape -- see light.h -- so the caller, which does, does that
+ * multiply itself; a real, simple point light with a real inverse-
+ * square-ish falloff, not a physically-calibrated photometric one). */
+void gbuffer_set_point_lights(GBuffer *gb, const Vec3f *positions, const Vec3f *colors, int count);
 
 /* Phase 0's "readPixels object ID selection" deliverable: reads back one
  * texel of the object-id attachment. (x,y) are framebuffer pixels,
