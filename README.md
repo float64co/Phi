@@ -4,6 +4,7 @@
 
 ![Phi editor screenshot](docs/screenshot.png)
 ![Phi player screenshot](docs/phi_player.png)
+![A custom game built with Phi](docs/custom_game_screenshot.png)
 
 Phi ships as a single opaque `engine.wasm` (or a native executable on
 Linux/Windows/macOS) that is the mesh editor, the animation editor, and the
