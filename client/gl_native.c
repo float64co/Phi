@@ -45,7 +45,8 @@
     X(PFNGLUNIFORM1IPROC,                glUniform1i) \
     X(PFNGLUNIFORM1UIPROC,               glUniform1ui) \
     X(PFNGLUNIFORM2FPROC,                glUniform2f) \
-    X(PFNGLCLEARBUFFERUIVPROC,           glClearBufferuiv)
+    X(PFNGLCLEARBUFFERUIVPROC,           glClearBufferuiv) \
+    X(PFNGLGENERATEMIPMAPPROC,           glGenerateMipmap)
 
 #define X(type, name) type name##_native = 0;
 GL_NATIVE_PROC_LIST

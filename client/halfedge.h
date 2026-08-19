@@ -16,15 +16,31 @@
  * data has exactly 3 vertices) — n-gon faces aren't exercised yet, though
  * the data structure itself doesn't assume a fixed face size.
  *
- * Twin-edge lookup (used when adding a face, to link each new half-edge
- * to its already-existing opposite if one exists) is a linear scan over
- * existing edges — O(n) per add, O(n^2) overall for a full mesh. Fine for
- * this phase's small test assets; a real editor-scale mesh would want a
- * hash map keyed on (origin,dest) instead. Not built here — flagged
- * honestly rather than silently left slow. */
+ * Twin-edge lookup (used when adding a face, to link each new half-edge to
+ * its already-existing opposite if one exists) is backed by an open-
+ * addressing hash map keyed on (origin,dest) -- amortized O(1) per add,
+ * O(n) overall for a full mesh (see halfedge.c's edge_hash_* helpers).
+ * Rewritten 2026-08-19: the original linear-scan-over-all-edges version
+ * (O(n) per add, O(n^2) overall) was fine for this phase's small test
+ * assets but became a real, measured hang loading a 398k-triangle
+ * Sketchfab character import (halfedge_gltf.c's own full-scene loader) --
+ * this phase's foundation slice explicitly flagged the hash map as future
+ * work rather than building it prematurely; that future arrived. */
 
 typedef struct {
     float pos[3];
+    /* Texture coordinate (0,0 default -- every existing caller that never
+     * sets one, e.g. mp_port.c's phi.create_mesh/add_vertex, keeps working
+     * unchanged: an untextured face just ignores uv entirely, see HEFace's
+     * own texture field). Per-VERTEX, not per-face-corner -- a real UV
+     * seam (the same position needing two different UVs depending on
+     * which face it's part of) becomes two separate HEVertex entries with
+     * the same pos, exactly how glTF's own indexed vertex buffers already
+     * represent seams (a shared position on one side of a seam and a
+     * separate index on the other) -- halfedge_gltf.c's loader imports
+     * each glTF vertex as its own HEVertex for this reason, not
+     * deduplicating by position, so seams import correctly by construction. */
+    float uv[2];
     int   edge;   /* index of one outgoing half-edge from this vertex, -1 if isolated */
 } HEVertex;
 
@@ -55,19 +71,41 @@ typedef struct {
     float metallic;
     float roughness;
     float emission[3];
+    /* Real GL texture name (see texture_cache.h) sampled for this face's
+     * base color, multiplied against base_color per glTF's own
+     * pbrMetallicRoughness spec (baseColorFactor tints baseColorTexture,
+     * not one-or-the-other) -- 0 (GL's own "no texture" name) means "flat
+     * base_color only", the default every existing caller that never
+     * touches this field already gets for free. Not cleared/freed by
+     * halfedge_destroy -- textures are cached and shared (texture_cache.h
+     * owns their lifetime, keyed by file path), a HalfEdgeMesh only ever
+     * holds a borrowed GL name, never uploads or frees one itself. */
+    unsigned int texture;
 } HEFace;
 
 typedef struct {
     HEVertex *verts; int vert_count, vert_cap;
     HEEdge   *edges; int edge_count, edge_cap;
     HEFace   *faces; int face_count, face_cap;
+    /* Private to halfedge.c's edge_hash_* helpers (see this file's top
+     * comment) -- an open-addressing table of edge indices, -1 = empty,
+     * keyed on (origin,dest). Not touched by any other file. */
+    int *edge_hash; int edge_hash_cap;
 } HalfEdgeMesh;
 
 HalfEdgeMesh *halfedge_create(void);
 void          halfedge_destroy(HalfEdgeMesh *hem);
 
-/* Adds a vertex, returns its index. */
+/* Adds a vertex, returns its index. uv defaults to (0,0) -- see
+ * halfedge_set_vertex_uv() to set a real one (kept as a separate setter
+ * rather than widening this function's own signature, so every existing
+ * call site -- mp_port.c's phi.add_vertex chief among them -- keeps
+ * compiling unchanged). */
 int halfedge_add_vertex(HalfEdgeMesh *hem, float x, float y, float z);
+
+/* Sets vertex v's texture coordinate (see HEVertex::uv's own comment).
+ * No-op if v is out of range. */
+void halfedge_set_vertex_uv(HalfEdgeMesh *hem, int v, float u, float vcoord);
 
 /* Adds a face from a CCW-wound loop of `n` existing vertex indices,
  * creating its half-edges and linking twins against any matching
@@ -83,6 +121,17 @@ int halfedge_add_face(HalfEdgeMesh *hem, const int *vert_indices, int n);
  * if f is out of range or already deleted. */
 void halfedge_set_face_material(HalfEdgeMesh *hem, int f, const float base_color[3],
                                  float metallic, float roughness, const float emission[3]);
+
+/* Sets face f's base-color texture (see HEFace::texture's own comment) --
+ * a real GL texture name (0 clears it back to flat-base_color-only). A
+ * separate setter from halfedge_set_face_material rather than widening
+ * its parameter list, so every existing caller (mp_port.c's phi.
+ * set_face_material chief among them) keeps compiling unchanged; the two
+ * are independent, not a package deal (a face can have a texture with no
+ * explicit halfedge_set_face_material call, keeping the default white-
+ * ish base_color glTF's own baseColorFactor default already produces).
+ * No-op if f is out of range or already deleted. */
+void halfedge_set_face_texture(HalfEdgeMesh *hem, int f, unsigned int texture);
 
 /* Soft-deletes face `f`: marks it (and its edges) as gone and resets any
  * twin link pointing at one of its edges back to -1, so a neighboring face

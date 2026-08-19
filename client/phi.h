@@ -57,6 +57,16 @@
 #include "halfedge.h"
 #include "mesh_edit.h"
 
+/* glTF import: halfedge_load_gltf (a full multi-mesh/multi-material/
+ * textured scene, see its own comment) and texture_cache_load (the real
+ * GL texture loader halfedge_load_gltf/skinned_mesh_load_gltf both need
+ * registered once at startup via their own _register_texture_loader
+ * calls -- player_main.c's game_init already does this before calling
+ * into game/src/main.c, so a game/src/ *.c author only ever needs to call
+ * the loaders themselves, not register anything). */
+#include "halfedge_gltf.h"
+#include "texture_cache.h"
+
 /* Physics: Bullet, via phi_physics.h's own real C wrapper (opaque
  * PhiPhysicsWorld, PhiRigidBody, and PhiConstraint pointer types -- see
  * that header's own comment for why it's already public-shaped as-is: no
@@ -72,6 +82,13 @@
  * renderer.c, matching this codebase's existing "data model here, GL
  * elsewhere" split -- see skinned_mesh_object.h's own comment). */
 #include "skinned_mesh_object.h"
+/* Skinned character scene registry (skinned_scene_objects.h) -- the
+ * SkinnedMeshObject twin of scene_objects.h's MeshObject registry above:
+ * a game/src/ *.c author calls skinned_scene_object_add() + skinned_mesh_
+ * object_load() to spawn a real animated character and player_main.c's
+ * own render/update loop picks it up automatically from then on, same
+ * "just add it to the registry" ergonomics as a MeshObject. */
+#include "skinned_scene_objects.h"
 
 /* Phase 6 node graphs: node_graph.h's C-owned topology (nodes, typed
  * links, params, editor positions) and Kahn's-algorithm topological

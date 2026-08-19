@@ -78,3 +78,49 @@ void skinned_mesh_object_free(SkinnedMeshObject *obj) {
     for (int i = 0; i < obj->clip_count; i++) animation_clip_free(&obj->clips[i]);
     memset(obj, 0, sizeof(*obj));
 }
+
+/* p' = M * p (column-major 4x4), same convention/formula as halfedge_
+ * gltf.c's/skinned_mesh.c's own mat4_transform_point -- duplicated here
+ * rather than shared for the same reason armature.c's own mat4_mul is
+ * duplicated (see its comment): this file needs to stay GL-free/no-
+ * external-header for the same no-window test harness linkage. */
+static void mat4_transform_point(const float m[16], const float p[3], float out[3]) {
+    out[0] = m[0]*p[0] + m[4]*p[1] + m[8]*p[2]  + m[12];
+    out[1] = m[1]*p[0] + m[5]*p[1] + m[9]*p[2]  + m[13];
+    out[2] = m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14];
+}
+
+int skinned_mesh_object_local_aabb(const SkinnedMeshObject *obj, Vec3f *out_min, Vec3f *out_max) {
+    if (!obj || obj->mesh.vert_count <= 0) return 0;
+
+    float mn[3], mx[3];
+    int have_bounds = 0;
+    for (int i = 0; i < obj->mesh.vert_count; i++) {
+        const SkinnedVertex *v = &obj->mesh.verts[i];
+        /* Same weighted skin-matrix blend as SKINNED_VERT_SRC_FMT's
+         * vertex shader (renderer.c) -- elementwise, all 16 components,
+         * not a matrix multiply of the blend itself. */
+        float skin[16];
+        for (int k = 0; k < 16; k++) {
+            skin[k] = v->bone_wgt[0] * obj->skin[v->bone_idx[0]][k]
+                    + v->bone_wgt[1] * obj->skin[v->bone_idx[1]][k]
+                    + v->bone_wgt[2] * obj->skin[v->bone_idx[2]][k]
+                    + v->bone_wgt[3] * obj->skin[v->bone_idx[3]][k];
+        }
+        float p[3];
+        mat4_transform_point(skin, v->pos, p);
+        if (!have_bounds) {
+            mn[0] = mx[0] = p[0]; mn[1] = mx[1] = p[1]; mn[2] = mx[2] = p[2];
+            have_bounds = 1;
+        } else {
+            for (int a = 0; a < 3; a++) {
+                if (p[a] < mn[a]) mn[a] = p[a];
+                if (p[a] > mx[a]) mx[a] = p[a];
+            }
+        }
+    }
+
+    out_min->x = mn[0]; out_min->y = mn[1]; out_min->z = mn[2];
+    out_max->x = mx[0]; out_max->y = mx[1]; out_max->z = mx[2];
+    return 1;
+}

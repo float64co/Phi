@@ -7,6 +7,162 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Function-pointer handoff for real texture loading (texture_cache.h's
+ * texture_cache_load), NOT a direct call/#include -- the same reason
+ * mp_port.c's phi_mp_register_camera_callback/_gamepad_callbacks/_audio_
+ * callbacks all exist (see mp_port.h's own comments): texture_cache.c
+ * calls real GL functions, and this file is linked, unmodified, into
+ * genuinely no-GL standalone test harnesses (mesh_edit_test, phi_h_test
+ * -- see the Makefile's own MESH_EDIT_TEST_SRCS/PHI_H_TEST_SRCS). Real
+ * engine executables (editor_main.c, player_main.c) register texture_
+ * cache_load itself as this callback at startup; the test harnesses
+ * never register anything, so every loaded material's texture field
+ * just stays 0 (untextured, flat base_color only) there -- a real,
+ * harmless degradation, not a build break. */
+static unsigned int (*s_load_texture)(const char *path) = NULL;
+
+void halfedge_gltf_register_texture_loader(unsigned int (*load_texture)(const char *path)) {
+    s_load_texture = load_texture;
+}
+
+/* ---- Full-scene glTF loading (2026-08-19) -- see halfedge.h's HEFace::
+ * texture and HEVertex::uv comments for why this replaced the original
+ * "just mesh[0]/primitive[0]" loader: real multi-part, multi-material,
+ * textured character exports (Sketchfab's own typical shape) need every
+ * mesh/primitive in the file, positioned by its owning node's real world
+ * transform, not just the first one found. ---- */
+
+/* p' = M * p (column-major 4x4, matching cgltf_node_transform_world's own
+ * output layout, which is glTF's own matrix convention). Normals are NOT
+ * transformed here -- meshobject_build_render_mesh_from_halfedge derives
+ * flat per-face normals from the (already work-transformed) triangle
+ * positions themselves, the same "no NORMAL attribute stored on
+ * HEVertex at all" design this loader already had before this change,
+ * so a separate normal-matrix transform was never needed. */
+static void mat4_transform_point(const cgltf_float m[16], const cgltf_float p[3], float out[3]) {
+    out[0] = m[0]*p[0] + m[4]*p[1] + m[8]*p[2]  + m[12];
+    out[1] = m[1]*p[0] + m[5]*p[1] + m[9]*p[2]  + m[13];
+    out[2] = m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14];
+}
+
+/* "<dir-of-base_file>/<decoded rel_uri>" -- glTF texture URIs are always
+ * relative to the .gltf file's own directory, never to the process's
+ * working directory. cgltf_decode_uri does real percent-decoding
+ * in-place (spaces as %20 etc.) on a caller-owned copy, the same helper
+ * cgltf's own buffer-URI resolution uses internally (see this file's
+ * cgltf.h -- not reinvented here). Caller frees the returned string. */
+static char *resolve_relative_path(const char *base_file, const char *rel_uri) {
+    const char *slash = strrchr(base_file, '/');
+    size_t dir_len = slash ? (size_t)(slash - base_file + 1) : 0;
+    char *decoded = strdup(rel_uri);
+    cgltf_decode_uri(decoded);
+    char *out = (char *)malloc(dir_len + strlen(decoded) + 1);
+    if (dir_len) memcpy(out, base_file, dir_len);
+    strcpy(out + dir_len, decoded);
+    free(decoded);
+    return out;
+}
+
+/* Resolves a primitive's real material into a flat tint (glTF's
+ * baseColorFactor, default white per spec -- multiplies whatever the
+ * texture itself samples, not a fallback used only in its absence) and a
+ * real GL texture name (0 if the material has none, or the file has no
+ * material at all -- untextured geometry, e.g. this codebase's own
+ * primitive test/demo shapes, works exactly as before). Only the
+ * pbrMetallicRoughness.baseColorTexture channel is loaded -- normal/
+ * metallic-roughness/emissive/occlusion maps are real, separate,
+ * deliberately out-of-scope future work (this renderer's lighting model
+ * has no tangent-space/normal-mapping machinery to consume them yet);
+ * see this project's own engineering brief for the honest scope note. */
+static void resolve_material(const cgltf_material *mat, const char *gltf_path,
+                              float out_color[3], unsigned int *out_texture) {
+    out_color[0] = out_color[1] = out_color[2] = 1.0f;
+    *out_texture = 0;
+    if (!mat || !mat->has_pbr_metallic_roughness) return;
+    out_color[0] = mat->pbr_metallic_roughness.base_color_factor[0];
+    out_color[1] = mat->pbr_metallic_roughness.base_color_factor[1];
+    out_color[2] = mat->pbr_metallic_roughness.base_color_factor[2];
+    const cgltf_texture_view *tv = &mat->pbr_metallic_roughness.base_color_texture;
+    if (s_load_texture && tv->texture && tv->texture->image && tv->texture->image->uri) {
+        char *resolved = resolve_relative_path(gltf_path, tv->texture->image->uri);
+        *out_texture = s_load_texture(resolved);
+        free(resolved);
+    }
+}
+
+/* Appends one primitive's real triangles into hem, in `world` space
+ * (already includes this primitive's owning node's full transform --
+ * see walk_node below) with a real per-face material/texture (see
+ * resolve_material above). Non-triangle primitives (glTF allows lines/
+ * points/fans/strips) are skipped with a log line rather than silently
+ * misreading their index buffer as a triangle list. */
+static void append_primitive(HalfEdgeMesh *hem, const cgltf_primitive *prim,
+                              const cgltf_float world[16], const char *gltf_path) {
+    if (prim->type != cgltf_primitive_type_triangles) {
+        printf("[halfedge_gltf] skipping a non-triangle primitive (mode=%d) in %s\n", (int)prim->type, gltf_path);
+        return;
+    }
+    const cgltf_accessor *pos_acc = NULL, *uv_acc = NULL;
+    for (cgltf_size i = 0; i < prim->attributes_count; i++) {
+        if (prim->attributes[i].type == cgltf_attribute_type_position && !pos_acc) pos_acc = prim->attributes[i].data;
+        if (prim->attributes[i].type == cgltf_attribute_type_texcoord && !uv_acc)  uv_acc  = prim->attributes[i].data;
+    }
+    if (!pos_acc) {
+        printf("[halfedge_gltf] skipping a primitive with no POSITION attribute in %s\n", gltf_path);
+        return;
+    }
+
+    float color[3]; unsigned int tex;
+    resolve_material(prim->material, gltf_path, color, &tex);
+
+    int base_vertex = hem->vert_count;
+    int pos_count = (int)pos_acc->count;
+    for (int v = 0; v < pos_count; v++) {
+        float p[3]; cgltf_accessor_read_float(pos_acc, (cgltf_size)v, p, 3);
+        float wp[3]; mat4_transform_point(world, p, wp);
+        int idx = halfedge_add_vertex(hem, wp[0], wp[1], wp[2]);
+        if (uv_acc) {
+            float uv[2]; cgltf_accessor_read_float(uv_acc, (cgltf_size)v, uv, 2);
+            halfedge_set_vertex_uv(hem, idx, uv[0], uv[1]);
+        }
+    }
+
+    int has_indices = prim->indices != NULL;
+    int index_count = has_indices ? (int)prim->indices->count : pos_count;
+    static const float emission_none[3] = {0.0f, 0.0f, 0.0f};
+    for (int i = 0; i + 2 < index_count; i += 3) {
+        int tri[3];
+        for (int k = 0; k < 3; k++) {
+            int local = has_indices ? (int)cgltf_accessor_read_index(prim->indices, (cgltf_size)(i + k)) : (i + k);
+            tri[k] = base_vertex + local;
+        }
+        int f = halfedge_add_face(hem, tri, 3);
+        /* roughness 0.8 matches this structure's own existing "neutral
+         * dielectric/rough" default (halfedge_add_face's own comment) --
+         * glTF's real roughnessFactor isn't read here on purpose: this
+         * pass wires up the base-color channel (what actually gives a
+         * Sketchfab-style character its recognizable look), leaving
+         * metallic/roughness-map support as the same kind of stated,
+         * deliberate future work resolve_material's own comment already
+         * flags for normal/occlusion maps. */
+        halfedge_set_face_material(hem, f, color, 0.0f, 0.8f, emission_none);
+        halfedge_set_face_texture(hem, f, tex);
+    }
+}
+
+static void walk_node(HalfEdgeMesh *hem, const cgltf_node *node, const char *gltf_path) {
+    if (node->mesh) {
+        cgltf_float world[16];
+        cgltf_node_transform_world(node, world);
+        for (cgltf_size p = 0; p < node->mesh->primitives_count; p++) {
+            append_primitive(hem, &node->mesh->primitives[p], world, gltf_path);
+        }
+    }
+    for (cgltf_size c = 0; c < node->children_count; c++) {
+        walk_node(hem, node->children[c], gltf_path);
+    }
+}
+
 HalfEdgeMesh *halfedge_load_gltf(const char *path) {
     cgltf_options options;
     memset(&options, 0, sizeof(options));
@@ -21,48 +177,32 @@ HalfEdgeMesh *halfedge_load_gltf(const char *path) {
         cgltf_free(data);
         return NULL;
     }
-    if (data->meshes_count == 0 || data->meshes[0].primitives_count == 0) {
-        printf("[halfedge_gltf] %s has no mesh primitives\n", path);
-        cgltf_free(data);
-        return NULL;
-    }
 
-    cgltf_primitive *prim = &data->meshes[0].primitives[0];
-    if (prim->type != cgltf_primitive_type_triangles) {
-        printf("[halfedge_gltf] %s primitive 0 isn't a triangle list (mode=%d) — "
-               "only triangles are supported in this pass\n", path, (int)prim->type);
-        cgltf_free(data);
-        return NULL;
-    }
+    /* The default scene if the file declares one; falling back to scene
+     * 0 (most real files have exactly one scene either way), and finally
+     * to every node with no parent, covers every real glTF file this
+     * codebase is likely to ever be handed, not just ones that set
+     * "scene" explicitly. */
+    const cgltf_scene *scene = data->scene;
+    if (!scene && data->scenes_count > 0) scene = &data->scenes[0];
 
-    cgltf_accessor *pos_accessor = NULL;
-    for (cgltf_size i = 0; i < prim->attributes_count; i++) {
-        if (prim->attributes[i].type == cgltf_attribute_type_position) {
-            pos_accessor = prim->attributes[i].data;
-            break;
+    HalfEdgeMesh *hem = halfedge_create();
+    if (scene) {
+        for (cgltf_size i = 0; i < scene->nodes_count; i++) walk_node(hem, scene->nodes[i], path);
+    } else {
+        for (cgltf_size i = 0; i < data->nodes_count; i++) {
+            if (!data->nodes[i].parent) walk_node(hem, &data->nodes[i], path);
         }
     }
-    if (!pos_accessor) {
-        printf("[halfedge_gltf] %s primitive 0 has no POSITION attribute\n", path);
+
+    if (hem->face_count == 0) {
+        printf("[halfedge_gltf] %s produced no real triangles (no mesh primitives reachable from its scene graph)\n", path);
+        halfedge_destroy(hem);
         cgltf_free(data);
         return NULL;
     }
 
-    int pos_count = (int)pos_accessor->count;
-    float *positions = (float *)malloc(sizeof(float) * 3 * (size_t)pos_count);
-    cgltf_accessor_unpack_floats(pos_accessor, positions, (cgltf_size)pos_count * 3);
-
-    int index_count = prim->indices ? (int)prim->indices->count : 0;
-    unsigned short *indices = NULL;
-    if (index_count > 0) {
-        indices = (unsigned short *)malloc(sizeof(unsigned short) * (size_t)index_count);
-        for (int i = 0; i < index_count; i++)
-            indices[i] = (unsigned short)cgltf_accessor_read_index(prim->indices, (cgltf_size)i);
-    }
-
-    HalfEdgeMesh *hem = halfedge_build_from_triangles(positions, pos_count, indices, index_count);
-    free(positions);
-    free(indices);
+    printf("[halfedge_gltf] loaded %s: %d vertices, %d faces\n", path, hem->vert_count, hem->face_count);
     cgltf_free(data);
     return hem;
 }

@@ -9,11 +9,26 @@
  * glTF, matching exactly what this phase's foundation slice needs — not a
  * general-purpose glTF writer. */
 
-/* Loads mesh[0]'s primitive[0] from a glTF/GLB file via cgltf and builds a
- * HalfEdgeMesh from its POSITION accessor + triangle-list indices. Returns
- * NULL on failure (bad path, parse error, missing POSITION attribute,
- * non-triangle primitive mode, or no meshes/primitives). */
+/* Loads a glTF/GLB file's ENTIRE default scene via cgltf -- every mesh
+ * primitive reachable from the scene graph, positioned by its own node's
+ * real world transform (translation/rotation/scale, walked recursively
+ * through parent/child nodes), merged into one HalfEdgeMesh. Real per-
+ * face material too: each primitive's glTF material resolves to a flat
+ * base-color tint (baseColorFactor) and, if present, a real GL texture
+ * (baseColorTexture -- see HEFace::texture and texture_cache.h); non-
+ * triangle primitives and primitives with no POSITION attribute are
+ * skipped (logged, not fatal) rather than misread. Returns NULL on
+ * failure (bad path, parse error, or a scene graph that reaches no real
+ * triangles at all). */
 HalfEdgeMesh *halfedge_load_gltf(const char *path);
+
+/* Registers the real texture loader (texture_cache.c's texture_cache_load,
+ * matching phi_mp_register_camera_callback's own function-pointer-not-
+ * direct-link shape -- see this file's own comment at the registration
+ * site for why). Call once from a real engine executable's startup
+ * (editor_main.c, player_main.c); leave unregistered in a no-GL test
+ * harness, where every loaded material's texture just stays 0. */
+void halfedge_gltf_register_texture_loader(unsigned int (*load_texture)(const char *path));
 
 /* Flattens hem back to a flat indexed triangle buffer (halfedge_flatten_
  * triangles) and writes a minimal glTF (JSON + a sibling .bin file, same

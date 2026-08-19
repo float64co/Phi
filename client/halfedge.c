@@ -20,35 +20,108 @@ void halfedge_destroy(HalfEdgeMesh *hem) {
     free(hem->verts);
     free(hem->edges);
     free(hem->faces);
+    free(hem->edge_hash);
     free(hem);
+}
+
+/* -- Twin-edge hash map (see halfedge.h's top comment) -------------------
+ * Open addressing, linear probing, no removal (matches this structure's
+ * own append-only/tombstone-don't-scrub model -- see halfedge_delete_face).
+ * A slot holds an edge index or -1 (empty). Both insert and lookup follow
+ * the SAME deterministic probe sequence starting at hash(origin,dest); since
+ * insert always lands in the first truly-empty slot along that sequence and
+ * slots are never cleared, a lookup that walks the same sequence is
+ * guaranteed to pass through every edge ever inserted under that key before
+ * it can reach an empty slot -- correct even with hash collisions (verified
+ * by comparing the edge's own origin/dest, not just the hash) and even with
+ * tombstoned (deleted-face) entries left in place (lookup just keeps
+ * probing past those, exactly like the original linear scan did). */
+
+static size_t edge_hash_of(int from, int to) {
+    size_t h = (size_t)from * 0x9E3779B97F4A7C15ULL + (size_t)to * 0xC2B2AE3D27D4EB4FULL;
+    h ^= h >> 33;
+    return h;
+}
+
+static size_t next_pow2(size_t n) {
+    size_t p = 16;
+    while (p < n) p *= 2;
+    return p;
+}
+
+/* Rebuilds the hash table from scratch against every edge currently in
+ * hem->edges (0..edge_count), sized so the table stays well under a load
+ * factor of 0.5. Called whenever the table would otherwise get too full --
+ * amortized O(1) per edge over the mesh's whole build, same doubling
+ * amortization grow() already gives vert/edge/face arrays. */
+static void edge_hash_rebuild(HalfEdgeMesh *hem, int min_edge_room) {
+    size_t new_cap = next_pow2((size_t)(hem->edge_count + min_edge_room) * 4);
+    int *table = (int *)malloc(new_cap * sizeof(int));
+    for (size_t i = 0; i < new_cap; i++) table[i] = -1;
+
+    free(hem->edge_hash);
+    hem->edge_hash = table;
+    hem->edge_hash_cap = (int)new_cap;
+
+    size_t mask = new_cap - 1;
+    for (int e = 0; e < hem->edge_count; e++) {
+        int from = hem->edges[e].origin;
+        int to   = hem->edges[hem->edges[e].next].origin;
+        size_t slot = edge_hash_of(from, to) & mask;
+        while (table[slot] != -1) slot = (slot + 1) & mask;
+        table[slot] = e;
+    }
+}
+
+static void edge_hash_insert(HalfEdgeMesh *hem, int edge_idx) {
+    size_t mask = (size_t)hem->edge_hash_cap - 1;
+    int from = hem->edges[edge_idx].origin;
+    int to   = hem->edges[hem->edges[edge_idx].next].origin;
+    size_t slot = edge_hash_of(from, to) & mask;
+    while (hem->edge_hash[slot] != -1) slot = (slot + 1) & mask;
+    hem->edge_hash[slot] = edge_idx;
 }
 
 int halfedge_add_vertex(HalfEdgeMesh *hem, float x, float y, float z) {
     hem->verts = (HEVertex *)grow(hem->verts, &hem->vert_cap, hem->vert_count + 1, sizeof(HEVertex));
     HEVertex *v = &hem->verts[hem->vert_count];
     v->pos[0] = x; v->pos[1] = y; v->pos[2] = z;
+    v->uv[0] = 0.0f; v->uv[1] = 0.0f;
     v->edge = -1;
     return hem->vert_count++;
 }
 
-/* Linear scan for an existing half-edge running from `from` to `to` — used
- * to find the just-added edge going the OPPOSITE direction of a new one,
- * i.e. its twin. See halfedge.h's struct comment on why this is O(n) here
- * rather than hash-mapped. */
+void halfedge_set_vertex_uv(HalfEdgeMesh *hem, int v, float u, float vcoord) {
+    if (v < 0 || v >= hem->vert_count) return;
+    hem->verts[v].uv[0] = u;
+    hem->verts[v].uv[1] = vcoord;
+}
+
+/* Finds a LIVE half-edge running from `from` to `to` -- used to find the
+ * just-added edge going the OPPOSITE direction of a new one, i.e. its twin.
+ * Hash-map-backed (see this file's edge_hash_* helpers + halfedge.h's top
+ * comment), not a linear scan. */
 static int find_edge(const HalfEdgeMesh *hem, int from, int to) {
-    for (int e = 0; e < hem->edge_count; e++) {
+    if (hem->edge_hash_cap == 0) return -1;
+    size_t mask = (size_t)hem->edge_hash_cap - 1;
+    size_t slot = edge_hash_of(from, to) & mask;
+    for (;;) {
+        int e = hem->edge_hash[slot];
+        if (e == -1) return -1;
         /* Skip edges belonging to a soft-deleted face (halfedge_delete_face)
          * -- their origin/next fields are left untouched (tombstoning
          * doesn't scrub edge data, see the struct comment), so without this
          * check a newly-added face re-triangulating the same vertex
          * neighborhood a deleted face used to occupy (extrude/inset/
          * loop-cut all do exactly this, see mesh_edit.c) could accidentally
-         * twin against dead geometry instead of a real live neighbor. */
-        if (hem->faces[hem->edges[e].face].deleted) continue;
-        if (hem->edges[e].origin == from && hem->edges[hem->edges[e].next].origin == to)
+         * twin against dead geometry instead of a real live neighbor. Keep
+         * probing rather than stopping -- a live match may still be further
+         * along this key's probe sequence (see edge_hash_rebuild's comment). */
+        if (!hem->faces[hem->edges[e].face].deleted &&
+            hem->edges[e].origin == from && hem->edges[hem->edges[e].next].origin == to)
             return e;
+        slot = (slot + 1) & mask;
     }
-    return -1;
 }
 
 int halfedge_add_face(HalfEdgeMesh *hem, const int *vert_indices, int n) {
@@ -66,6 +139,19 @@ int halfedge_add_face(HalfEdgeMesh *hem, const int *vert_indices, int n) {
         e->prev   = first_edge + (i - 1 + n) % n;
     }
     hem->edge_count += n;
+
+    /* Keep the twin-lookup hash table under a 0.5 load factor -- rebuild
+     * (rare, amortized) rather than grow in place, same doubling-cost-
+     * amortized-to-O(1) trade the vert/edge/face arrays' own grow() makes.
+     * edge_hash_rebuild re-inserts every edge up to the now-already-
+     * incremented edge_count (the n new ones included), so on a rebuild the
+     * per-edge insert loop below would double-insert them -- skipped then. */
+    if ((hem->edge_count + 1) * 2 > hem->edge_hash_cap) {
+        edge_hash_rebuild(hem, n);
+    } else {
+        for (int i = 0; i < n; i++)
+            edge_hash_insert(hem, first_edge + i);
+    }
 
     for (int i = 0; i < n; i++) {
         int edge_idx = first_edge + i;
@@ -98,6 +184,7 @@ int halfedge_add_face(HalfEdgeMesh *hem, const int *vert_indices, int n) {
     hem->faces[face_idx].emission[0] = 0.0f;
     hem->faces[face_idx].emission[1] = 0.0f;
     hem->faces[face_idx].emission[2] = 0.0f;
+    hem->faces[face_idx].texture = 0;   /* no texture -- flat base_color only, see HEFace::texture's own comment */
     return face_idx;
 }
 
@@ -115,6 +202,11 @@ void halfedge_set_face_material(HalfEdgeMesh *hem, int f, const float base_color
     face->emission[0] = emission[0];
     face->emission[1] = emission[1];
     face->emission[2] = emission[2];
+}
+
+void halfedge_set_face_texture(HalfEdgeMesh *hem, int f, unsigned int texture) {
+    if (f < 0 || f >= hem->face_count || hem->faces[f].deleted) return;
+    hem->faces[f].texture = texture;
 }
 
 void halfedge_delete_face(HalfEdgeMesh *hem, int f) {

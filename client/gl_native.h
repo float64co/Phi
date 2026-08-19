@@ -55,7 +55,8 @@
     X(PFNGLUNIFORM1IPROC,                glUniform1i) \
     X(PFNGLUNIFORM1UIPROC,               glUniform1ui) \
     X(PFNGLUNIFORM2FPROC,                glUniform2f) \
-    X(PFNGLCLEARBUFFERUIVPROC,           glClearBufferuiv)
+    X(PFNGLCLEARBUFFERUIVPROC,           glClearBufferuiv) \
+    X(PFNGLGENERATEMIPMAPPROC,           glGenerateMipmap)
 
 #define X(type, name) extern type name##_native;
 GL_NATIVE_PROC_LIST
@@ -101,6 +102,7 @@ GL_NATIVE_PROC_LIST
 #define glUniform1ui                  glUniform1ui_native
 #define glUniform2f                   glUniform2f_native
 #define glClearBufferuiv              glClearBufferuiv_native
+#define glGenerateMipmap              glGenerateMipmap_native
 
 /* Fetches every pointer above via phi_gl_get_proc. Must run once, after the
  * GL context is current and before any of the calls above — renderer_create()

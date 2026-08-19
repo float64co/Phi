@@ -189,6 +189,7 @@ static const char *PBR_VERT_SRC =
     "in float a_metallic;\n"
     "in float a_roughness;\n"
     "in vec3 a_emission;\n"
+    "in vec2 a_uv;\n"
     "uniform mat4 u_mvp;\n"
     "uniform mat4 u_prev_mvp;\n"
     "out vec3 v_normal;\n"
@@ -196,6 +197,7 @@ static const char *PBR_VERT_SRC =
     "out float v_metallic;\n"
     "out float v_roughness;\n"
     "out vec3 v_emission;\n"
+    "out vec2 v_uv;\n"
     "out vec3 v_clip_curr;\n"
     "out vec3 v_clip_prev;\n"
     "void main() {\n"
@@ -209,6 +211,7 @@ static const char *PBR_VERT_SRC =
     "  v_metallic = a_metallic;\n"
     "  v_roughness = a_roughness;\n"
     "  v_emission = a_emission;\n"
+    "  v_uv = a_uv;\n"
     "}\n";
 
 static const char *PBR_FRAG_SRC =
@@ -219,9 +222,12 @@ static const char *PBR_FRAG_SRC =
     "in float v_metallic;\n"
     "in float v_roughness;\n"
     "in vec3  v_emission;\n"
+    "in vec2  v_uv;\n"
     "in vec3  v_clip_curr;\n"
     "in vec3  v_clip_prev;\n"
     "uniform uint  u_object_id;\n"
+    "uniform sampler2D u_texture;\n"
+    "uniform int u_has_texture;\n"
     "layout(location=0) out vec4 out_albedo;\n"
     "layout(location=1) out vec4 out_normal;\n"
     "layout(location=2) out vec4 out_material;\n"
@@ -230,7 +236,12 @@ static const char *PBR_FRAG_SRC =
     "layout(location=5) out uint out_object_id;\n"
     "void main() {\n"
     "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
-    "  out_albedo    = vec4(v_base_color, 1.0);\n"
+    /* glTF's own pbrMetallicRoughness convention: baseColorFactor (here,
+     * v_base_color -- per-face, HEFace::base_color) TINTS baseColorTexture,
+     * not one-or-the-other (see resolve_material's own comment in both
+     * halfedge_gltf.c and skinned_mesh.c). */
+    "  vec3 albedo = u_has_texture != 0 ? texture(u_texture, v_uv).rgb * v_base_color : v_base_color;\n"
+    "  out_albedo    = vec4(albedo, 1.0);\n"
     "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
     "  out_material  = vec4(v_metallic, v_roughness, 0.0, 0.0);\n"
     "  out_emissive  = vec4(v_emission, 0.0);\n"
@@ -248,6 +259,7 @@ static const char *PBR_VERT_SRC =
     "in float a_metallic;\n"
     "in float a_roughness;\n"
     "in vec3 a_emission;\n"
+    "in vec2 a_uv;\n"
     "uniform mat4 u_mvp;\n"
     "uniform mat4 u_prev_mvp;\n"
     "out vec3 v_normal;\n"
@@ -255,6 +267,7 @@ static const char *PBR_VERT_SRC =
     "out float v_metallic;\n"
     "out float v_roughness;\n"
     "out vec3 v_emission;\n"
+    "out vec2 v_uv;\n"
     "out vec3 v_clip_curr;\n"
     "out vec3 v_clip_prev;\n"
     "void main() {\n"
@@ -268,6 +281,7 @@ static const char *PBR_VERT_SRC =
     "  v_metallic = a_metallic;\n"
     "  v_roughness = a_roughness;\n"
     "  v_emission = a_emission;\n"
+    "  v_uv = a_uv;\n"
     "}\n";
 
 static const char *PBR_FRAG_SRC =
@@ -277,9 +291,12 @@ static const char *PBR_FRAG_SRC =
     "in float v_metallic;\n"
     "in float v_roughness;\n"
     "in vec3  v_emission;\n"
+    "in vec2  v_uv;\n"
     "in vec3  v_clip_curr;\n"
     "in vec3  v_clip_prev;\n"
     "uniform uint  u_object_id;\n"
+    "uniform sampler2D u_texture;\n"
+    "uniform int u_has_texture;\n"
     "layout(location=0) out vec4 out_albedo;\n"
     "layout(location=1) out vec4 out_normal;\n"
     "layout(location=2) out vec4 out_material;\n"
@@ -288,7 +305,12 @@ static const char *PBR_FRAG_SRC =
     "layout(location=5) out uint out_object_id;\n"
     "void main() {\n"
     "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
-    "  out_albedo    = vec4(v_base_color, 1.0);\n"
+    /* glTF's own pbrMetallicRoughness convention: baseColorFactor (here,
+     * v_base_color -- per-face, HEFace::base_color) TINTS baseColorTexture,
+     * not one-or-the-other (see resolve_material's own comment in both
+     * halfedge_gltf.c and skinned_mesh.c). */
+    "  vec3 albedo = u_has_texture != 0 ? texture(u_texture, v_uv).rgb * v_base_color : v_base_color;\n"
+    "  out_albedo    = vec4(albedo, 1.0);\n"
     "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
     "  out_material  = vec4(v_metallic, v_roughness, 0.0, 0.0);\n"
     "  out_emissive  = vec4(v_emission, 0.0);\n"
@@ -318,12 +340,14 @@ static const char *SKINNED_VERT_SRC_FMT =
     "#version 300 es\n"
     "in vec3 a_pos;\n"
     "in vec3 a_normal;\n"
+    "in vec2 a_uv;\n"
     "in vec4 a_bone_idx;\n"
     "in vec4 a_bone_wgt;\n"
     "uniform mat4 u_mvp;\n"
     "uniform mat4 u_prev_mvp;\n"
     "uniform mat4 u_bones[%d];\n"
     "out vec3 v_normal;\n"
+    "out vec2 v_uv;\n"
     "out vec3 v_clip_curr;\n"
     "out vec3 v_clip_prev;\n"
     "void main() {\n"
@@ -338,12 +362,14 @@ static const char *SKINNED_VERT_SRC_FMT =
     "  vec4 clip_prev = u_prev_mvp * skinned_pos;\n"
     "  v_clip_prev = vec3(clip_prev.xy, clip_prev.w);\n"
     "  v_normal = mat3(skin) * a_normal;\n"
+    "  v_uv = a_uv;\n"
     "}\n";
 
 static const char *SKINNED_FRAG_SRC =
     "#version 300 es\n"
     "precision mediump float;\n"
     "in vec3 v_normal;\n"
+    "in vec2 v_uv;\n"
     "in vec3 v_clip_curr;\n"
     "in vec3 v_clip_prev;\n"
     "uniform vec3  u_base_color;\n"
@@ -351,6 +377,8 @@ static const char *SKINNED_FRAG_SRC =
     "uniform float u_roughness;\n"
     "uniform vec3  u_emission;\n"
     "uniform uint  u_object_id;\n"
+    "uniform sampler2D u_texture;\n"
+    "uniform int u_has_texture;\n"
     "layout(location=0) out vec4 out_albedo;\n"
     "layout(location=1) out vec4 out_normal;\n"
     "layout(location=2) out vec4 out_material;\n"
@@ -359,7 +387,8 @@ static const char *SKINNED_FRAG_SRC =
     "layout(location=5) out uint out_object_id;\n"
     "void main() {\n"
     "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
-    "  out_albedo    = vec4(u_base_color, 1.0);\n"
+    "  vec3 albedo = u_has_texture != 0 ? texture(u_texture, v_uv).rgb * u_base_color : u_base_color;\n"
+    "  out_albedo    = vec4(albedo, 1.0);\n"
     "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
     "  out_material  = vec4(u_metallic, u_roughness, 0.0, 0.0);\n"
     "  out_emissive  = vec4(u_emission, 0.0);\n"
@@ -373,12 +402,14 @@ static const char *SKINNED_VERT_SRC_FMT =
     "#version 330 core\n"
     "in vec3 a_pos;\n"
     "in vec3 a_normal;\n"
+    "in vec2 a_uv;\n"
     "in vec4 a_bone_idx;\n"
     "in vec4 a_bone_wgt;\n"
     "uniform mat4 u_mvp;\n"
     "uniform mat4 u_prev_mvp;\n"
     "uniform mat4 u_bones[%d];\n"
     "out vec3 v_normal;\n"
+    "out vec2 v_uv;\n"
     "out vec3 v_clip_curr;\n"
     "out vec3 v_clip_prev;\n"
     "void main() {\n"
@@ -393,11 +424,13 @@ static const char *SKINNED_VERT_SRC_FMT =
     "  vec4 clip_prev = u_prev_mvp * skinned_pos;\n"
     "  v_clip_prev = vec3(clip_prev.xy, clip_prev.w);\n"
     "  v_normal = mat3(skin) * a_normal;\n"
+    "  v_uv = a_uv;\n"
     "}\n";
 
 static const char *SKINNED_FRAG_SRC =
     "#version 330 core\n"
     "in vec3 v_normal;\n"
+    "in vec2 v_uv;\n"
     "in vec3 v_clip_curr;\n"
     "in vec3 v_clip_prev;\n"
     "uniform vec3  u_base_color;\n"
@@ -405,6 +438,8 @@ static const char *SKINNED_FRAG_SRC =
     "uniform float u_roughness;\n"
     "uniform vec3  u_emission;\n"
     "uniform uint  u_object_id;\n"
+    "uniform sampler2D u_texture;\n"
+    "uniform int u_has_texture;\n"
     "layout(location=0) out vec4 out_albedo;\n"
     "layout(location=1) out vec4 out_normal;\n"
     "layout(location=2) out vec4 out_material;\n"
@@ -413,7 +448,8 @@ static const char *SKINNED_FRAG_SRC =
     "layout(location=5) out uint out_object_id;\n"
     "void main() {\n"
     "  vec3 n = gl_FrontFacing ? normalize(v_normal) : -normalize(v_normal);\n"
-    "  out_albedo    = vec4(u_base_color, 1.0);\n"
+    "  vec3 albedo = u_has_texture != 0 ? texture(u_texture, v_uv).rgb * u_base_color : u_base_color;\n"
+    "  out_albedo    = vec4(albedo, 1.0);\n"
     "  out_normal    = vec4(n * 0.5 + 0.5, 0.0);\n"
     "  out_material  = vec4(u_metallic, u_roughness, 0.0, 0.0);\n"
     "  out_emissive  = vec4(u_emission, 0.0);\n"
@@ -584,6 +620,7 @@ static unsigned int link_pbr_program(const char *vsrc, const char *fsrc) {
     glBindAttribLocation(p, 3, "a_metallic");
     glBindAttribLocation(p, 4, "a_roughness");
     glBindAttribLocation(p, 5, "a_emission");
+    glBindAttribLocation(p, 6, "a_uv");
     glLinkProgram(p);
     int ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
     if (!ok) {
@@ -612,6 +649,7 @@ static unsigned int link_skinned_program(const char *vsrc_fmt, const char *fsrc)
     glBindAttribLocation(p, 1, "a_normal");
     glBindAttribLocation(p, 2, "a_bone_idx");
     glBindAttribLocation(p, 3, "a_bone_wgt");
+    glBindAttribLocation(p, 4, "a_uv");
     glLinkProgram(p);
     int ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
     if (!ok) {
@@ -678,6 +716,8 @@ Renderer *renderer_create(int width, int height) {
     r->pbr_u_mvp      = glGetUniformLocation(r->pbr_program, "u_mvp");
     r->pbr_u_prev_mvp = glGetUniformLocation(r->pbr_program, "u_prev_mvp");
     r->pbr_u_object_id = glGetUniformLocation(r->pbr_program, "u_object_id");
+    r->pbr_u_texture     = glGetUniformLocation(r->pbr_program, "u_texture");
+    r->pbr_u_has_texture = glGetUniformLocation(r->pbr_program, "u_has_texture");
     printf("[renderer] pbr_prog=%u pbr_mvp=%d pbr_prev_mvp=%d\n",
            r->pbr_program, r->pbr_u_mvp, r->pbr_u_prev_mvp);
 
@@ -690,6 +730,8 @@ Renderer *renderer_create(int width, int height) {
     r->skinned_u_roughness  = glGetUniformLocation(r->skinned_program, "u_roughness");
     r->skinned_u_emission   = glGetUniformLocation(r->skinned_program, "u_emission");
     r->skinned_u_bones      = glGetUniformLocation(r->skinned_program, "u_bones");
+    r->skinned_u_texture     = glGetUniformLocation(r->skinned_program, "u_texture");
+    r->skinned_u_has_texture = glGetUniformLocation(r->skinned_program, "u_has_texture");
     printf("[renderer] skinned_prog=%u skinned_mvp=%d skinned_bones=%d\n",
            r->skinned_program, r->skinned_u_mvp, r->skinned_u_bones);
 
@@ -842,8 +884,29 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void*)(10*sizeof(float)));
     glEnableVertexAttribArray(5);
     glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, stride, (void*)(11*sizeof(float)));
+    glEnableVertexAttribArray(6);
+    glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, stride, (void*)(14*sizeof(float)));
 
-    glDrawArrays(GL_TRIANGLES, 0, obj->render_mesh->count);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(r->pbr_u_texture, 0);
+
+    /* One draw call per texture group (see MeshBatch/RenderMesh::batches,
+     * populated by meshobject_build_render_mesh_from_halfedge) -- a plain,
+     * untextured object (batch_count==0, e.g. anything built by mesh_edit.c
+     * rather than imported from a textured glTF) falls back to the single
+     * whole-object range this function always drew before batching existed. */
+    if (obj->render_mesh->batch_count == 0) {
+        glUniform1i(r->pbr_u_has_texture, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDrawArrays(GL_TRIANGLES, 0, obj->render_mesh->count);
+    } else {
+        for (int b = 0; b < obj->render_mesh->batch_count; b++) {
+            const MeshBatch *batch = &obj->render_mesh->batches[b];
+            glUniform1i(r->pbr_u_has_texture, batch->texture != 0);
+            glBindTexture(GL_TEXTURE_2D, batch->texture);
+            glDrawArrays(GL_TRIANGLES, batch->start, batch->count);
+        }
+    }
     gl_check("draw_mesh_object");
 
     glDisableVertexAttribArray(0);
@@ -852,6 +915,7 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     glDisableVertexAttribArray(3);
     glDisableVertexAttribArray(4);
     glDisableVertexAttribArray(5);
+    glDisableVertexAttribArray(6);
 }
 
 /* Phase 4's real GPU vertex skinning (see skinned_mesh_object.h,
@@ -870,7 +934,7 @@ void renderer_draw_skinned_mesh(Renderer *r, SkinnedMeshObject *obj, unsigned in
                      obj->mesh.verts, GL_STATIC_DRAW);
         glGenBuffers(1, &obj->ebo);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, obj->ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (long)obj->mesh.index_count * (long)sizeof(uint16_t),
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (long)obj->mesh.index_count * (long)sizeof(uint32_t),
                      obj->mesh.indices, GL_STATIC_DRAW);
         obj->gpu_uploaded = 1;
         gl_check("renderer_draw_skinned_mesh upload");
@@ -916,14 +980,39 @@ void renderer_draw_skinned_mesh(Renderer *r, SkinnedMeshObject *obj, unsigned in
     glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, bone_idx));
     glEnableVertexAttribArray(3);
     glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, bone_wgt));
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, uv));
 
-    glDrawElements(GL_TRIANGLES, obj->mesh.index_count, GL_UNSIGNED_SHORT, (void*)0);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(r->skinned_u_texture, 0);
+
+    /* One draw call per submesh (see SkinnedSubmesh, populated by
+     * skinned_mesh_load_gltf) -- u_base_color is per-draw-call here (unlike
+     * MeshObject's per-vertex a_base_color), so each submesh's own resolved
+     * tint is set right alongside its texture before its own glDrawElements,
+     * overriding the whole-object obj->base_color uniform set above for the
+     * duration of this draw only. index_start is in INDICES, not bytes --
+     * the (void*) offset glDrawElements wants is byte-addressed, hence the
+     * explicit *sizeof(uint32_t). */
+    if (obj->mesh.submesh_count == 0) {
+        glDrawElements(GL_TRIANGLES, obj->mesh.index_count, GL_UNSIGNED_INT, (void*)0);
+    } else {
+        for (int s = 0; s < obj->mesh.submesh_count; s++) {
+            const SkinnedSubmesh *sub = &obj->mesh.submeshes[s];
+            glUniform3f(r->skinned_u_base_color, sub->base_color[0], sub->base_color[1], sub->base_color[2]);
+            glUniform1i(r->skinned_u_has_texture, sub->texture != 0);
+            glBindTexture(GL_TEXTURE_2D, sub->texture);
+            glDrawElements(GL_TRIANGLES, sub->index_count, GL_UNSIGNED_INT,
+                            (void*)(size_t)((size_t)sub->index_start * sizeof(uint32_t)));
+        }
+    }
     gl_check("draw_skinned_mesh");
 
     glDisableVertexAttribArray(0);
     glDisableVertexAttribArray(1);
     glDisableVertexAttribArray(2);
     glDisableVertexAttribArray(3);
+    glDisableVertexAttribArray(4);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 

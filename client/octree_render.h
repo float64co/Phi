@@ -17,12 +17,32 @@
 #define VERTEX_STRIDE 7  /* floats per vertex */
 #define VERTS_PER_QUAD 6 /* 2 tris */
 
+/* One texture/material draw range within a RenderMesh's own vertex buffer
+ * -- [start, start+count) is a glDrawArrays range, `texture` a real GL
+ * texture name (0 = none, flat per-vertex base_color only, see HEFace::
+ * texture's own comment). Lets renderer_draw_mesh_object issue one draw
+ * call per texture group instead of one for a whole multi-material glTF
+ * import (see meshobject_build_render_mesh_from_halfedge, which is what
+ * actually populates RenderMesh::batches -- computed alongside the flat
+ * vertex buffer it already builds, not a separate pass over hem). Only
+ * MeshObject's PBR path uses this; the generic VERTEX_STRIDE=7 users
+ * (world/ground/players/rockets) just leave batch_count at 0. */
+typedef struct {
+    int start;
+    int count;
+    unsigned int texture;
+} MeshBatch;
+
+#define MESHOBJECT_MAX_BATCHES 64
+
 typedef struct {
     float  *data;       /* interleaved vertex data */
     int     count;      /* number of vertices */
     int     capacity;   /* allocated vertices */
     unsigned int vbo;   /* GL VBO handle */
     int     dirty;      /* needs re-upload */
+    MeshBatch batches[MESHOBJECT_MAX_BATCHES];
+    int       batch_count;   /* 0 = no batches -- caller draws [0,count) as one untextured range */
 } RenderMesh;
 
 RenderMesh *mesh_create(void);

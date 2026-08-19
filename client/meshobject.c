@@ -226,17 +226,29 @@ static void face_normal(const HalfEdgeMesh *hem, const int *verts, float *n) {
 
 void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeMesh *hem) {
     out->count = 0;
+    out->batch_count = 0;
     /* out->data may have been allocated by the generic mesh_create() (sized
      * for octree_render.h's VERTEX_STRIDE=7), but this function's layout is
-     * MESHOBJ_VERTEX_STRIDE=14 floats/vertex -- correct the underlying
+     * MESHOBJ_VERTEX_STRIDE=16 floats/vertex -- correct the underlying
      * buffer size for OUR stride up front (a no-op on later calls, once
      * it's already sized right) rather than assuming whatever capacity was
      * inherited is already byte-sized correctly. A bit more memory than the
-     * bare minimum (mesh_create's ~262k-vertex default capacity, now at 14
+     * bare minimum (mesh_create's ~262k-vertex default capacity, now at 16
      * floats/vertex instead of 7), but still trivial in absolute terms for
      * this phase's single test-object slot. */
     if (out->capacity < 1) out->capacity = 1;
     out->data = (float *)realloc(out->data, (size_t)out->capacity * MESHOBJ_VERTEX_STRIDE * sizeof(float));
+    /* Batches: a new one starts whenever a live face's texture differs from
+     * the previous live face's -- correct without an explicit sort because
+     * halfedge_gltf.c's own loader (walk_node/append_primitive) already
+     * appends every primitive's faces contiguously in file order, and one
+     * primitive has exactly one resolved texture. A hand-authored/edited
+     * mesh (mesh_edit.c) never sets HEFace::texture at all, so it stays 0
+     * throughout and this whole loop just produces a single batch{0,count,0}
+     * -- identical behavior to having no batches at all, see the caller's
+     * own fallback for batch_count==0. */
+    unsigned int cur_batch_texture = 0;
+    int have_batch = 0;
     for (int f = 0; f < hem->face_count; f++) {
         if (hem->faces[f].deleted) continue;
         const HEFace *face = &hem->faces[f];
@@ -244,12 +256,32 @@ void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeM
         halfedge_face_verts(hem, f, verts);
         float n[3];
         face_normal(hem, verts, n);
+
+        if (!have_batch || face->texture != cur_batch_texture) {
+            if (out->batch_count < MESHOBJECT_MAX_BATCHES) {
+                MeshBatch *b = &out->batches[out->batch_count++];
+                b->start = out->count;
+                b->count = 0;
+                b->texture = face->texture;
+                cur_batch_texture = face->texture;
+                have_batch = 1;
+            }
+            /* MESHOBJECT_MAX_BATCHES reached: fall through and let this
+             * face's vertices keep accumulating into the last real batch
+             * rather than being dropped -- a real, honest degradation
+             * (extra materials visually merge into whichever batch came
+             * right before the cap) matching skinned_mesh.c's own
+             * SKINNED_MESH_MAX_SUBMESHES behavior, not a crash or a
+             * silently-missing chunk of the model. */
+        }
+
         for (int i = 0; i < 3; i++) {
             if (out->count >= out->capacity) {
                 out->capacity *= 2;
                 out->data = (float *)realloc(out->data, (size_t)out->capacity * MESHOBJ_VERTEX_STRIDE * sizeof(float));
             }
-            const float *p = hem->verts[verts[i]].pos;
+            const HEVertex *hv = &hem->verts[verts[i]];
+            const float *p = hv->pos;
             float *v = out->data + out->count * MESHOBJ_VERTEX_STRIDE;
             v[0] = p[0]; v[1] = p[1]; v[2] = p[2];
             v[3] = n[0]; v[4] = n[1]; v[5] = n[2];
@@ -257,8 +289,10 @@ void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeM
             v[9]  = face->metallic;
             v[10] = face->roughness;
             v[11] = face->emission[0]; v[12] = face->emission[1]; v[13] = face->emission[2];
+            v[14] = hv->uv[0]; v[15] = hv->uv[1];
             out->count++;
         }
+        if (out->batch_count > 0) out->batches[out->batch_count - 1].count += 3;
     }
     out->dirty = 1;
 }

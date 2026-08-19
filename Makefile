@@ -269,6 +269,7 @@ ENGINE_CORE_SRCS := \
 	$(SRCDIR)/chat.c          \
 	$(SRCDIR)/halfedge.c      \
 	$(SRCDIR)/halfedge_gltf.c \
+	$(SRCDIR)/texture_cache.c \
 	$(SRCDIR)/meshobject.c    \
 	$(SRCDIR)/mesh_edit.c     \
 	$(SRCDIR)/node_graph.c    \
@@ -286,6 +287,7 @@ ENGINE_CORE_SRCS := \
 	$(SRCDIR)/fracture_body.c \
 	$(SRCDIR)/path_tracer.c   \
 	$(SRCDIR)/skinned_mesh_object.c \
+	$(SRCDIR)/skinned_scene_objects.c \
 	$(SRCDIR)/ragdoll.c       \
 	$(SRCDIR)/font.c          \
 	$(SRCDIR)/svg_icon.c      \
@@ -463,6 +465,22 @@ PLAYER_WASM_SRCS := $(ENGINE_CORE_SRCS) $(SRCDIR)/player_main.c $(SRCDIR)/phi_pl
 
 PLAYER_WASM_CFLAGS := $(WASM_CFLAGS) $(PHI_GAME_HAS_C_ENTRY)
 
+# game/assets/ has full-size normal/metallicRoughness maps (see resolve_
+# material's own comment in halfedge_gltf.c/skinned_mesh.c -- this
+# renderer has no tangent-space machinery to consume them, so they're
+# never actually read) alongside the baseColor textures that ARE used --
+# for the native build that's harmless (texture_cache_load only ever
+# opens what a material actually references), but Emscripten's --preload-
+# file bundles a WHOLE directory unconditionally, and game/assets/
+# notfreedom's own normal maps alone are ~700MB of dead weight in that
+# bundle (936MB total vs. ~280MB of what's actually loaded). This stages
+# only *.gltf/*.bin/*_baseColor.*/license.txt into a build/ scratch
+# mirror and preloads THAT instead -- real files, not a placeholder or
+# stub, just the subset this renderer can actually use. Must be defined
+# BEFORE PLAYER_EMFLAGS below, which references it -- := is immediate-
+# expansion, so a forward reference here would silently expand to empty.
+WASM_GAME_ASSETS_STAGE := $(BUILDDIR)/wasm_game_assets
+
 PLAYER_EMFLAGS := \
 	-s WASM=1 \
 	-s USE_WEBGL2=1 \
@@ -477,7 +495,8 @@ PLAYER_EMFLAGS := \
 	-s MODULARIZE=0 \
 	-s ENVIRONMENT=web \
 	--js-library $(SRCDIR)/library_ws_stub.js \
-	--embed-file assets@assets \
+	--preload-file assets@assets \
+	--preload-file $(WASM_GAME_ASSETS_STAGE)@game/assets \
 	-lGL \
 	-lwebsocket.js \
 	-lm
@@ -488,6 +507,12 @@ OUT_PLAYER_WASM := $(WWWDIR)/player.wasm
 player_wasm: $(WWWDIR) $(OUT_PLAYER_JS)
 
 $(OUT_PLAYER_JS): $(PLAYER_WASM_SRCS) $(HDRS) assets/cube.gltf assets/cube.bin | $(WWWDIR)
+	rm -rf $(WASM_GAME_ASSETS_STAGE)
+	mkdir -p $(WASM_GAME_ASSETS_STAGE)
+	rsync -a --prune-empty-dirs \
+		--include='*/' --include='*.gltf' --include='*.bin' --include='*_baseColor.*' --include='license.txt' \
+		--exclude='*' \
+		game/assets/ $(WASM_GAME_ASSETS_STAGE)/
 	$(WASM_CC) $(PLAYER_WASM_CFLAGS) $(PLAYER_EMFLAGS) $(PLAYER_WASM_SRCS) -o $(OUT_PLAYER_JS)
 	@echo "player_wasm build complete -> $(OUT_PLAYER_JS) + $(OUT_PLAYER_WASM)"
 

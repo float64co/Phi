@@ -68,8 +68,12 @@ typedef struct {
  *   metallic:   1 x float ( 4 bytes)
  *   roughness:  1 x float ( 4 bytes)
  *   emission:   3 x float (12 bytes)
+ *   uv:         2 x float ( 8 bytes) -- added 2026-08-19 for real textured
+ *               glTF imports (see HEVertex::uv, HEFace::texture); a face
+ *               with no texture (HEFace::texture == 0) just carries all-
+ *               zero uv here, harmlessly unused by the shader in that case.
  */
-#define MESHOBJ_VERTEX_STRIDE 14
+#define MESHOBJ_VERTEX_STRIDE 16
 
 Quat quat_identity(void);
 

@@ -77,3 +77,28 @@ void skinned_mesh_object_update(SkinnedMeshObject *obj, float dt);
  * renderer.c's job, since this file never touches GL; main.c's own
  * teardown calls both). Safe on an already-freed or zeroed object. */
 void skinned_mesh_object_free(SkinnedMeshObject *obj);
+
+/* Local-space AABB (min/max corners) of obj's CURRENT skinned pose (obj->
+ * skin, already valid right after skinned_mesh_object_load -- see its
+ * own comment on seeding rest pose) -- deliberately NOT a raw scan of
+ * obj->mesh.verts' own bind-pose positions (meshobject_local_aabb_half_
+ * extents' similarly-shaped counterpart for a HalfEdgeMesh IS a raw scan,
+ * correct there since a static mesh has no skin matrix in play at all).
+ * A skinned character's bind-pose data can sit in a completely different
+ * orientation than its actual on-screen pose whenever a topmost joint's
+ * real ancestor chain carried a correction armature_load_from_skin now
+ * folds into that joint's rest transform (see its own comment) -- e.g. a
+ * Z-up-authored rig's standard export-time Z-up-to-Y-up fix. Scanning
+ * raw bind-pose Y in that case measures the character's PRE-correction
+ * depth, not its real height, silently producing a wildly wrong scale
+ * factor (and a wrong ground-contact Y) for anything derived from it --
+ * exactly what made an otherwise-correctly-oriented character render
+ * huge even after the armature fix corrected its orientation. This
+ * applies the SAME per-vertex weighted skin-matrix blend renderer_draw_
+ * skinned_mesh's own vertex shader does (see SKINNED_VERT_SRC_FMT), just
+ * on the CPU, so the measured bounds match what actually ends up on
+ * screen -- full min/max (not just half-extents) so a caller can derive
+ * BOTH a height-based scale factor (max.y-min.y) and a ground-contact Y
+ * offset (min.y) from one properly-skinned scan, instead of needing a
+ * second pass. Returns 0 (out untouched) if obj->mesh has no vertices. */
+int skinned_mesh_object_local_aabb(const SkinnedMeshObject *obj, Vec3f *out_min, Vec3f *out_max);

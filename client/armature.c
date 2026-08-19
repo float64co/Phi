@@ -1,6 +1,7 @@
 #include "armature.h"
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 /* Column-major 4x4 multiply, out = a*b -- identical formula to renderer.c's
  * own mat4_mul, deliberately duplicated here (not #include "renderer.h")
@@ -34,6 +35,65 @@ static void mat4_from_trs(Vec3f t, Quat r, Vec3f s, float *out) {
     out[4]  = rot[4]  * s.y; out[5]  = rot[5]  * s.y; out[6]  = rot[6]  * s.y; out[7]  = 0.0f;
     out[8]  = rot[8]  * s.z; out[9]  = rot[9]  * s.z; out[10] = rot[10] * s.z; out[11] = 0.0f;
     out[12] = t.x; out[13] = t.y; out[14] = t.z; out[15] = 1.0f;
+}
+
+/* Decomposes a column-major TRS-only 4x4 matrix (no shear -- every
+ * matrix this is ever called on is either cgltf_node_transform_world's
+ * own output, itself a product of pure TRS node transforms, or an
+ * identity-seeded product of one, so shear can't arise) into translation/
+ * rotation/scale. Standard trace-based (Shepperd's method) rotation-
+ * matrix-to-quaternion conversion -- picks whichever of the 4 branches
+ * has the largest denominator to avoid dividing by ~0, the well-known
+ * numerically-stable form (naively always using the trace>0 branch blows
+ * up near 180-degree rotations). Used by armature_load_from_skin below
+ * to fold a topmost joint's real ancestor-chain world transform (e.g. a
+ * glTF file's own Z-up-to-Y-up corrective root rotation, sitting above
+ * the skeleton rather than baked into any joint) into that joint's own
+ * rest pose, rather than silently dropping it -- see that function's own
+ * comment for why this matters. */
+static void mat4_decompose_trs(const float *m, Vec3f *out_t, Quat *out_r, Vec3f *out_s) {
+    out_t->x = m[12]; out_t->y = m[13]; out_t->z = m[14];
+
+    float sx = sqrtf(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]);
+    float sy = sqrtf(m[4]*m[4] + m[5]*m[5] + m[6]*m[6]);
+    float sz = sqrtf(m[8]*m[8] + m[9]*m[9] + m[10]*m[10]);
+    out_s->x = sx; out_s->y = sy; out_s->z = sz;
+    if (sx < 1e-8f) sx = 1.0f;
+    if (sy < 1e-8f) sy = 1.0f;
+    if (sz < 1e-8f) sz = 1.0f;
+
+    float r00 = m[0]/sx, r10 = m[1]/sx, r20 = m[2]/sx;
+    float r01 = m[4]/sy, r11 = m[5]/sy, r21 = m[6]/sy;
+    float r02 = m[8]/sz, r12 = m[9]/sz, r22 = m[10]/sz;
+
+    float trace = r00 + r11 + r22;
+    float qx, qy, qz, qw;
+    if (trace > 0.0f) {
+        float s = sqrtf(trace + 1.0f) * 2.0f;
+        qw = 0.25f * s;
+        qx = (r21 - r12) / s;
+        qy = (r02 - r20) / s;
+        qz = (r10 - r01) / s;
+    } else if (r00 > r11 && r00 > r22) {
+        float s = sqrtf(1.0f + r00 - r11 - r22) * 2.0f;
+        qw = (r21 - r12) / s;
+        qx = 0.25f * s;
+        qy = (r01 + r10) / s;
+        qz = (r02 + r20) / s;
+    } else if (r11 > r22) {
+        float s = sqrtf(1.0f + r11 - r00 - r22) * 2.0f;
+        qw = (r02 - r20) / s;
+        qx = (r01 + r10) / s;
+        qy = 0.25f * s;
+        qz = (r12 + r21) / s;
+    } else {
+        float s = sqrtf(1.0f + r22 - r00 - r11) * 2.0f;
+        qw = (r10 - r01) / s;
+        qx = (r02 + r20) / s;
+        qy = (r12 + r21) / s;
+        qz = 0.25f * s;
+    }
+    out_r->x = qx; out_r->y = qy; out_r->z = qz; out_r->w = qw;
 }
 
 /* Nearest glTF-hierarchy ancestor of `node` that's also one of `joints`
@@ -126,6 +186,39 @@ int armature_load_from_skin(const cgltf_skin *skin, Armature *out) {
         b->rest_scale = node->has_scale
             ? (Vec3f){node->scale[0], node->scale[1], node->scale[2]}
             : (Vec3f){1.0f, 1.0f, 1.0f};
+
+        /* A topmost joint (b->parent == -1, i.e. its cgltf-level parent
+         * isn't itself one of this skin's joints -- see find_joint_
+         * ancestor's own comment) can still have a REAL cgltf ancestor
+         * chain above it that's just not part of the skeleton -- most
+         * commonly a scene-root node carrying a corrective rotation
+         * (a Z-up-authored rig's standard Z-up-to-Y-up fix on export,
+         * exactly what game/assets/swat_operator/scene.gltf's own
+         * "Sketchfab_model" root node does). armature_compute_world_
+         * transforms treats parent==-1 as "this bone's own rest transform
+         * IS its world transform" -- so silently using just the joint's
+         * own local TRS here would drop that correction entirely, and
+         * since the file's inverseBindMatrices were computed BY the
+         * export tool assuming that correction IS present, the result
+         * wouldn't even be self-consistent at rest pose (skin_matrix =
+         * world*inverse_bind stops being identity) -- this is what made
+         * an otherwise-correctly-loaded, correctly-scaled character
+         * render lying on its back. Folding the ancestor chain's real
+         * world transform (cgltf_node_transform_world already walks
+         * every ancestor, not just the immediate parent) into this
+         * joint's own rest transform keeps the rest of the pipeline
+         * (armature_compute_world_transforms/_skinning_matrices, both
+         * unmodified) working exactly as before -- this joint's "local"
+         * transform now just happens to already include what used to be
+         * missing. */
+        if (b->parent == -1 && node->parent) {
+            cgltf_float ancestor_world[16];
+            cgltf_node_transform_world(node->parent, ancestor_world);
+            float joint_local[16], composed[16];
+            mat4_from_trs(b->rest_translation, b->rest_rotation, b->rest_scale, joint_local);
+            mat4_mul(composed, ancestor_world, joint_local);
+            mat4_decompose_trs(composed, &b->rest_translation, &b->rest_rotation, &b->rest_scale);
+        }
 
         /* cgltf_accessor_read_float, not raw buffer_view pointer math --
          * correctly handles a non-default stride/sparse accessor, same

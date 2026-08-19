@@ -5,6 +5,8 @@
 #include "console.h"
 #include "phi_platform.h"
 #include "halfedge_gltf.h"
+#include "skinned_mesh.h"
+#include "texture_cache.h"
 #include "meshobject.h"
 #include "phi_physics.h"
 #include "mesh_edit.h"
@@ -17,6 +19,7 @@
 #include "scene_target.h"
 #include "fracture_body.h"
 #include "scene_objects.h"
+#include "skinned_scene_objects.h"
 #include "node_graph.h"
 #include "render_hooks.h"
 #include "input_gamepad.h"
@@ -339,6 +342,24 @@ static void scene_content_cb(void *userdata) {
     renderer_draw_lights(g_renderer);
     fracture_body_sync_and_draw_all(g_renderer);
     if (g_skinned_test_loaded) renderer_draw_skinned_mesh(g_renderer, &g_skinned_test_obj, SKINNED_TEST_ID_BASE + 1u);
+
+    /* Every live skinned scene object (skinned_scene_objects.h) -- the
+     * registry-based twin of the MeshObject loop above, added 2026-08-19
+     * so game/src/*.c code (or any future editor feature) that spawns a
+     * real animated character gets it drawn automatically, the same way
+     * a MeshObject already does, rather than needing its own one-off
+     * hardcoded slot the way g_skinned_test_obj above still is. Object-id
+     * range 7000+id, alongside MeshObjects' 4000+id/Lights' 5000+id/the
+     * skinned test slot's own SKINNED_TEST_ID_BASE (see ui.h's own
+     * comment on this convention). */
+    {
+        SkinnedMeshObject *skinned_objs[SKINNED_SCENE_MAX_OBJECTS];
+        int n_skinned = skinned_scene_object_get_all(skinned_objs);
+        for (int i = 0; i < n_skinned; i++) {
+            renderer_draw_skinned_mesh(g_renderer, skinned_objs[i],
+                                        7000u + (unsigned int)skinned_scene_object_id(skinned_objs[i]));
+        }
+    }
 }
 
 /* Fixed output resolution for Phase 3's offline path tracer (see path_
@@ -786,6 +807,14 @@ static void main_loop(void *userdata) {
      * activation, which spawns SEPARATE capsule bodies -- see ragdoll.h --
      * rather than attaching one to this object directly). */
     if (g_skinned_test_loaded) skinned_mesh_object_update(&g_skinned_test_obj, dt);
+    /* Every live skinned scene object (skinned_scene_objects.h) -- same
+     * per-frame CPU pose->world->skin advance as the test object above,
+     * just looped across the real registry instead of one fixed slot. */
+    {
+        SkinnedMeshObject *skinned_objs[SKINNED_SCENE_MAX_OBJECTS];
+        int n_skinned = skinned_scene_object_get_all(skinned_objs);
+        for (int i = 0; i < n_skinned; i++) skinned_mesh_object_update(skinned_objs[i], dt);
+    }
     /* Syncs EVERY live scene object that has a physics body (most don't --
      * phys_body is NULL by default, see meshobject.h -- so this loop is a
      * no-op read for the common case), not just one fixed slot. */
@@ -1921,11 +1950,23 @@ int main(void) {
     g_gbuf = gbuffer_create(w, h);
     if (!ui_init()) printf("[main] WARNING: ui_init() failed -- editor UI will not render correctly\n");
 
+    /* Real texture loading for glTF imports (see texture_cache.h's own
+     * comment) -- must run AFTER renderer_create/GL context exists
+     * (texture_cache_load calls real glGenTextures/glTexImage2D), and
+     * BEFORE any halfedge_load_gltf/skinned_mesh_load_gltf call that
+     * should actually resolve textures rather than leave every material's
+     * texture at 0 (see halfedge_gltf_register_texture_loader's own
+     * comment on why this is a function-pointer registration, not a
+     * direct #include/call, in the first place). */
+    halfedge_gltf_register_texture_loader(texture_cache_load);
+    skinned_mesh_register_texture_loader(texture_cache_load);
+
     /* Real multi-object scene graph (Phase 5, see scene_objects.h) --
      * cleared once here, same convention every other bounded registry
      * (light.c/fracture_body.c/ragdoll.c) already uses. Must run BEFORE
      * spawn_test_mesh_object below, which allocates the first slot. */
     scene_objects_init();
+    skinned_scene_objects_init();
 
     /* Phase 6 node graphs (see phi.md's "Geometry and Animation Nodes")
      * -- cleared once here, same registry-init convention as scene_

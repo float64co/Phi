@@ -39,7 +39,11 @@
 #include "renderer.h"
 #include "gbuffer.h"
 #include "scene_objects.h"
+#include "skinned_scene_objects.h"
 #include "meshobject.h"
+#include "halfedge_gltf.h"
+#include "skinned_mesh.h"
+#include "texture_cache.h"
 #include "phi_physics.h"
 #include "node_graph.h"
 #include "render_hooks.h"
@@ -171,6 +175,14 @@ static void player_render(void) {
         int n_objects = scene_object_get_all(objects);
         for (int i = 0; i < n_objects; i++) renderer_draw_mesh_object(g_renderer, objects[i]);
         renderer_draw_lights(g_renderer);
+        /* Every live skinned scene object -- object-id range 7000+id, same
+         * convention editor_main.c's own scene_content_cb uses. */
+        SkinnedMeshObject *skinned_objs[SKINNED_SCENE_MAX_OBJECTS];
+        int n_skinned = skinned_scene_object_get_all(skinned_objs);
+        for (int i = 0; i < n_skinned; i++) {
+            renderer_draw_skinned_mesh(g_renderer, skinned_objs[i],
+                                        7000u + (unsigned int)skinned_scene_object_id(skinned_objs[i]));
+        }
     }
     /* See editor_main.c's own scene_content_cb/draw_panel_scene comment
      * on why NULL here: no shadow-casting geometry source in the generic
@@ -198,6 +210,14 @@ static void player_loop(void *userdata) {
     update_audio_listener();
 
     phi_physics_world_step(g_phys_world, dt);
+    /* Every live skinned scene object (skinned_scene_objects.h) -- real
+     * per-frame CPU pose->world->skin advance, same convention editor_
+     * main.c's own main_loop uses for its skinned test object/registry. */
+    {
+        SkinnedMeshObject *skinned_objs[SKINNED_SCENE_MAX_OBJECTS];
+        int n_skinned = skinned_scene_object_get_all(skinned_objs);
+        for (int i = 0; i < n_skinned; i++) skinned_mesh_object_update(skinned_objs[i], dt);
+    }
     {
         MeshObject *objects[SCENE_MAX_OBJECTS];
         int n_objects = scene_object_get_all(objects);
@@ -274,6 +294,12 @@ int main(void) {
     g_renderer = renderer_create(w, h);
     g_gbuf = gbuffer_create(w, h);
 
+    /* Real texture loading for glTF imports -- see editor_main.c's own
+     * identical registration for why this must run after renderer_create
+     * (GL context) and before any glTF load. */
+    halfedge_gltf_register_texture_loader(texture_cache_load);
+    skinned_mesh_register_texture_loader(texture_cache_load);
+
     /* Real, non-degenerate starting vantage point (Phase 9 gap-closing,
      * 2026-08-18 -- see phi.md's Phase 9 "Known gaps": this used to be
      * left at renderer_create's calloc-zeroed default, (0,0,0) looking
@@ -289,6 +315,7 @@ int main(void) {
     renderer_set_camera(g_renderer, (Vec3f){128.0f, 120.0f, 40.0f}, 0.0f, -0.4f);
 
     scene_objects_init();
+    skinned_scene_objects_init();
     phi_graph_system_init();
     render_hooks_init();
     phi_gamepad_init();

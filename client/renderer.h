@@ -9,14 +9,16 @@
  * renderer_draw_skinned_mesh) -- deliberately smaller than Armature's own
  * CPU-side ARMATURE_MAX_BONES=256 cap: a real GLSL uniform array of 256
  * mat4 (1024 vec4-equivalents) risks exceeding GLES3's guaranteed-minimum
- * per-stage uniform budget on some real hardware, where 64 (256
- * vec4-equivalents) comfortably does not. This project's actual test/
- * character content (assets/test/armature_test.gltf) uses 3 bones --
- * 64 is generous headroom over that, not a tight-fitting number. An
- * armature with MORE than 64 bones simply has its excess bones' skinning
- * silently ignored (renderer_draw_skinned_mesh clamps the upload count),
- * a real, honestly flagged scope limit, not a crash. */
-#define SKINNED_SHADER_MAX_BONES 64
+ * per-stage uniform budget on some real hardware, where 128 (512
+ * vec4-equivalents) comfortably does not. Bumped 2026-08-19 from the
+ * original 64 -- this project's first real character imports
+ * (game/assets/swat_operator, game/assets/notfreedom) have skins with up
+ * to 66 joints, already past 64; 128 is generous headroom over that, not
+ * a tight-fitting number. An armature with MORE than 128 bones simply has
+ * its excess bones' skinning silently ignored (renderer_draw_skinned_mesh
+ * clamps the upload count), a real, honestly flagged scope limit, not a
+ * crash. */
+#define SKINNED_SHADER_MAX_BONES 128
 
 typedef struct {
     /* WebGL program */
@@ -63,6 +65,8 @@ typedef struct {
     int pbr_u_mvp;
     int pbr_u_prev_mvp;
     int pbr_u_object_id;
+    int pbr_u_texture;       /* uniform sampler2D u_texture -- set to GL_TEXTURE0's unit before each batch */
+    int pbr_u_has_texture;   /* uniform int u_has_texture -- 0/1, per MeshBatch::texture (see renderer_draw_mesh_object) */
 
     /* Phase 4's GPU skinning shader/program (see renderer_draw_skinned_
      * mesh, skinned_mesh_object.h) -- a THIRD program alongside program/
@@ -83,6 +87,8 @@ typedef struct {
     int skinned_u_roughness;
     int skinned_u_emission;
     int skinned_u_bones;   /* uniform mat4 u_bones[SKINNED_SHADER_MAX_BONES] -- glGetUniformLocation of element [0], see renderer_draw_skinned_mesh's glUniformMatrix4fv count argument */
+    int skinned_u_texture;       /* uniform sampler2D u_texture -- set per SkinnedSubmesh, same convention as pbr_u_texture */
+    int skinned_u_has_texture;   /* uniform int u_has_texture -- 0/1, per SkinnedSubmesh::texture */
 
     /* Camera */
     float cam_pos[3];
