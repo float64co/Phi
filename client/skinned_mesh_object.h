@@ -57,6 +57,13 @@ typedef struct {
      * back to 1, for this phase's scope: no runtime skinned-mesh editing
      * exists). 0 = not yet uploaded. */
     unsigned int vbo, ebo;
+    /* Cached VAO, built alongside vbo/ebo the same first-draw-only time
+     * (see gpu_uploaded below) -- element-array-buffer binding lives
+     * INSIDE VAO state (unlike GL_ARRAY_BUFFER's binding, which doesn't),
+     * so once this is built, binding it alone also restores the correct
+     * ebo -- no separate glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ...) needed
+     * per draw any more, see renderer_draw_skinned_mesh. */
+    unsigned int vao;
     int gpu_uploaded;
 } SkinnedMeshObject;
 

@@ -23,7 +23,7 @@
 typedef struct {
     /* WebGL program */
     unsigned int program;
-    unsigned int vao;       /* re-bound before every draw, see bind_renderer_vao in renderer.c */
+    unsigned int vao;       /* bound once at renderer_create (core-profile formality) -- every real draw call binds its own cached, per-mesh VAO instead, see renderer_create's own comment */
 
     /* Uniforms */
     int u_mvp;
@@ -139,6 +139,11 @@ void renderer_end_frame(Renderer *r);
  * success, 0 if the matrix was singular (shouldn't happen for a valid
  * camera, but checked rather than assumed). */
 int renderer_get_inverse_view_proj(const Renderer *r, float *out16);
+
+/* Current camera's forward view-projection matrix (not inverted) --
+ * for frustum.h's frustum_extract, which builds this frame's view
+ * frustum planes directly from it (see renderer.c's own comment). */
+void renderer_get_view_proj(const Renderer *r, float *out16);
 
 /* For future picking/editor use (Phase 1) — the built-in draw_* calls
  * already set sensible per-object ids internally; this is for callers

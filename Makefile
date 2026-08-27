@@ -272,6 +272,7 @@ ENGINE_CORE_SRCS := \
 	$(SRCDIR)/halfedge_gltf.c \
 	$(SRCDIR)/texture_cache.c \
 	$(SRCDIR)/meshobject.c    \
+	$(SRCDIR)/frustum.c       \
 	$(SRCDIR)/mesh_edit.c     \
 	$(SRCDIR)/node_graph.c    \
 	$(SRCDIR)/audio_wav.c     \

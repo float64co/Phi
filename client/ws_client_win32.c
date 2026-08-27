@@ -126,12 +126,84 @@ static int compute_expected_accept(const char *key, char *out_b64, int out_sz) {
     return base64_encode(digest, 20, out_b64, out_sz) < 0 ? -1 : 0;
 }
 
-static int recv_line_buffered(SOCKET sock, char *out, int out_sz) {
+/* Neither the TCP handshake nor the HTTP upgrade response is allowed to
+ * block forever -- ws_client_connect() runs synchronously on the editor's
+ * main thread before the main loop starts (see editor_main.c's call site
+ * comment), so a server that's down, firewalled (silently dropped SYN), or
+ * that accepts the connection and then never replies would otherwise hang
+ * the whole editor process at startup with no way to interact with it. Both
+ * bounds are generous for a local dev server, stingy for anything that
+ * should be treated as "not there". */
+#define WS_CONNECT_TIMEOUT_MS   3000
+#define WS_HANDSHAKE_TIMEOUT_MS 5000
+
+/* Connects `sock` (already created, still blocking) with a bounded wait
+ * instead of relying on the OS's own connect() timeout, which can run well
+ * past what's reasonable for "is a local dev server up" (tens of seconds,
+ * longer still if the target silently drops packets rather than
+ * refusing). Leaves the socket non-blocking on return either way, since the
+ * handshake read below needs that. */
+static int connect_with_timeout(SOCKET sock, const struct sockaddr *addr, int addrlen, int timeout_ms) {
+    u_long nonblocking = 1;
+    ioctlsocket(sock, FIONBIO, &nonblocking);
+
+    if (connect(sock, addr, addrlen) == 0) return 0;   /* connected immediately (e.g. localhost) */
+    if (WSAGetLastError() != WSAEWOULDBLOCK) return -1;
+
+    fd_set wfds, efds;
+    FD_ZERO(&wfds); FD_SET(sock, &wfds);
+    FD_ZERO(&efds); FD_SET(sock, &efds);
+    struct timeval tv;
+    tv.tv_sec  = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int sel = select(0, NULL, &wfds, &efds, &tv);
+    if (sel <= 0 || FD_ISSET(sock, &efds)) return -1;   /* timed out, or connect failed (refused/unreachable) */
+
+    int err = 0, errlen = sizeof(err);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&err, &errlen) != 0 || err != 0) return -1;
+    return 0;
+}
+
+/* Bounded twin of a plain send() loop -- same "must not block forever"
+ * reasoning as connect_with_timeout above. The handshake request is one
+ * small buffer, so this is only ever a handful of iterations in practice;
+ * it exists for the pathological case where the send buffer is full and
+ * never drains. */
+static int send_all_timeout(SOCKET sock, const char *buf, int len, int timeout_ms) {
+    int sent = 0;
+    DWORD start = GetTickCount();
+    while (sent < len) {
+        int n = send(sock, buf + sent, len - sent, 0);
+        if (n > 0) { sent += n; continue; }
+        if (n == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+            int remaining = timeout_ms - (int)(GetTickCount() - start);
+            if (remaining <= 0) return -1;
+            fd_set wfds; FD_ZERO(&wfds); FD_SET(sock, &wfds);
+            struct timeval tv; tv.tv_sec = 0; tv.tv_usec = (remaining < 50 ? remaining : 50) * 1000;
+            select(0, NULL, &wfds, NULL, &tv);
+            continue;
+        }
+        return -1;
+    }
+    return sent;
+}
+
+static int recv_line_buffered(SOCKET sock, char *out, int out_sz, int timeout_ms) {
     int n = 0;
+    DWORD start = GetTickCount();
     while (n < out_sz - 1) {
+        int remaining = timeout_ms - (int)(GetTickCount() - start);
+        if (remaining <= 0) return -1;
+        fd_set rfds; FD_ZERO(&rfds); FD_SET(sock, &rfds);
+        struct timeval tv; tv.tv_sec = remaining / 1000; tv.tv_usec = (remaining % 1000) * 1000;
+        int sel = select(0, &rfds, NULL, NULL, &tv);
+        if (sel <= 0) return -1;   /* timed out or select error */
         char c;
         int r = recv(sock, &c, 1, 0);
-        if (r <= 0) return -1;
+        if (r <= 0) {
+            if (r == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) continue;
+            return -1;
+        }
         out[n++] = c;
         if (n >= 4 && memcmp(out + n - 4, "\r\n\r\n", 4) == 0) {
             out[n] = 0;
@@ -182,12 +254,12 @@ int ws_client_connect(const char *url) {
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (sock == INVALID_SOCKET) continue;
-        if (connect(sock, ai->ai_addr, (int)ai->ai_addrlen) == 0) break;
+        if (connect_with_timeout(sock, ai->ai_addr, (int)ai->ai_addrlen, WS_CONNECT_TIMEOUT_MS) == 0) break;
         closesocket(sock); sock = INVALID_SOCKET;
     }
     freeaddrinfo(res);
     if (sock == INVALID_SOCKET) {
-        printf("[ws_client] connect() failed for %s:%d\n", host, port);
+        printf("[ws_client] connect() failed or timed out for %s:%d\n", host, port);
         return -1;
     }
 
@@ -210,15 +282,15 @@ int ws_client_connect(const char *url) {
         "Sec-WebSocket-Version: 13\r\n"
         "\r\n",
         path, host, port, key_b64);
-    if (send(sock, req, reqlen, 0) != reqlen) {
+    if (send_all_timeout(sock, req, reqlen, WS_HANDSHAKE_TIMEOUT_MS) != reqlen) {
         printf("[ws_client] failed to send handshake request\n");
         closesocket(sock);
         return -1;
     }
 
     char resp[2048];
-    if (recv_line_buffered(sock, resp, sizeof(resp)) < 0) {
-        printf("[ws_client] no/short handshake response\n");
+    if (recv_line_buffered(sock, resp, sizeof(resp), WS_HANDSHAKE_TIMEOUT_MS) < 0) {
+        printf("[ws_client] no/short handshake response (or timed out)\n");
         closesocket(sock);
         return -1;
     }
@@ -243,9 +315,8 @@ int ws_client_connect(const char *url) {
         }
     }
 
-    u_long nonblocking = 1;
-    ioctlsocket(sock, FIONBIO, &nonblocking);
-
+    /* Already non-blocking -- connect_with_timeout put it there, and the
+     * handshake read above needs it that way too. */
     s_sock = sock;
     s_connected = 1;
     s_recvlen = 0;

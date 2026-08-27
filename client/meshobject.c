@@ -249,6 +249,16 @@ void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeM
      * own fallback for batch_count==0. */
     unsigned int cur_batch_texture = 0;
     int have_batch = 0;
+
+    /* Local-space bounds, for frustum.h's culling (RenderMesh::local_bmin/
+     * local_bmax) -- tracked alongside the vertex loop below (same
+     * hv->pos reads it already does), not a separate scan. have_bounds
+     * stays 0 (out->has_bounds ends up 0 too) for a mesh with no live
+     * faces at all -- a real "nothing to bound" case, not a degenerate
+     * zeroed box that would falsely look like a real point-sized mesh. */
+    float bmin[3] = {0.0f, 0.0f, 0.0f}, bmax[3] = {0.0f, 0.0f, 0.0f};
+    int have_bounds = 0;
+
     for (int f = 0; f < hem->face_count; f++) {
         if (hem->faces[f].deleted) continue;
         const HEFace *face = &hem->faces[f];
@@ -282,6 +292,17 @@ void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeM
             }
             const HEVertex *hv = &hem->verts[verts[i]];
             const float *p = hv->pos;
+            if (!have_bounds) {
+                bmin[0] = bmax[0] = p[0];
+                bmin[1] = bmax[1] = p[1];
+                bmin[2] = bmax[2] = p[2];
+                have_bounds = 1;
+            } else {
+                for (int a = 0; a < 3; a++) {
+                    if (p[a] < bmin[a]) bmin[a] = p[a];
+                    if (p[a] > bmax[a]) bmax[a] = p[a];
+                }
+            }
             float *v = out->data + out->count * MESHOBJ_VERTEX_STRIDE;
             v[0] = p[0]; v[1] = p[1]; v[2] = p[2];
             v[3] = n[0]; v[4] = n[1]; v[5] = n[2];
@@ -293,6 +314,11 @@ void meshobject_build_render_mesh_from_halfedge(RenderMesh *out, const HalfEdgeM
             out->count++;
         }
         if (out->batch_count > 0) out->batches[out->batch_count - 1].count += 3;
+    }
+    out->has_bounds = have_bounds;
+    if (have_bounds) {
+        out->local_bmin[0] = bmin[0]; out->local_bmin[1] = bmin[1]; out->local_bmin[2] = bmin[2];
+        out->local_bmax[0] = bmax[0]; out->local_bmax[1] = bmax[1]; out->local_bmax[2] = bmax[2];
     }
     out->dirty = 1;
 }

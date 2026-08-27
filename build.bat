@@ -263,8 +263,8 @@ REM actually vendored. Shared by both the editor and player targets --
 REM same as the Makefile's NATIVE_SRCS/PLAYER_SRCS both starting from
 REM ENGINE_CORE_SRCS. ----
 for %%f in (
-    octree_render.c renderer.c net.c input.c console.c
-    asset_browser.c chat.c halfedge.c halfedge_gltf.c texture_cache.c meshobject.c
+    octree_render.c renderer.c frame_pacer.c net.c input.c console.c
+    asset_browser.c chat.c halfedge.c halfedge_gltf.c texture_cache.c meshobject.c frustum.c
     mesh_edit.c node_graph.c audio_wav.c render_hooks.c fracture.c armature.c animation.c skinned_mesh.c
     gizmo.c transform_op.c light.c scene_target.c scene_objects.c fracture_body.c path_tracer.c skinned_mesh_object.c skinned_scene_objects.c ragdoll.c font.c svg_icon.c ui.c area_tree.c phi_prop.c
     phi_prop_registry.c mp_port.c phi_physics.cpp

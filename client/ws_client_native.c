@@ -10,6 +10,7 @@
 #include <time.h>
 
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
@@ -109,17 +110,82 @@ static int compute_expected_accept(const char *key, char *out_b64, int out_sz) {
     return base64_encode(digest, (int)digest_len, out_b64, out_sz) < 0 ? -1 : 0;
 }
 
-/* ---- Handshake ---- */
-static int recv_line_buffered(int fd, char *out, int out_sz) {
-    /* Reads the full HTTP response headers (until "\r\n\r\n") into `out`.
-     * Blocking — the handshake itself is a one-time, small (<1KB), fast
-     * exchange with a local dev server; not worth a non-blocking state
-     * machine for this part. */
+/* ---- Handshake ----
+ * Neither the TCP connect nor the HTTP upgrade response is allowed to block
+ * forever -- ws_client_connect() runs synchronously on the editor's main
+ * thread before the main loop starts (see editor_main.c's call site
+ * comment), so a server that's down, firewalled (silently dropped SYN), or
+ * that accepts the connection and then never replies would otherwise hang
+ * the whole editor process at startup with no way to interact with it. Both
+ * bounds are generous for a local dev server, stingy for anything that
+ * should be treated as "not there". */
+#define WS_CONNECT_TIMEOUT_MS   3000
+#define WS_HANDSHAKE_TIMEOUT_MS 5000
+
+/* Connects `fd` (already created) with a bounded wait instead of relying on
+ * the OS's own connect() timeout, which can run well past what's reasonable
+ * for "is a local dev server up". Leaves the socket non-blocking on return
+ * either way, since the handshake read below needs that. */
+static int connect_with_timeout(int fd, const struct sockaddr *addr, socklen_t addrlen, int timeout_ms) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    if (connect(fd, addr, addrlen) == 0) return 0;   /* connected immediately (e.g. localhost) */
+    if (errno != EINPROGRESS) return -1;
+
+    fd_set wfds; FD_ZERO(&wfds); FD_SET(fd, &wfds);
+    struct timeval tv;
+    tv.tv_sec  = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int sel = select(fd + 1, NULL, &wfds, NULL, &tv);
+    if (sel <= 0) return -1;   /* timed out or select error */
+
+    int err = 0; socklen_t errlen = sizeof(err);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen) != 0 || err != 0) return -1;
+    return 0;
+}
+
+/* Bounded twin of a plain send() loop -- same "must not block forever"
+ * reasoning as connect_with_timeout above. */
+static int send_all_timeout(int fd, const char *buf, int len, int timeout_ms) {
+    int sent = 0;
+    struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
+    while (sent < len) {
+        ssize_t n = send(fd, buf + sent, (size_t)(len - sent), 0);
+        if (n > 0) { sent += (int)n; continue; }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+            int elapsed_ms = (int)((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000);
+            int remaining = timeout_ms - elapsed_ms;
+            if (remaining <= 0) return -1;
+            fd_set wfds; FD_ZERO(&wfds); FD_SET(fd, &wfds);
+            struct timeval tv; tv.tv_sec = 0; tv.tv_usec = (remaining < 50 ? remaining : 50) * 1000;
+            select(fd + 1, NULL, &wfds, NULL, &tv);
+            continue;
+        }
+        return -1;
+    }
+    return sent;
+}
+
+static int recv_line_buffered(int fd, char *out, int out_sz, int timeout_ms) {
     int n = 0;
+    struct timespec start; clock_gettime(CLOCK_MONOTONIC, &start);
     while (n < out_sz - 1) {
+        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+        int elapsed_ms = (int)((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000);
+        int remaining = timeout_ms - elapsed_ms;
+        if (remaining <= 0) return -1;
+        fd_set rfds; FD_ZERO(&rfds); FD_SET(fd, &rfds);
+        struct timeval tv; tv.tv_sec = remaining / 1000; tv.tv_usec = (remaining % 1000) * 1000;
+        int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
+        if (sel <= 0) return -1;   /* timed out or select error */
         char c;
         ssize_t r = recv(fd, &c, 1, 0);
-        if (r <= 0) return -1;
+        if (r <= 0) {
+            if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            return -1;
+        }
         out[n++] = c;
         if (n >= 4 && memcmp(out + n - 4, "\r\n\r\n", 4) == 0) {
             out[n] = 0;
@@ -151,12 +217,12 @@ int ws_client_connect(const char *url) {
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        if (connect_with_timeout(fd, ai->ai_addr, ai->ai_addrlen, WS_CONNECT_TIMEOUT_MS) == 0) break;
         close(fd); fd = -1;
     }
     freeaddrinfo(res);
     if (fd < 0) {
-        printf("[ws_client] connect() failed for %s:%d\n", host, port);
+        printf("[ws_client] connect() failed or timed out for %s:%d\n", host, port);
         return -1;
     }
 
@@ -184,15 +250,15 @@ int ws_client_connect(const char *url) {
         "Sec-WebSocket-Version: 13\r\n"
         "\r\n",
         path, host, port, key_b64);
-    if (send(fd, req, (size_t)reqlen, 0) != reqlen) {
+    if (send_all_timeout(fd, req, reqlen, WS_HANDSHAKE_TIMEOUT_MS) != reqlen) {
         printf("[ws_client] failed to send handshake request\n");
         close(fd);
         return -1;
     }
 
     char resp[2048];
-    if (recv_line_buffered(fd, resp, sizeof(resp)) < 0) {
-        printf("[ws_client] no/short handshake response\n");
+    if (recv_line_buffered(fd, resp, sizeof(resp), WS_HANDSHAKE_TIMEOUT_MS) < 0) {
+        printf("[ws_client] no/short handshake response (or timed out)\n");
         close(fd);
         return -1;
     }
@@ -221,8 +287,8 @@ int ws_client_connect(const char *url) {
         }
     }
 
-    fcntl(fd, F_SETFL, O_NONBLOCK);
-
+    /* Already non-blocking -- connect_with_timeout put it there, and the
+     * handshake read above needs it that way too. */
     s_fd = fd;
     s_connected = 1;
     s_recvlen = 0;

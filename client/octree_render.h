@@ -1,4 +1,5 @@
 #pragma once
+#include "vec3.h"   /* Vec3f -- local_bmin/local_bmax below */
 
 /* Generic flat-triangle-buffer render mesh (interleaved vertex data + a
  * GL VBO handle) -- previously also carried mesh_rebuild(), which
@@ -40,9 +41,36 @@ typedef struct {
     int     count;      /* number of vertices */
     int     capacity;   /* allocated vertices */
     unsigned int vbo;   /* GL VBO handle */
+    /* Cached per-mesh VAO -- glGenVertexArrays'd and configured (attrib
+     * pointers bound to vbo) once, on first draw, by whichever
+     * renderer_draw_* call actually knows this mesh's vertex layout (see
+     * renderer_draw_mesh_object) -- octree_render.c/mesh_upload_stride
+     * doesn't build it itself since it's layout-agnostic (stride is just
+     * a parameter here, not a fixed format). 0 = not yet built. Safe to
+     * keep across re-uploads: glVertexAttribPointer's binding is to the
+     * BUFFER OBJECT (vbo), not its current contents, so a later
+     * mesh_upload_stride's glBufferData re-specifying that same vbo's
+     * data store never invalidates this VAO's attrib setup -- only a
+     * genuinely different vbo handle would (never happens here, vbo is
+     * glGenBuffers'd once and reused, see mesh_upload_stride). */
+    unsigned int vao;
     int     dirty;      /* needs re-upload */
     MeshBatch batches[MESHOBJECT_MAX_BATCHES];
     int       batch_count;   /* 0 = no batches -- caller draws [0,count) as one untextured range */
+
+    /* Local-space AABB of this mesh's actual vertex data, for frustum
+     * culling (frustum.h's aabb_world_bounds) -- populated by
+     * meshobject_build_render_mesh_from_halfedge (a real bounds scan,
+     * not the "assumes centered on local origin" half-extents shortcut
+     * meshobject_local_aabb_half_extents uses for physics box shapes),
+     * alongside the vertex loop it already runs, so this costs no extra
+     * pass. has_bounds is 0 for a RenderMesh nothing has populated this
+     * for yet (e.g. gizmo.c/fracture_body.c's own generic-stride content)
+     * -- a real, honest "no bounds available, caller must treat as always
+     * visible" signal, not stale/zeroed min==max data that would look
+     * like a degenerate real box and wrongly cull. */
+    float local_bmin[3], local_bmax[3];
+    int   has_bounds;
 } RenderMesh;
 
 RenderMesh *mesh_create(void);

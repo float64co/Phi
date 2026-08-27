@@ -6,6 +6,7 @@ www/player.js
 www/player.wasm
 www/player.wasm.map
 build/
+*.obj
 
 # Python
 server/__pycache__/

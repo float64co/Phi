@@ -557,20 +557,6 @@ static void gl_check(const char *where) {
         printf("[GL] error 0x%04x at %s\n", e, where);
 }
 
-/* Re-binds this renderer's VAO before every draw rather than trusting it to
- * stay bound (GLES2/WebGL1 has no VAO concept, so this used to be a no-op
- * on wasm — now wasm is WebGL2/GLES3, which does have one, and gbuffer.c's
- * fullscreen-quad passes bind their own VAO on both platforms). It's NOT
- * safe to assume "bind once at renderer_create and never again" on either
- * target: gbuffer.c's lighting/tonemap draws bind their own VAO every
- * frame, which otherwise silently steals the binding out from under the
- * next frame's geometry-pass draw calls — this exact bug already happened
- * once on native before every draw call here was made to defend against
- * it; wasm needed the same fix once it started sharing gbuffer.c too. */
-static void bind_renderer_vao(const Renderer *r) {
-    glBindVertexArray(r->vao);
-}
-
 /* ---- Shader compilation ---- */
 static unsigned int compile_shader(GLenum type, const char *src) {
     unsigned int s = glCreateShader(type);
@@ -657,14 +643,16 @@ Renderer *renderer_create(int width, int height) {
     gl_native_load_procs();
 #endif
     /* GL 3.3 core requires a bound (non-zero) VAO for any vertex-attrib /
-     * draw call; GLES3/WebGL2 doesn't strictly require one (VAO 0 is
-     * legal there, unlike desktop core profile) but creating an explicit
-     * one on both platforms and re-binding it before every draw
-     * (bind_renderer_vao) is what actually keeps gbuffer.c's own VAO
-     * usage from silently stealing the binding — see that function's
-     * comment. One VAO for the whole renderer's lifetime, not one per
-     * mesh, since every draw call here already re-specifies its own
-     * attrib pointers each time. */
+     * draw call; GLES3/WebGL2 doesn't strictly require one (VAO 0 is legal
+     * there, unlike desktop core profile), but creating one here keeps
+     * both platforms on the same path. Purely a context-setup formality
+     * now, not something later draw calls rely on staying bound: every
+     * renderer_draw_* call binds its OWN cached, per-mesh VAO before it
+     * draws (RenderMesh::vao / SkinnedMeshObject::vao / each helper-
+     * geometry draw's own s_*_vao, see renderer_draw_mesh_object and
+     * draw_helper_geometry) rather than sharing this one — real attrib
+     * setup once per mesh instead of re-specifying it on every single
+     * draw call, every frame, see each of those own comments. */
     glGenVertexArrays(1, &r->vao);
     glBindVertexArray(r->vao);
 
@@ -814,6 +802,16 @@ int renderer_get_inverse_view_proj(const Renderer *r, float *out16) {
     return mat4_inverse(vp, out16);
 }
 
+/* The forward (non-inverse) view-projection matrix -- frustum.h's
+ * frustum_extract needs this directly (Gribb/Hartmann plane extraction
+ * reads it, doesn't invert it), unlike gbuffer.c's shadow-space lookup
+ * above which needs the inverse. Same build_vp this frame's own draw
+ * calls already used, so the culling frustum always matches exactly what
+ * got submitted, never a frame stale. */
+void renderer_get_view_proj(const Renderer *r, float *out16) {
+    build_vp(r, out16);
+}
+
 /* Phase 1 foundation: draws a MeshObject (glTF-sourced, via the half-edge
  * structure — see meshobject.h/halfedge_gltf.c) with its own position/
  * orientation model transform, through its OWN PBR shader/program (see
@@ -843,27 +841,42 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
     r->cur_object_id = 4000u + (unsigned int)obj->id;
 
     glUseProgram(r->pbr_program);
-    bind_renderer_vao(r);
+
+    /* Cache the VAO once per RenderMesh instead of re-specifying all 7
+     * attrib pointers (and enabling/disabling them) on every single draw
+     * call, every frame -- pure CPU-side driver overhead that used to
+     * scale with object count for no reason, since none of this setup
+     * actually depends on anything that changes frame to frame (the vbo
+     * handle, stride, and attrib layout are all fixed for this mesh's
+     * whole lifetime -- only the DATA a re-upload writes into that same
+     * vbo changes, which this attrib setup doesn't need to know about,
+     * see RenderMesh::vao's own comment in octree_render.h). */
+    RenderMesh *rm = obj->render_mesh;
+    if (!rm->vao) {
+        glGenVertexArrays(1, &rm->vao);
+        glBindVertexArray(rm->vao);
+        glBindBuffer(GL_ARRAY_BUFFER, rm->vbo);
+        int stride = MESHOBJ_VERTEX_STRIDE * (int)sizeof(float);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)(9*sizeof(float)));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void*)(10*sizeof(float)));
+        glEnableVertexAttribArray(5);
+        glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, stride, (void*)(11*sizeof(float)));
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, stride, (void*)(14*sizeof(float)));
+    }
+    glBindVertexArray(rm->vao);
+
     glUniformMatrix4fv(r->pbr_u_mvp, 1, GL_FALSE, mvp);
     glUniformMatrix4fv(r->pbr_u_prev_mvp, 1, GL_FALSE, prev_mvp);
     glUniform1ui(r->pbr_u_object_id, r->cur_object_id);
-
-    glBindBuffer(GL_ARRAY_BUFFER, obj->render_mesh->vbo);
-    int stride = MESHOBJ_VERTEX_STRIDE * (int)sizeof(float);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (void*)(6*sizeof(float)));
-    glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)(9*sizeof(float)));
-    glEnableVertexAttribArray(4);
-    glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void*)(10*sizeof(float)));
-    glEnableVertexAttribArray(5);
-    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, stride, (void*)(11*sizeof(float)));
-    glEnableVertexAttribArray(6);
-    glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, stride, (void*)(14*sizeof(float)));
 
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(r->pbr_u_texture, 0);
@@ -886,14 +899,6 @@ void renderer_draw_mesh_object(Renderer *r, const MeshObject *obj) {
         }
     }
     gl_check("draw_mesh_object");
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(2);
-    glDisableVertexAttribArray(3);
-    glDisableVertexAttribArray(4);
-    glDisableVertexAttribArray(5);
-    glDisableVertexAttribArray(6);
 }
 
 /* Phase 4's real GPU vertex skinning (see skinned_mesh_object.h,
@@ -914,6 +919,31 @@ void renderer_draw_skinned_mesh(Renderer *r, SkinnedMeshObject *obj, unsigned in
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, obj->ebo);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, (long)obj->mesh.index_count * (long)sizeof(uint32_t),
                      obj->mesh.indices, GL_STATIC_DRAW);
+
+        /* Cache this object's own VAO right here, alongside vbo/ebo, the
+         * same one-time-only cost -- see skinned_mesh_object.h's own
+         * comment on why binding it later also restores ebo for free. */
+        glGenVertexArrays(1, &obj->vao);
+        glBindVertexArray(obj->vao);
+        glBindBuffer(GL_ARRAY_BUFFER, obj->vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, obj->ebo);
+        int stride = (int)sizeof(SkinnedVertex);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, pos));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, normal));
+        glEnableVertexAttribArray(2);
+        /* Raw, UNNORMALIZED unsigned bytes -- arrives in the shader as
+         * plain floats holding the byte's own integer value (5 -> 5.0),
+         * exactly what SKINNED_VERT_SRC_FMT's int(a_bone_idx.x) expects;
+         * GL_TRUE here would instead rescale to [0,1], which is NOT what
+         * a bone index needs. */
+        glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, bone_idx));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, bone_wgt));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, uv));
+
         obj->gpu_uploaded = 1;
         gl_check("renderer_draw_skinned_mesh upload");
     }
@@ -931,7 +961,7 @@ void renderer_draw_skinned_mesh(Renderer *r, SkinnedMeshObject *obj, unsigned in
     r->cur_object_id = object_id;
 
     glUseProgram(r->skinned_program);
-    bind_renderer_vao(r);
+    glBindVertexArray(obj->vao);
     glUniformMatrix4fv(r->skinned_u_mvp, 1, GL_FALSE, mvp);
     glUniformMatrix4fv(r->skinned_u_prev_mvp, 1, GL_FALSE, prev_mvp);
     glUniform1ui(r->skinned_u_object_id, r->cur_object_id);
@@ -941,25 +971,6 @@ void renderer_draw_skinned_mesh(Renderer *r, SkinnedMeshObject *obj, unsigned in
     glUniform3f(r->skinned_u_emission, obj->emission.x, obj->emission.y, obj->emission.z);
     int n_bones = obj->arm.bone_count < SKINNED_SHADER_MAX_BONES ? obj->arm.bone_count : SKINNED_SHADER_MAX_BONES;
     glUniformMatrix4fv(r->skinned_u_bones, n_bones, GL_FALSE, &obj->skin[0][0]);
-
-    glBindBuffer(GL_ARRAY_BUFFER, obj->vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, obj->ebo);
-    int stride = (int)sizeof(SkinnedVertex);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, pos));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, normal));
-    glEnableVertexAttribArray(2);
-    /* Raw, UNNORMALIZED unsigned bytes -- arrives in the shader as plain
-     * floats holding the byte's own integer value (5 -> 5.0), exactly
-     * what SKINNED_VERT_SRC_FMT's int(a_bone_idx.x) expects; GL_TRUE
-     * here would instead rescale to [0,1], which is NOT what a bone
-     * index needs. */
-    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, bone_idx));
-    glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, bone_wgt));
-    glEnableVertexAttribArray(4);
-    glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, stride, (void*)offsetof(SkinnedVertex, uv));
 
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(r->skinned_u_texture, 0);
@@ -985,13 +996,6 @@ void renderer_draw_skinned_mesh(Renderer *r, SkinnedMeshObject *obj, unsigned in
         }
     }
     gl_check("draw_skinned_mesh");
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(2);
-    glDisableVertexAttribArray(3);
-    glDisableVertexAttribArray(4);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 /* ---- Vector helpers (file-static, matching gizmo.c's/light.c's own
@@ -1052,22 +1056,33 @@ void renderer_draw_lights(Renderer *r) {
 }
 
 static unsigned int s_wire_vbo = 0;
+static unsigned int s_wire_vao = 0;
 
 /* Shared tail every "full-bright helper geometry" draw call in this file
  * (wire box, solid box, grid -- all built from the same pos3+normal3,
  * normal==light-dir-always vertex format, see each caller's own comment)
  * used to repeat verbatim: set r->cur_object_id, build the VP matrix,
- * bind program/VAO/uniforms, bind vbo, set attrib pointers 0/1 (stride
- * always 6 floats -- pos3+normal3, inherent to this shared vertex
- * format), draw, disable attribs 0/1. Only the VBO, draw mode/count, and
- * object id genuinely differ between callers. */
-static void draw_helper_geometry(Renderer *r, unsigned int vbo, unsigned int mode, int vertex_count,
+ * bind program/uniforms, bind vbo, set attrib pointers 0/1 (stride always
+ * 6 floats -- pos3+normal3, inherent to this shared vertex format), draw,
+ * disable attribs 0/1. Only the VBO, draw mode/count, and object id
+ * genuinely differ between callers.
+ *
+ * Takes an already-built VAO now (see each caller's own s_*_vao, set up
+ * ONCE alongside its s_*_vbo -- renderer_draw_lights can call this up to
+ * 2x per live Sun/Spot light every frame, so re-doing attrib enable/
+ * pointer/disable here on every one of those calls was real, avoidable
+ * per-frame overhead, same class of fix as renderer_draw_mesh_object's
+ * own RenderMesh::vao). The vbo itself still gets fresh glBufferData
+ * contents from each caller before this runs (wire/solid box move every
+ * call; the grid is built once) -- only the ATTRIB SETUP was ever
+ * redundant work, not the data upload. */
+static void draw_helper_geometry(Renderer *r, unsigned int vao, unsigned int mode, int vertex_count,
                                   unsigned int object_id, float cr, float cg, float cb) {
     r->cur_object_id = object_id;
 
     float vp[16]; build_vp(r, vp);
     glUseProgram(r->program);
-    bind_renderer_vao(r);
+    glBindVertexArray(vao);
     glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vp);
     glUniformMatrix4fv(r->u_prev_mvp, 1, GL_FALSE, r->prev_vp);
     glUniform3f(r->u_mat_color, cr, cg, cb);
@@ -1075,24 +1090,24 @@ static void draw_helper_geometry(Renderer *r, unsigned int vbo, unsigned int mod
     glUniform3fv(r->u_light_dir, 1, ld);
     glUniform1ui(r->u_object_id, r->cur_object_id);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    int stride = 6 * (int)sizeof(float);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
-    glDisableVertexAttribArray(2);
-    glVertexAttrib1f(2, 0.0f);
-
     glDrawArrays(mode, 0, vertex_count);
-
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
 }
 
 void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
                             float cr, float cg, float cb) {
-    if (!s_wire_vbo) glGenBuffers(1, &s_wire_vbo);
+    if (!s_wire_vbo) {
+        glGenBuffers(1, &s_wire_vbo);
+        glGenVertexArrays(1, &s_wire_vao);
+        glBindVertexArray(s_wire_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, s_wire_vbo);
+        int stride = 6 * (int)sizeof(float);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+        glDisableVertexAttribArray(2);
+        glVertexAttrib1f(2, 0.0f);
+    }
 
     float c[8][3] = {
         {bmin.x,bmin.y,bmin.z}, {bmax.x,bmin.y,bmin.z},
@@ -1125,10 +1140,11 @@ void renderer_draw_wire_box(Renderer *r, Vec3f bmin, Vec3f bmax,
      * and this used to need a #ifndef __EMSCRIPTEN__ guard for exactly
      * that reason). object id 3 = wire-box convention, world space (no
      * model matrix — see draw_world). */
-    draw_helper_geometry(r, s_wire_vbo, GL_LINES, 24, 3u, cr, cg, cb);
+    draw_helper_geometry(r, s_wire_vao, GL_LINES, 24, 3u, cr, cg, cb);
 }
 
 static unsigned int s_solid_box_vbo = 0;
+static unsigned int s_solid_box_vao = 0;
 
 /* Solid (filled-triangle) box, e.g. the transform gizmo's shaft/handles
  * (gizmo.c) — renderer_draw_wire_box's 1-pixel GL_LINES edges turned out
@@ -1143,7 +1159,19 @@ static unsigned int s_solid_box_vbo = 0;
  * instead of 12 line edges) and draw mode differ. */
 void renderer_draw_solid_box(Renderer *r, Vec3f bmin, Vec3f bmax,
                               float cr, float cg, float cb) {
-    if (!s_solid_box_vbo) glGenBuffers(1, &s_solid_box_vbo);
+    if (!s_solid_box_vbo) {
+        glGenBuffers(1, &s_solid_box_vbo);
+        glGenVertexArrays(1, &s_solid_box_vao);
+        glBindVertexArray(s_solid_box_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, s_solid_box_vbo);
+        int stride = 6 * (int)sizeof(float);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+        glDisableVertexAttribArray(2);
+        glVertexAttrib1f(2, 0.0f);
+    }
 
     float c[8][3] = {
         {bmin.x,bmin.y,bmin.z}, {bmax.x,bmin.y,bmin.z},
@@ -1174,10 +1202,11 @@ void renderer_draw_solid_box(Renderer *r, Vec3f bmin, Vec3f bmax,
     glBindBuffer(GL_ARRAY_BUFFER, s_solid_box_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
 
-    draw_helper_geometry(r, s_solid_box_vbo, GL_TRIANGLES, 36, 3u, cr, cg, cb);
+    draw_helper_geometry(r, s_solid_box_vao, GL_TRIANGLES, 36, 3u, cr, cg, cb);
 }
 
 static unsigned int s_grid_vbo = 0;
+static unsigned int s_grid_vao = 0;
 static int          s_grid_vert_count = 0;
 
 /* Reference grid on the XZ plane -- built from thin SOLID quads (two
@@ -1235,10 +1264,21 @@ void renderer_draw_grid(Renderer *r, Vec3f center, float half_extent,
         glBindBuffer(GL_ARRAY_BUFFER, s_grid_vbo);
         glBufferData(GL_ARRAY_BUFFER, (long)((size_t)line_count * (size_t)floats_per_line * sizeof(float)), verts, GL_STATIC_DRAW);
         free(verts);
+
+        glGenVertexArrays(1, &s_grid_vao);
+        glBindVertexArray(s_grid_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, s_grid_vbo);
+        int stride = 6 * (int)sizeof(float);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3*sizeof(float)));
+        glDisableVertexAttribArray(2);
+        glVertexAttrib1f(2, 0.0f);
     }
 
     /* object id 0 = non-pickable world geometry, same convention as
      * renderer.c's own default. */
-    draw_helper_geometry(r, s_grid_vbo, GL_TRIANGLES, s_grid_vert_count, 0u, cr, cg, cb);
+    draw_helper_geometry(r, s_grid_vao, GL_TRIANGLES, s_grid_vert_count, 0u, cr, cg, cb);
     gl_check("draw_grid");
 }

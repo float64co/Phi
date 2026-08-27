@@ -87,6 +87,11 @@ extern void  game_shutdown(void);
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <direct.h>   /* _chdir/_access -- resolve_working_directory below */
+#include <io.h>
+#endif
+
 static Renderer        *g_renderer   = NULL;
 static GBuffer          *g_gbuf       = NULL;
 static PhiPhysicsWorld  *g_phys_world = NULL;
@@ -242,6 +247,11 @@ static void player_render(void) {
     gbuffer_resolve(g_gbuf, light_dir, sky, inv_vp, g_renderer->cam_pos);
     renderer_end_frame(g_renderer);
 
+    /* Marks the work/present split for frame_pacer.c's CPU-load cap --
+     * see frame_pacer_mark_present's own comment on why this needs to sit
+     * right here, immediately before the one call in this frame that can
+     * actually block on vsync. */
+    frame_pacer_mark_present();
     phi_platform_swap();
 }
 
@@ -332,10 +342,57 @@ static void player_loop(void *userdata) {
     frame_pacer_end();
 }
 
+#ifdef _WIN32
+/* Windows-only fixup: every relative asset path this player ever opens --
+ * game/main.py's own read_whole_file call below, AND every game/src/*.c's
+ * own hardcoded "game/assets/..." literals (a C-entry game reaches those
+ * paths directly via fopen/cgltf, never through this file at all) -- is
+ * resolved against the process's own current working directory (see this
+ * file's own top comment). On Linux, this project's native build is
+ * normally launched as `./build/phi_native` (or the player equivalent)
+ * from the repo root, which inherits the shell's own cwd for free, so
+ * game/ is already reachable and this fixup has never been needed there.
+ * Windows commonly starts a .exe with a DIFFERENT cwd instead -- Explorer
+ * double-click, and many IDE "run" configurations, both default to the
+ * executable's own folder -- and build.bat's own output lands at
+ * build\phi_player_win32.exe, with game\ one level up (a sibling of
+ * build\, not of the .exe itself), so a plain "chdir to the exe's own
+ * folder" alone still wouldn't find it. Walking up parent directories
+ * (bounded, not unbounded -- a real missing game/ shouldn't spin forever)
+ * until game\ turns up handles both that layout and "already launched
+ * from the repo root" (a no-op, the very first _access check succeeds)
+ * alike, without hardcoding a specific relative depth that would silently
+ * break the moment build.bat's own output location changes. */
+static void resolve_working_directory(void) {
+    if (_access("game", 0) == 0) return;   /* already reachable -- nothing to do */
+
+    char exe_path[MAX_PATH];
+    DWORD len = GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return;
+
+    char *slash = strrchr(exe_path, '\\');
+    if (!slash) return;
+    *slash = '\0';   /* exe_path is now the executable's own directory */
+    if (_chdir(exe_path) != 0) return;
+    if (_access("game", 0) == 0) return;
+
+    for (int i = 0; i < 4; i++) {
+        if (_chdir("..") != 0) return;
+        if (_access("game", 0) == 0) return;
+    }
+    /* Not found within 4 parent levels -- leave cwd wherever this search
+     * ended up; every subsequent load attempt will fail with its own
+     * real, honest "file not found"-shaped error (see e.g. halfedge_
+     * gltf.c's own cgltf_parse_and_load failure logging), not a silent
+     * one, so there's something concrete to debug from. */
+}
+#endif
+
 int main(void) {
     int mp_stack_top_marker;
 #ifdef _WIN32
     setvbuf(stdout, NULL, _IONBF, 0);
+    resolve_working_directory();
 #endif
     printf("[player] Initialising Phi (chromeless player build)...\n");
 

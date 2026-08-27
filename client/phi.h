@@ -151,3 +151,13 @@
  * affected. win32 is a real, honest stub for now (see audio_win32_
  * stub.c), matching input_gamepad_win32_stub.c's own precedent. */
 #include "phi_audio.h"
+
+/* Frame-pacing diagnostics: frame_pacer_get_stats() -- the same real load
+ * average (and most recent frame's own work/present/idle split) editor_
+ * main.c's/player_main.c's own PHI_TARGET_CPU_FRACTION cap measures and
+ * acts on internally every frame, exposed read-only so a game/src/ *.c
+ * author can build a debug HUD or perf overlay against real numbers
+ * instead of guessing. frame_pacer.c itself never prints or logs any of
+ * this on its own -- see frame_pacer.h's own comment on FramePacerStats
+ * for the full field list and what each one means. */
+#include "frame_pacer.h"

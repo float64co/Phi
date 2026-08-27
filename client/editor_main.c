@@ -1,5 +1,6 @@
 #include "octree_render.h"
 #include "renderer.h"
+#include "frustum.h"
 #include "net.h"
 #include "input.h"
 #include "console.h"
@@ -53,6 +54,12 @@
 #include <GL/gl.h>
 #endif
 #include "gbuffer.h"
+
+#ifdef _WIN32
+#include <windows.h>  /* GetModuleFileNameA/MAX_PATH/DWORD -- resolve_working_directory below */
+#include <direct.h>   /* _chdir/_access */
+#include <io.h>
+#endif
 
 /* ---- Global state ---- */
 static Renderer    *g_renderer = NULL;
@@ -330,10 +337,39 @@ static void scene_content_cb(void *userdata) {
      * body_sync_and_draw_all, ARE that one object visually; every OTHER
      * object draws completely normally regardless of fracture state,
      * see g_fracture_source_id's own comment). */
+    /* View-frustum cull (frustum.h) -- built fresh from THIS frame's
+     * camera every call (cheap: 6 planes from one already-computed vp
+     * matrix), not cached across frames, so it's automatically correct
+     * for orbit/pan/fly navigation with no invalidation logic needed.
+     * Core perf work, done before any new rendering technique gets added
+     * on top: every live MeshObject used to hit renderer_draw_mesh_object
+     * unconditionally regardless of visibility, which is the first cost
+     * multiplier once scene sizes grow past this project's current
+     * handful of test objects, and the thing any future per-object pass
+     * (real shadow casters, SSAO, etc.) would otherwise inherit for free
+     * if left unfixed. */
+    float vp[16];
+    renderer_get_view_proj(g_renderer, vp);
+    Frustum frustum;
+    frustum_extract(vp, &frustum);
+
     MeshObject *objects[SCENE_MAX_OBJECTS];
     int n_objects = scene_object_get_all(objects);
     for (int i = 0; i < n_objects; i++) {
         if (g_fracture_active && objects[i]->id == g_fracture_source_id) continue;
+        RenderMesh *rm = objects[i]->render_mesh;
+        if (rm && rm->has_bounds) {
+            Vec3f wmin, wmax;
+            Vec3f lmin = { rm->local_bmin[0], rm->local_bmin[1], rm->local_bmin[2] };
+            Vec3f lmax = { rm->local_bmax[0], rm->local_bmax[1], rm->local_bmax[2] };
+            aabb_world_bounds(lmin, lmax, objects[i]->position, objects[i]->orientation, objects[i]->scale,
+                               &wmin, &wmax);
+            if (!frustum_intersects_aabb(&frustum, wmin, wmax)) continue;
+        }
+        /* rm->has_bounds == 0 (no live faces this pass could scan, or a
+         * mesh built some other way) draws unconditionally -- the same
+         * safe "no bounds available, always visible" contract RenderMesh's
+         * own has_bounds comment documents, never a false cull. */
         renderer_draw_mesh_object(g_renderer, objects[i]);
     }
     MeshObject *sel = selected_mesh_object();
@@ -781,10 +817,18 @@ static void main_loop(void *userdata) {
     (void)userdata;
     /* CPU-load capping (frame_pacer.h) -- brackets this frame's real work
      * (physics/animation/render, ending right after phi_platform_swap()
-     * below), NOT the same thing as the dt clamp two lines down: that
-     * clamp bounds physics/animation STEP SIZE after a slow frame, this
-     * bounds actual CPU BUSY TIME every frame, always -- see frame_
-     * pacer.h's own top comment for why this codebase had neither before. */
+     * below, see this function's own frame_pacer_mark_present() call
+     * right before that swap), NOT the same thing as the dt clamp two
+     * lines down: that clamp bounds physics/animation STEP SIZE after a
+     * slow frame, this bounds actual CPU BUSY TIME every frame, always --
+     * genuinely true now that frame_pacer_mark_present excludes
+     * phi_platform_swap's own potential vsync-blocking wait from that
+     * measurement (a real bug this project's own investigation found:
+     * without that split, a vsync-throttled frame's blocked-on-vblank
+     * time was being counted as "busy" and getting MORE sleep piled on
+     * top of it). See frame_pacer.h's own top comment for why this
+     * codebase had no capping at all before, and frame_pacer_mark_
+     * present's for the vsync fix specifically. */
     frame_pacer_begin();
     double now = phi_platform_now();
     float dt = (float)(now - g_last_t);
@@ -1618,6 +1662,11 @@ static void main_loop(void *userdata) {
                found, min_x, max_x, min_y, max_y);
     }
 
+    /* Marks the work/present split for frame_pacer.c's CPU-load cap --
+     * see frame_pacer_mark_present's own comment on why this needs to sit
+     * right here, immediately before the one call in this frame that can
+     * actually block on vsync. */
+    frame_pacer_mark_present();
     phi_platform_swap();
     frame_pacer_end();
 }
@@ -1933,6 +1982,58 @@ static void scene_state_handler(uint32_t req_id) {
     net_send_scene_state_reply(&g_ns, req_id, json);
 }
 
+#ifdef _WIN32
+/* Every asset load in this file (font_load/svg_icon_load/halfedge_load_
+ * gltf/skinned_mesh_load_gltf/...) goes through a plain relative path like
+ * "assets/fonts/...", resolved against the process's own current working
+ * directory. On Linux this project's native build is normally launched as
+ * `./build/phi_native` from the repo root, which inherits the shell's own
+ * cwd for free, so assets/ is already reachable and this fixup has never
+ * been needed there. Windows commonly starts a .exe with a DIFFERENT cwd
+ * instead -- Explorer double-click, and many IDE "run" configurations,
+ * both default to the executable's own folder -- and build.bat's own
+ * output lands at build\phi_win32.exe, with assets\ one level up (a
+ * sibling of build\, not of the .exe itself), so a plain "chdir to the
+ * exe's own folder" alone still wouldn't find it. Without this, every
+ * asset load silently fails (see font.c/halfedge_gltf.c's own "failed to
+ * read"/"failed to parse" logging), ui_init() returns 0 for a missing
+ * font, and main_loop crashes on its first frame trying to render/hit-test
+ * a UI that was never actually laid out -- a hard crash with a working
+ * directory root cause, not a networking one, however it might look at
+ * first (see net.c's own comment on the WS connect/handshake timeouts,
+ * which are a real but unrelated fix). Same pattern as player_main.c's
+ * own resolve_working_directory (checks "game" there, "assets" here --
+ * the editor never loads from game/), walking up parent directories
+ * (bounded, not unbounded -- a real missing assets/ shouldn't spin
+ * forever) until assets\ turns up, which handles both that layout and
+ * "already launched from the repo root" (a no-op, the very first _access
+ * check succeeds) alike, without hardcoding a specific relative depth
+ * that would silently break the moment build.bat's own output location
+ * changes. */
+static void resolve_working_directory(void) {
+    if (_access("assets", 0) == 0) return;   /* already reachable -- nothing to do */
+
+    char exe_path[MAX_PATH];
+    DWORD len = GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return;
+
+    char *slash = strrchr(exe_path, '\\');
+    if (!slash) return;
+    *slash = '\0';   /* exe_path is now the executable's own directory */
+    if (_chdir(exe_path) != 0) return;
+    if (_access("assets", 0) == 0) return;
+
+    for (int i = 0; i < 4; i++) {
+        if (_chdir("..") != 0) return;
+        if (_access("assets", 0) == 0) return;
+    }
+    /* Not found within 4 parent levels -- leave cwd wherever this search
+     * ended up; every subsequent load attempt will fail with its own
+     * real, honest "file not found"-shaped error, not a silent one, so
+     * there's something concrete to debug from. */
+}
+#endif
+
 /* ---- Entry point ---- */
 int main(void) {
     /* Declared here, at main()'s own top level, and never touched again --
@@ -1947,6 +2048,7 @@ int main(void) {
      * rather than exited normally, which it always is here since
      * phi_platform_set_main_loop() only returns on a window-close message. */
     setvbuf(stdout, NULL, _IONBF, 0);
+    resolve_working_directory();
 #endif
     printf("[main] Initialising Phi...\n");
 

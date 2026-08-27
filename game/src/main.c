@@ -1,67 +1,61 @@
-/* A minimal first-person shooter, demonstrating `make player`'s
- * game/src/main.c C-entry path (see phi.md's "./game/ directory" section
- * and client/player_main.c's own top comment: this file's presence is
- * what switches `make player` to real exported C symbols -- game_init/
- * game_tick/game_shutdown below -- with NO MicroPython round trip
- * anywhere in the hot path, requested explicitly for speed). Everything
- * here is a real, already-proven engine call, just reached directly
- * through phi.h instead of through phi.* Python bindings -- the exact
- * same halfedge_build_from_triangles/scene_object_add/meshobject_
- * build_render_mesh_from_halfedge/halfedge_set_face_material sequence
- * mp_port.c's phi.create_mesh/set_face_material make, and the same
- * phi_physics_add_box_body/apply_impulse Bullet calls phi.enable_physics/
- * apply_impulse make.
+/* Tour De Force II -- a first pass at the "generic red vs. blue thing"
+ * requested for this project: DISA's swat_operator squad (blue) facing
+ * off against a Rushab cyberdemon (notfreedom, red), both real, fully
+ * textured Sketchfab imports loaded through this session's new multi-
+ * mesh/multi-material glTF pipeline (see halfedge_gltf.c/skinned_mesh.c's
+ * own top comments), scaled to a common height, standing on a ground
+ * plane the player can walk around on and look at them from any angle
+ * (WASD + mouse look, same free-fly camera client/main.c's own earlier
+ * FPS demo established -- see this file's git history).
  *
- * WASD moves on the ground plane (a free-fly camera at a fixed eye
- * height, not a physics-driven player capsule -- a real, deliberate
- * scope cut: a proper walking controller needs capsule sweeps/ground
- * detection/gravity, a separate, larger piece of work, not attempted for
- * this demo). Mouse motion looks around via real relative motion
- * (InputState::mouse_dx/dy) under real OS/browser pointer capture
- * (input_capture_mouse, see input.h) -- click to engage, Escape to
- * release, handled by player_main.c's own policy, not this file. Left
- * click shoots: a hand-rolled ray-vs-sphere hit test against each
- * target's known position/radius (phi_physics.h has no raycast query, so
- * this doesn't need one -- the targets are this file's own objects, their
- * positions are already known), then a real Bullet impulse knocks the
- * hit target flying. Targets that fall off the world get reset to their
- * spawn point, so the range keeps working indefinitely. */
+ * Two honest, deliberate scope notes, not silently papered over:
+ *
+ *   1. swat_operator has a real skin + 1 real animation clip in its own
+ *      glTF file -- skinned_mesh_object_load auto-starts it looping, so
+ *      it's genuinely, correctly animated here, real GPU vertex skinning,
+ *      not faked.
+ *   2. notfreedom (the cyberdemon) has ZERO skins and ZERO animations in
+ *      its own source file -- there is no skeleton to animate, full stop,
+ *      no amount of engine work on this project's side changes that. The
+ *      substitute here is a slow, honest whole-object idle sway (a Y-axis
+ *      turn), not a claim of real skeletal animation it doesn't have. A
+ *      future pass could rig/animate a new skeleton for it in a DCC tool
+ *      and re-export, but that's new content work, not an engine gap.
+ *
+ * No shooting/physics-target mechanics here (this file's earlier FPS-demo
+ * incarnation had some against plain colored boxes) -- this pass is
+ * specifically about getting the two real characters loaded, textured,
+ * animated (where the source data allows it), and viewable together;
+ * combat mechanics against them are real, separate future work. */
 #include "phi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 
-#define N_TARGETS      6
-#define MOUSE_SENS     0.0028f
-#define MOVE_SPEED     7.0f
-#define EYE_HEIGHT     1.7f
-#define TARGET_RADIUS  1.35f
-#define SHOOT_RANGE    200.0f
-#define SHOOT_IMPULSE  16.0f
-#define RESPAWN_BELOW_Y -25.0f
-
-typedef struct {
-    MeshObject *obj;
-    Vec3f       spawn_pos;
-} Target;
+#define MOUSE_SENS   0.0004f
+#define MOVE_SPEED   6.0f
+#define EYE_HEIGHT   1.7f
+#define TARGET_HEIGHT_M 1.85f   /* common height (in world units, meters) both characters are scaled to */
+#define CYBERDEMON_SWAY_SPEED 0.6f   /* rad/s -- see this file's own top comment on why this exists at all */
+#define CYBERDEMON_SWAY_AMPLITUDE 0.35f   /* radians */
 
 static Renderer        *g_renderer;
-static PhiPhysicsWorld  *g_world;
 static const InputState *g_input;
 
-static Vec3f g_cam_pos = { 0.0f, EYE_HEIGHT, 10.0f };
+static Vec3f g_cam_pos = { 0.0f, EYE_HEIGHT, 8.0f };
 static float g_yaw = 0.0f, g_pitch = 0.0f;
-static int   g_shots_fired = 0, g_hits = 0;
+/* Clamped just shy of +/-90 degrees (see game_tick) -- straight up/down
+ * puts cam_basis's fwd vector on the vertical axis, which degenerates
+ * yaw (sy/cy stop mattering) rather than actually breaking anything, but
+ * clamping short of it keeps mouse-look feeling like a normal FPS camera
+ * instead of letting it wrap/flip past vertical. */
+#define PITCH_LIMIT 1.5f
 
-static Target g_targets[N_TARGETS];
+static SkinnedMeshObject *g_swat;      /* blue: DISA swat_operator, real skin + animation */
+static MeshObject        *g_cyberdemon; /* red: Rushab notfreedom, static (no skin in source) */
+static float g_cyberdemon_base_yaw;
+static float g_sway_t = 0.0f;
 
-static Vec3f vec3_sub(Vec3f a, Vec3f b) { return (Vec3f){ a.x-b.x, a.y-b.y, a.z-b.z }; }
-static float vec3_dot(Vec3f a, Vec3f b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
-static Vec3f vec3_scale(Vec3f a, float s) { return (Vec3f){ a.x*s, a.y*s, a.z*s }; }
-
-/* Same yaw/pitch -> forward/right basis editor_main.c's own cam_basis and
- * renderer.c's build_vp/mat4_look_dir use -- kept consistent here too, so
- * "where the camera is looking" and "which way W walks" never disagree. */
 static void cam_basis(float yaw, float pitch, Vec3f *fwd, Vec3f *right) {
     float sy = sinf(yaw), cy = cosf(yaw);
     float sp = sinf(pitch), cp = cosf(pitch);
@@ -69,17 +63,49 @@ static void cam_basis(float yaw, float pitch, Vec3f *fwd, Vec3f *right) {
     if (right) *right = (Vec3f){ cy, 0.0f, -sy };
 }
 
-/* Builds a real box MeshObject from scratch -- the identical real
- * geometry pipeline phi.create_mesh/set_face_material drive from Python
- * (see this file's own top comment), called directly here instead. */
-static MeshObject *make_box(float hx, float hy, float hz, Vec3f pos, Vec3f color) {
+static MeshObject *make_ground(float hx, float hz) {
+    float hy = 1.0f;
     float positions[24] = {
         -hx,-hy,-hz,  hx,-hy,-hz,  hx,hy,-hz,  -hx,hy,-hz,
         -hx,-hy, hz,  hx,-hy, hz,  hx,hy, hz,  -hx,hy, hz,
     };
-    /* Outward-wound (verified by hand, same convention game/main.py's own
-     * _box() helper had to fix after a real, live winding bug found
-     * earlier in this project's history -- see phi.md's Phase 9 notes). */
+    unsigned short indices[36] = {
+        0,2,1,  0,3,2,
+        5,7,4,  5,6,7,
+        4,3,0,  4,7,3,
+        1,6,5,  1,2,6,
+        3,6,2,  3,7,6,
+        4,1,5,  4,0,1,
+    };
+    HalfEdgeMesh *hem = halfedge_build_from_triangles(positions, 8, indices, 36);
+    MeshObject *obj = scene_object_add();
+    obj->position = (Vec3f){0.0f, -1.0f, 0.0f};
+    obj->orientation = quat_identity();
+    obj->scale = (Vec3f){1.0f, 1.0f, 1.0f};
+    obj->hem = hem;
+    obj->render_mesh = (RenderMesh *)calloc(1, sizeof(RenderMesh));
+    float base_color[3] = { 0.15f, 0.16f, 0.18f };
+    float emission[3] = { 0.0f, 0.0f, 0.0f };
+    for (int f = 0; f < hem->face_count; f++)
+        halfedge_set_face_material(hem, f, base_color, 0.0f, 0.85f, emission);
+    meshobject_build_render_mesh_from_halfedge(obj->render_mesh, hem);
+    return obj;
+}
+
+/* A small, real emissive cube (self-glowing -- see HEFace::emission's own
+ * comment in halfedge.h) paired with a real point light of the same
+ * color at the same position (see gbuffer_set_point_lights' own comment
+ * in gbuffer.h/player_main.c) -- the cube's own emission alone would only
+ * make ITSELF glow, this renderer's deferred lighting pass has no real-
+ * time global illumination to carry that light onto nearby geometry, so
+ * the point light is what actually illuminates the two characters
+ * standing on either side of it. */
+static MeshObject *make_emissive_cube(Vec3f pos, float half_extent, Vec3f color, float point_light_energy) {
+    float h = half_extent;
+    float positions[24] = {
+        -h,-h,-h,  h,-h,-h,  h,h,-h,  -h,h,-h,
+        -h,-h, h,  h,-h, h,  h,h, h,  -h,h, h,
+    };
     unsigned short indices[36] = {
         0,2,1,  0,3,2,
         5,7,4,  5,6,7,
@@ -95,92 +121,143 @@ static MeshObject *make_box(float hx, float hy, float hz, Vec3f pos, Vec3f color
     obj->scale = (Vec3f){1.0f, 1.0f, 1.0f};
     obj->hem = hem;
     obj->render_mesh = (RenderMesh *)calloc(1, sizeof(RenderMesh));
-
     float base_color[3] = { color.x, color.y, color.z };
-    float emission[3] = { 0.0f, 0.0f, 0.0f };
+    /* A high emission value (well above 1.0, real HDR) so it visibly
+     * glows/blooms rather than just reading as a flat-lit colored box --
+     * see HEFace::emission's own comment on real, above-1.0 emissive
+     * surfaces being expected here. */
+    float emission[3] = { color.x * 8.0f, color.y * 8.0f, color.z * 8.0f };
     for (int f = 0; f < hem->face_count; f++)
-        halfedge_set_face_material(hem, f, base_color, 0.0f, 0.6f, emission);
+        halfedge_set_face_material(hem, f, base_color, 0.0f, 0.4f, emission);
     meshobject_build_render_mesh_from_halfedge(obj->render_mesh, hem);
+
+    PhiLight *pl = light_spawn(LIGHT_TYPE_POINT, pos);
+    if (pl) {
+        pl->color = color;
+        pl->energy = point_light_energy;
+    } else {
+        printf("[game] WARNING: light registry full, the emissive cube won't actually light anything\n");
+    }
     return obj;
 }
 
-static void attach_box_physics(MeshObject *obj, Vec3f half_extents, float mass, float restitution) {
-    float identity_quat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    obj->phys_body = phi_physics_add_box_body(g_world, half_extents, obj->position, identity_quat, mass, restitution);
-}
-
 void game_init(Renderer *renderer, PhiPhysicsWorld *phys_world, const InputState *input) {
+    (void)phys_world;
     g_renderer = renderer;
-    g_world = phys_world;
     g_input = input;
 
     renderer_set_camera(g_renderer, g_cam_pos, g_yaw, g_pitch);
 
-    /* Ground: a large, static (mass=0) box -- top surface at y=0 (center
-     * -1, half-extent 1), matching where targets below are spawned to
-     * rest. */
-    MeshObject *ground = make_box(40.0f, 1.0f, 40.0f, (Vec3f){0.0f, -1.0f, 0.0f}, (Vec3f){0.15f, 0.32f, 0.15f});
-    attach_box_physics(ground, (Vec3f){40.0f, 1.0f, 40.0f}, 0.0f, 0.3f);
+    make_ground(30.0f, 30.0f);
 
-    /* N_TARGETS real, dynamic physics targets, spread out in front of the
-     * camera's default facing direction (yaw=0 -> looking toward -Z),
-     * spawned a few units up so they visibly drop and settle onto the
-     * ground the moment the game starts -- real, live proof physics is
-     * actually running, same "watch it fall" moment game/main.py's own
-     * drop box gives the Python path. */
-    for (int i = 0; i < N_TARGETS; i++) {
-        float x = -7.5f + (float)i * 3.0f;
-        float z = -10.0f - 3.0f * (float)(i % 2);
-        Vec3f spawn = { x, 4.0f, z };
-        MeshObject *t = make_box(0.8f, 0.8f, 0.8f, spawn, (Vec3f){0.85f, 0.25f, 0.15f});
-        attach_box_physics(t, (Vec3f){0.8f, 0.8f, 0.8f}, 1.0f, 0.35f);
-        g_targets[i].obj = t;
-        g_targets[i].spawn_pos = (Vec3f){ x, 4.0f, z };
-    }
+    /* Ground's own top surface is at world Y=0 (position.y=-1, half-
+     * extent 1 -- see make_ground above), NOT position.y=-1 itself -- both
+     * characters below are placed with that in mind: their own local
+     * lowest vertex (not their local origin, which a Sketchfab export can
+     * put anywhere -- hips, pelvis, world origin, wherever the original
+     * scene had it) is what actually gets planted at world Y=0, via
+     * min_y*scale below. Placing them at a flat "position.y=-1" instead
+     * (an earlier, real bug in this file) silently assumed local-origin-
+     * at-feet and sank both characters up to a meter into the ground --
+     * caught after a live run put the noclip camera (no collision, no
+     * back-face culling -- see renderer_create's own comment) inside the
+     * exposed geometry, which reads as "the view is stuck inside solid
+     * mesh" from the player's side. */
 
-    printf("[game] FPS demo ready -- WASD to move, mouse to look, click to shoot %d targets\n", N_TARGETS);
-}
-
-/* Ray (g_cam_pos + fwd*t) vs. each target's bounding sphere (TARGET_RADIUS)
- * -- phi_physics.h has no raycast query, so this is a real, small, self-
- * contained hit test rather than an engine gap this demo needed to wait
- * on: every target's position is already this file's own data. Returns
- * the nearest hit target index, or -1. */
-static int find_shot_target(Vec3f origin, Vec3f fwd) {
-    int best = -1;
-    float best_t = SHOOT_RANGE;
-    for (int i = 0; i < N_TARGETS; i++) {
-        if (!g_targets[i].obj->phys_body) continue;
-        Vec3f to_target = vec3_sub(g_targets[i].obj->position, origin);
-        float t = vec3_dot(to_target, fwd);
-        if (t <= 0.0f || t >= best_t) continue;
-        Vec3f closest = vec3_sub(vec3_scale(fwd, t), to_target);   /* closest-point-on-ray minus target = perpendicular offset */
-        float perp_dist_sq = vec3_dot(closest, closest);
-        if (perp_dist_sq <= TARGET_RADIUS * TARGET_RADIUS) {
-            best = i;
-            best_t = t;
+    /* ---- Blue: DISA swat_operator, real skin + animation ---- */
+    g_swat = skinned_scene_object_add();
+    if (g_swat && skinned_mesh_object_load("game/assets/swat_operator/scene.gltf", (Vec3f){-3.0f, 0.0f, 0.0f}, g_swat)) {
+        /* Measured against the ACTUAL skinned pose (skinned_mesh_object_
+         * local_aabb), not raw bind-pose vertex data -- see its own
+         * comment on why a raw scan would be wrong here. */
+        Vec3f mn, mx;
+        float scale = 1.0f;
+        float min_y = 0.0f;
+        if (skinned_mesh_object_local_aabb(g_swat, &mn, &mx) && (mx.y - mn.y) > 1e-4f) {
+            scale = TARGET_HEIGHT_M / (mx.y - mn.y);
+            min_y = mn.y;
         }
+        g_swat->scale = (Vec3f){scale, scale, scale};
+        g_swat->position.y = -min_y * scale;
+        g_swat->orientation = quat_identity();
+        printf("[game] blue: swat_operator loaded, %d bones, %d clip(s), scaled x%.3f, feet at y=%.3f\n",
+               g_swat->arm.bone_count, g_swat->clip_count, scale, g_swat->position.y);
+    } else {
+        printf("[game] blue: FAILED to load swat_operator\n");
+        g_swat = NULL;
     }
-    return best;
+
+    /* ---- Red: Rushab cyberdemon (notfreedom), static (no skin in source) ---- */
+    HalfEdgeMesh *cyber_hem = halfedge_load_gltf("game/assets/notfreedom/scene.gltf");
+    if (cyber_hem) {
+        Vec3f half;
+        float scale = 1.0f;
+        float min_y = 0.0f;
+        if (meshobject_local_aabb_half_extents(cyber_hem, &half) && half.y > 1e-4f) {
+            scale = TARGET_HEIGHT_M / (half.y * 2.0f);
+            min_y = cyber_hem->verts[0].pos[1];
+            for (int i = 1; i < cyber_hem->vert_count; i++)
+                if (cyber_hem->verts[i].pos[1] < min_y) min_y = cyber_hem->verts[i].pos[1];
+        }
+
+        g_cyberdemon = scene_object_add();
+        g_cyberdemon->position = (Vec3f){3.0f, -min_y * scale, 0.0f};
+        /* Both characters spawn at their own file's neutral orientation
+         * (yaw 0, no extra rotation on top of it) rather than turned to
+         * face each other -- the request is "facing the camera", and the
+         * camera sits on the same +Z side both Sketchfab assets were
+         * almost certainly PHOTOGRAPHED/exported facing (that's the
+         * standard convention for a marketplace preview shot). This is a
+         * real, reasoned bet, not a verified fact -- I can't render a
+         * screenshot to confirm it myself. If either character turns out
+         * to be facing away once you look, tell me which one and I'll
+         * add a single 180-degree yaw flip for it. */
+        g_cyberdemon_base_yaw = 0.0f;
+        g_cyberdemon->orientation = quat_identity();
+        g_cyberdemon->scale = (Vec3f){scale, scale, scale};
+        g_cyberdemon->hem = cyber_hem;
+        g_cyberdemon->render_mesh = (RenderMesh *)calloc(1, sizeof(RenderMesh));
+        meshobject_build_render_mesh_from_halfedge(g_cyberdemon->render_mesh, cyber_hem);
+        printf("[game] red: notfreedom (cyberdemon) loaded, no skin in source -- using idle sway, scaled x%.3f, feet at y=%.3f\n",
+               scale, g_cyberdemon->position.y);
+    } else {
+        printf("[game] red: FAILED to load notfreedom\n");
+        g_cyberdemon = NULL;
+    }
+
+    /* A real sun (light.h) -- direction only (this codebase's own real-
+     * time lighting pass doesn't yet read a sun's color/energy, just its
+     * direction -- see player_main.c's own light-gathering comment), a
+     * bit higher and more front-on than the engine's previous hardcoded
+     * default so it actually rakes across both characters' faces instead
+     * of grazing them from directly behind. */
+    PhiLight *sun = light_spawn(LIGHT_TYPE_SUN, (Vec3f){0.0f, 0.0f, 0.0f});
+    if (sun) sun->direction = (Vec3f){0.3f, 0.8f, 0.5f};
+
+    /* A small emissive cube between the two characters (x=0, the midpoint
+     * of their x=-3/x=3 spawn points), roughly chest-height, paired with
+     * a real point light at the same spot -- see make_emissive_cube's own
+     * comment on why both are needed for it to actually "light them both
+     * up" rather than just glow on its own. */
+    make_emissive_cube((Vec3f){0.0f, 1.0f, 0.0f}, 0.15f, (Vec3f){1.0f, 0.75f, 0.35f}, 900.0f);
+
+    printf("[game] Tour De Force II -- WASD to move, mouse to look\n");
 }
 
 void game_tick(float dt) {
-    /* ---- Mouse look: real relative motion (InputState::mouse_dx/dy --
-     * native: XGrabPointer-confined + warped-to-center each frame;
-     * wasm: the browser's real Pointer Lock API's movementX/Y), not a
-     * hand-diffed absolute-position delta -- input_capture_mouse (see
-     * player_main.c's own click-to-engage/Escape-to-release policy) is
-     * what makes this both accurate (no window-edge clamping) and
-     * literally "steal the mouse until Escape", real OS/browser-level
-     * pointer capture, not a cosmetic hidden-cursor illusion. ---- */
+    /* ---- Mouse look: real relative motion, both axes (see input.h's own
+     * mouse_dx/dy comments) -- pitch clamped to +/-PITCH_LIMIT (see its
+     * own comment) so looking straight up/down doesn't flip the camera
+     * past vertical. ---- */
     g_yaw   -= (float)g_input->mouse_dx * MOUSE_SENS;
     g_pitch -= (float)g_input->mouse_dy * MOUSE_SENS;
-    if (g_pitch > 1.5f) g_pitch = 1.5f;
-    if (g_pitch < -1.5f) g_pitch = -1.5f;
+    if (g_pitch > PITCH_LIMIT) g_pitch = PITCH_LIMIT;
+    if (g_pitch < -PITCH_LIMIT) g_pitch = -PITCH_LIMIT;
 
-    /* ---- WASD, on the flat ground plane (pitch=0 for movement so
-     * looking up/down doesn't slow horizontal walking -- standard FPS
-     * convention). ---- */
+    /* WASD movement stays on the flat ground plane regardless of pitch
+     * (cam_basis(g_yaw, 0.0f, ...) below, not g_pitch) -- standard FPS
+     * convention: looking up/down doesn't slow or tilt horizontal
+     * walking. */
     Vec3f fwd_flat, right;
     cam_basis(g_yaw, 0.0f, &fwd_flat, &right);
     float mx = 0.0f, mz = 0.0f;
@@ -193,40 +270,22 @@ void game_tick(float dt) {
         g_cam_pos.x += (mx / mlen) * MOVE_SPEED * dt;
         g_cam_pos.z += (mz / mlen) * MOVE_SPEED * dt;
     }
-
     renderer_set_camera(g_renderer, g_cam_pos, g_yaw, g_pitch);
 
-    /* ---- Click to shoot -- lmb_click is a real one-shot edge, drained
-     * once per frame by player_main.c after game_tick returns (a real
-     * fix landed alongside this demo: nothing was consuming it before,
-     * so it would have latched permanently true after the first click). ---- */
-    if (g_input->lmb_click) {
-        g_shots_fired++;
-        Vec3f fwd;
-        cam_basis(g_yaw, g_pitch, &fwd, NULL);
-        int hit = find_shot_target(g_cam_pos, fwd);
-        if (hit >= 0) {
-            g_hits++;
-            phi_physics_apply_impulse(g_targets[hit].obj->phys_body, vec3_scale(fwd, SHOOT_IMPULSE), (Vec3f){0,0,0});
-            printf("[game] hit target %d! (%d/%d shots landed)\n", hit, g_hits, g_shots_fired);
-        } else {
-            printf("[game] miss (%d/%d shots landed)\n", g_hits, g_shots_fired);
-        }
+    /* ---- The cyberdemon's idle sway (see this file's own top comment on
+     * why this exists instead of real skeletal animation) -- a slow,
+     * honest yaw oscillation around its base facing, real per-frame
+     * motion, not a static prop. ---- */
+    if (g_cyberdemon) {
+        g_sway_t += dt;
+        float yaw = g_cyberdemon_base_yaw + sinf(g_sway_t * CYBERDEMON_SWAY_SPEED) * CYBERDEMON_SWAY_AMPLITUDE;
+        g_cyberdemon->orientation = (Quat){0.0f, sinf(yaw * 0.5f), 0.0f, cosf(yaw * 0.5f)};
     }
-
-    /* ---- Targets that fall off the world reset to their spawn point --
-     * keeps the range usable indefinitely instead of it slowly emptying
-     * out. A real per-frame physics-state check/reset from pure C. ---- */
-    for (int i = 0; i < N_TARGETS; i++) {
-        MeshObject *t = g_targets[i].obj;
-        if (t->phys_body && t->position.y < RESPAWN_BELOW_Y) {
-            float identity_quat[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-            phi_physics_set_transform(t->phys_body, g_targets[i].spawn_pos, identity_quat);
-            phi_physics_set_linear_velocity(t->phys_body, (Vec3f){0.0f, 0.0f, 0.0f});
-        }
-    }
+    /* g_swat's own animation clip advances automatically every frame via
+     * player_main.c's skinned_scene_object_get_all/skinned_mesh_object_
+     * update loop (see skinned_scene_objects.h) -- nothing to do here. */
 }
 
 void game_shutdown(void) {
-    printf("[game] shutting down -- %d/%d shots landed\n", g_hits, g_shots_fired);
+    printf("[game] shutting down\n");
 }
