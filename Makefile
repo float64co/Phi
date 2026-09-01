@@ -302,7 +302,7 @@ ENGINE_CORE_SRCS := \
 	$(BULLET_SRCS)            \
 	$(MP_EMBED_SRCS)
 
-.PHONY: all wasm native player player_wasm run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test node_graph_test mp_node_test phi_h_test render_hooks_test input_gamepad_test mp_phase9_gap_test audio_wav_test
+.PHONY: all wasm native player player_wasm run clean debug watch mp_test mp_test_win32 mp_test_wasm mp_stress mesh_edit_test fracture_test mp_console_test asset_protocol_test area_tree_test phi_prop_test mp_prop_panel_test phi_physics_test phi_physics_meshobject_test mp_physics_test animation_test light_test fracture_body_test path_tracer_test skinned_mesh_object_test ragdoll_test scene_objects_test mp_geometry_test node_graph_test mp_node_test phi_h_test render_hooks_test input_gamepad_test mp_phase9_gap_test audio_wav_test quat_axis_convert_test
 
 all: wasm native
 
@@ -785,6 +785,21 @@ audio_wav_test: $(OUT_AUDIO_WAV_TEST)
 $(OUT_AUDIO_WAV_TEST): $(AUDIO_WAV_TEST_SRCS) | $(BUILDDIR)
 	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(AUDIO_WAV_TEST_SRCS) -o $(OUT_AUDIO_WAV_TEST) -lm
 	@echo "audio_wav_test build complete -> $(OUT_AUDIO_WAV_TEST)"
+
+# Numerical verification for meshobject.c's quat_y_up_to_z_up/quat_z_up_
+# to_y_up (2026-08-19's Z-up axis-convention change, see vec3.h's own
+# coordinate-convention note) -- no GL, no window, needed specifically
+# because this environment can't render a live animated character to
+# eyeball whether a skeleton's rotations survived the conversion.
+QUAT_AXIS_CONVERT_TEST_SRCS := $(SRCDIR)/quat_axis_convert_test_main.c $(SRCDIR)/meshobject.c $(SRCDIR)/halfedge.c
+OUT_QUAT_AXIS_CONVERT_TEST := $(BUILDDIR)/quat_axis_convert_test
+
+quat_axis_convert_test: $(OUT_QUAT_AXIS_CONVERT_TEST)
+	./$(OUT_QUAT_AXIS_CONVERT_TEST)
+
+$(OUT_QUAT_AXIS_CONVERT_TEST): $(QUAT_AXIS_CONVERT_TEST_SRCS) | $(BUILDDIR)
+	$(NATIVE_CC) -O1 -Wall -I$(SRCDIR) $(QUAT_AXIS_CONVERT_TEST_SRCS) -o $(OUT_QUAT_AXIS_CONVERT_TEST) -lm
+	@echo "quat_axis_convert_test build complete -> $(OUT_QUAT_AXIS_CONVERT_TEST)"
 
 # The Python physics API surface (phi.enable_physics/apply_impulse/
 # get_velocity/set_velocity, see mp_port.c) against a REAL embedded

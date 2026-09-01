@@ -511,15 +511,26 @@ void mat4_perspective(float *m, float fovy, float aspect, float znear, float zfa
     m[14] = (2.0f * zfar * znear) / (znear - zfar);
 }
 
+/* Z-up (2026-08-19): yaw orbits about the vertical (Z) axis, pitch tilts
+ * toward/away from it -- X=right, Y=green/"forward-ish" horizontal, Z=up,
+ * matching Blender's own convention (see phi.md's coordinate-convention
+ * note). This is the SAME right/up/forward formula this function always
+ * had, just with the vertical axis's role moved from index 1 (Y) to
+ * index 2 (Z) via the fixed +90-degree-about-X change of basis (see
+ * vec3.h's vec3_y_up_to_z_up) applied to each of the three basis vectors
+ * -- derived that way (rotate the old, already-correct Y-up basis by a
+ * real rigid rotation) specifically to avoid a handedness flip a naive
+ * y/z swap would introduce (a transposition is orientation-reversing; a
+ * 90-degree rotation isn't). */
 static void mat4_look_dir(float *m,
                            float px, float py, float pz,
                            float yaw, float pitch) {
     float sy = sinf(yaw),  cy = cosf(yaw);
     float sp = sinf(pitch), cp = cosf(pitch);
 
-    float rx =  cy,       ry = 0.0f, rz = -sy;
-    float ux = sy*sp,     uy = cp,   uz =  cy*sp;
-    float fx = -sy*cp,    fy = sp,   fz = -cy*cp;
+    float rx =  cy,       ry =  sy,     rz = 0.0f;
+    float ux = sy*sp,     uy = -cy*sp,  uz = cp;
+    float fx = -sy*cp,    fy =  cy*cp,  fz = sp;
 
     m[0]  = rx;   m[4]  = ry;   m[8]  = rz;   m[12] = -(rx*px + ry*py + rz*pz);
     m[1]  = ux;   m[5]  = uy;   m[9]  = uz;   m[13] = -(ux*px + uy*py + uz*pz);
@@ -1209,16 +1220,18 @@ static unsigned int s_grid_vbo = 0;
 static unsigned int s_grid_vao = 0;
 static int          s_grid_vert_count = 0;
 
-/* Reference grid on the XZ plane -- built from thin SOLID quads (two
- * triangles per line), same "full-bright normal == light dir" trick and
- * the same r->program/u_mvp/u_mat_color/u_object_id shape every helper-
- * geometry draw in this file uses, deliberately NOT renderer_draw_wire_
- * box's GL_LINES approach: that function's own comment (and gizmo.c's,
- * which switched away from it for exactly this reason) documents that a
- * 1-pixel line can genuinely rasterize in the geometry pass and still
- * vanish from the final composited frame, suppressed by TAA/FXAA's
- * temporal/edge-smoothing passes -- a real, previously-hit bug in this
- * codebase, not a hypothetical one, so the grid doesn't repeat it. */
+/* Reference grid on the XY plane (Z-up, 2026-08-19 -- see vec3.h's
+ * coordinate-convention note; was the XZ plane back when Y was vertical)
+ * -- built from thin SOLID quads (two triangles per line), same
+ * "full-bright normal == light dir" trick and the same r->program/u_mvp/
+ * u_mat_color/u_object_id shape every helper-geometry draw in this file
+ * uses, deliberately NOT renderer_draw_wire_box's GL_LINES approach:
+ * that function's own comment (and gizmo.c's, which switched away from
+ * it for exactly this reason) documents that a 1-pixel line can
+ * genuinely rasterize in the geometry pass and still vanish from the
+ * final composited frame, suppressed by TAA/FXAA's temporal/edge-
+ * smoothing passes -- a real, previously-hit bug in this codebase, not
+ * a hypothetical one, so the grid doesn't repeat it. */
 void renderer_draw_grid(Renderer *r, Vec3f center, float half_extent,
                          float spacing, float line_width,
                          float cr, float cg, float cb) {
@@ -1231,15 +1244,15 @@ void renderer_draw_grid(Renderer *r, Vec3f center, float half_extent,
         float *verts = (float *)malloc((size_t)line_count * (size_t)floats_per_line * sizeof(float));
         float *vp_ = verts;
         float hw = line_width * 0.5f;
-        float z0 = center.z - half_extent, z1 = center.z + half_extent;
+        float y0 = center.y - half_extent, y1 = center.y + half_extent;
         float x0 = center.x - half_extent, x1 = center.x + half_extent;
 
         for (int i = -n; i <= n; i++) {
-            /* Line running along Z at fixed x */
+            /* Line running along Y at fixed x */
             float x = center.x + (float)i * spacing;
             float qx[4][3] = {
-                {x - hw, center.y, z0}, {x + hw, center.y, z0},
-                {x + hw, center.y, z1}, {x - hw, center.y, z1},
+                {x - hw, y0, center.z}, {x + hw, y0, center.z},
+                {x + hw, y1, center.z}, {x - hw, y1, center.z},
             };
             int tri[6] = {0, 1, 2, 0, 2, 3};
             for (int k = 0; k < 6; k++) {
@@ -1247,11 +1260,11 @@ void renderer_draw_grid(Renderer *r, Vec3f center, float half_extent,
                 *vp_++ = cp[0]; *vp_++ = cp[1]; *vp_++ = cp[2];
                 *vp_++ = 0.577f; *vp_++ = 0.577f; *vp_++ = 0.577f;
             }
-            /* Line running along X at fixed z */
-            float z = center.z + (float)i * spacing;
+            /* Line running along X at fixed y */
+            float y = center.y + (float)i * spacing;
             float qz[4][3] = {
-                {x0, center.y, z - hw}, {x1, center.y, z - hw},
-                {x1, center.y, z + hw}, {x0, center.y, z + hw},
+                {x0, y - hw, center.z}, {x1, y - hw, center.z},
+                {x1, y + hw, center.z}, {x0, y + hw, center.z},
             };
             for (int k = 0; k < 6; k++) {
                 const float *cp = qz[tri[k]];

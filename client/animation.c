@@ -3,6 +3,31 @@
 #include <string.h>
 #include <math.h>
 
+/* Z-up (2026-08-19, see vec3.h's coordinate-convention note): converts
+ * one raw keyframe value slot in place, dispatched by channel path --
+ * translation/rotation use the same real conversion armature.c's own
+ * bone rest_translation/rest_rotation do (see meshobject.c's quat_y_up_
+ * to_z_up for why rotation needs actual quaternion conjugation, not just
+ * a component swap, and client/quat_axis_convert_test_main.c for how
+ * that's verified); scale uses the separate non-negating vec3_swap_yz_
+ * for_scale (see its own comment in vec3.h). Cubic-spline in/out tangent
+ * slots get the identical conversion as the value slot -- a tangent is a
+ * derivative vector, and differentiation commutes with the linear change
+ * of basis every one of these conversions is, so there's no separate
+ * "tangent version" of any of them needed. */
+static void convert_channel_value(AnimPath path, float *v) {
+    if (path == ANIM_PATH_TRANSLATION) {
+        Vec3f p = vec3_y_up_to_z_up((Vec3f){v[0], v[1], v[2]});
+        v[0] = p.x; v[1] = p.y; v[2] = p.z;
+    } else if (path == ANIM_PATH_ROTATION) {
+        Quat q = quat_y_up_to_z_up((Quat){v[0], v[1], v[2], v[3]});
+        v[0] = q.x; v[1] = q.y; v[2] = q.z; v[3] = q.w;
+    } else {   /* ANIM_PATH_SCALE */
+        Vec3f s = vec3_swap_yz_for_scale((Vec3f){v[0], v[1], v[2]});
+        v[0] = s.x; v[1] = s.y; v[2] = s.z;
+    }
+}
+
 int animation_load_clips(const cgltf_data *data, const Armature *arm,
                           AnimClip *out_clips, int max_clips) {
     if (!data || !arm || !out_clips) return 0;
@@ -64,13 +89,16 @@ int animation_load_clips(const cgltf_data *data, const Armature *arm,
                      * `comp` floats -- read all three into their matching
                      * slot so animation_sample_clip's Hermite evaluation
                      * has both tangents available. */
-                    for (int slot = 0; slot < 3; slot++)
+                    for (int slot = 0; slot < 3; slot++) {
                         cgltf_accessor_read_float(samp->output, (cgltf_size)(k * 3 + slot), out_ch->values[k][slot], comp);
+                        convert_channel_value(out_ch->path, out_ch->values[k][slot]);
+                    }
                 } else {
                     /* LINEAR/STEP: one value per keyframe, stored uniformly
                      * in slot [1] (the "value" slot) so sampling doesn't
                      * need to branch on interpolation mode to find it. */
                     cgltf_accessor_read_float(samp->output, (cgltf_size)k, out_ch->values[k][1], comp);
+                    convert_channel_value(out_ch->path, out_ch->values[k][1]);
                 }
             }
             ch_count++;

@@ -37,7 +37,9 @@ PhiPhysicsWorld *phi_physics_world_create(void) {
     w->broadphase         = new btDbvtBroadphase();
     w->solver             = new btSequentialImpulseConstraintSolver();
     w->world = new btDiscreteDynamicsWorld(w->dispatcher, w->broadphase, w->solver, w->collision_config);
-    w->world->setGravity(btVector3(0.0f, -9.81f, 0.0f));
+    /* Z-up (2026-08-19, see vec3.h's coordinate-convention note): gravity
+     * pulls toward -Z now, not -Y. */
+    w->world->setGravity(btVector3(0.0f, 0.0f, -9.81f));
     return w;
 }
 

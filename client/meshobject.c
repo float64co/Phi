@@ -16,6 +16,52 @@ Quat quat_normalize(Quat q) {
     return r;
 }
 
+/* Hamilton product, (x,y,z,w) layout throughout this codebase (see
+ * meshobject.h's own Quat comment) -- the one real primitive quat_y_up_
+ * to_z_up/quat_z_up_to_y_up below are built from. Not exposed in
+ * meshobject.h: every current caller only needs the two axis-conversion
+ * functions, not general quaternion multiplication -- add a public
+ * declaration if/when something else genuinely needs it too, rather than
+ * exposing it speculatively now. */
+static Quat quat_mul(Quat a, Quat b) {
+    return (Quat){
+        a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+        a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+        a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+        a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+    };
+}
+
+/* Rotation counterparts of vec3.h's vec3_y_up_to_z_up/vec3_z_up_to_y_up
+ * (see that header's own coordinate-convention note, 2026-08-19) --
+ * conjugation by the identical fixed +/-90-degree-about-X rotation those
+ * two apply to positions: q' = R * q * R^-1, the standard way a rotation
+ * expressed in one coordinate frame is re-expressed in another related
+ * to it by a fixed change of basis R. R here is (sin45,0,0,cos45), R^-1
+ * its conjugate (negate the vector part -- valid since R is a unit
+ * quaternion). Used by armature.c (bone rest_rotation) and animation.c
+ * (rotation animation channels) so a skinned character's skeleton stays
+ * geometrically consistent with its own now-Z-up mesh vertices/normals
+ * (skinned_mesh.c) once both go through their respective conversions --
+ * without this, bind pose might look approximately right (many rest
+ * rotations are near-identity) but any actual joint rotation during
+ * playback would visibly bend on the wrong axes. Verified numerically
+ * (client/quat_axis_convert_test_main.c: for random q/v pairs, rotating
+ * v by q and then converting the result must equal converting v and q
+ * separately and then rotating) rather than only visually, since this
+ * environment can't render a live animated character to eyeball. */
+Quat quat_y_up_to_z_up(Quat q) {
+    static const Quat R     = { 0.70710678f, 0.0f, 0.0f, 0.70710678f };
+    static const Quat R_inv = { -0.70710678f, 0.0f, 0.0f, 0.70710678f };
+    return quat_mul(quat_mul(R, q), R_inv);
+}
+
+Quat quat_z_up_to_y_up(Quat q) {
+    static const Quat R     = { -0.70710678f, 0.0f, 0.0f, 0.70710678f };
+    static const Quat R_inv = { 0.70710678f, 0.0f, 0.0f, 0.70710678f };
+    return quat_mul(quat_mul(R, q), R_inv);
+}
+
 Quat quat_slerp(Quat a, Quat b, float t) {
     float d = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
     if (d < 0.0f) { b.x = -b.x; b.y = -b.y; b.z = -b.z; b.w = -b.w; d = -d; }

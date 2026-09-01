@@ -55,7 +55,11 @@ static void mat4_look_at(float *m, float ex, float ey, float ez,
     float flen = sqrtf(fx*fx + fy*fy + fz*fz);
     fx /= flen; fy /= flen; fz /= flen;
 
-    float upx = 0.0f, upy = 1.0f, upz = 0.0f;
+    /* Z-up (2026-08-19, see vec3.h's coordinate-convention note): world
+     * "up" for this generic look-at is now +Z, not +Y. Degenerate
+     * fallback (forward nearly parallel to up) unchanged -- +X is still
+     * a fine arbitrary perpendicular-ish hint either way. */
+    float upx = 0.0f, upy = 0.0f, upz = 1.0f;
     if (fabsf(fx*upx + fy*upy + fz*upz) > 0.999f) { upx = 1.0f; upy = 0.0f; upz = 0.0f; }
 
     float rx = fy*upz - fz*upy, ry = fz*upx - fx*upz, rz = fx*upy - fy*upx;

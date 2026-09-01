@@ -20,10 +20,11 @@
  * MicroPython CRITICAL WARNING section already established). This file
  * is a real, hand-written wrapper, not upstream's own C surface.
  *
- * Units: gravity defaults to real-world (0,-9.81,0), i.e. this codebase's
- * scene units are assumed roughly meter-scale for Bullet's solver
- * tolerances to behave sanely -- not verified against the actual scene
- * scale (the one test object spans ~16 units), flagged as an open
+ * Units: gravity defaults to real-world (0,0,-9.81) -- Z is Phi's vertical
+ * axis (see vec3.h's coordinate-convention note, 2026-08-19) -- i.e. this
+ * codebase's scene units are assumed roughly meter-scale for Bullet's
+ * solver tolerances to behave sanely -- not verified against the actual
+ * scene scale (the one test object spans ~16 units), flagged as an open
  * question rather than silently assumed correct. */
 
 typedef struct PhiPhysicsWorld PhiPhysicsWorld;   /* opaque */

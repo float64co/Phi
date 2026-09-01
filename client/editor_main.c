@@ -171,13 +171,15 @@ static double       g_last_t   = 0.0;
  * Initial values chosen so frame 1's eye position matches exactly what
  * this used to be hardcoded to -- (128,100,120) looking toward -Z at
  * yaw=pitch=0 -- so landing this was not a visible camera jump:
- * pivot = eye + forward*distance with forward=(0,0,-1) at yaw=pitch=0,
- * distance=40 -> pivot=(128,100,80). */
-static Vec3f  g_cam_pivot    = {128.0f, 100.0f, 80.0f};
+ * pivot = eye + forward*distance with forward=(0,1,0) at yaw=pitch=0
+ * (Z-up, 2026-08-19 -- see vec3.h's coordinate-convention note; this used
+ * to be forward=(0,0,-1) back when Y was vertical), distance=40 ->
+ * pivot=(128,80,100). */
+static Vec3f  g_cam_pivot    = {128.0f, 80.0f, 100.0f};
 static float  g_cam_distance = 40.0f;
 static float  g_cam_yaw      = 0.0f;
 static float  g_cam_pitch    = 0.0f;
-static Vec3f  g_cam_pos      = {128.0f, 100.0f, 120.0f};
+static Vec3f  g_cam_pos      = {128.0f, 40.0f, 100.0f};
 
 /* Blender-style MMB-drag camera navigation state -- same "recompute from
  * the absolute mouse position every frame relative to where the drag
@@ -261,7 +263,10 @@ static MeshObject *add_mesh_object_from_path(const char *path, float scale, Vec3
  * convention Add Light already established, so a deliberately-added
  * object lands somewhere the user's actually looking at). */
 static void spawn_test_mesh_object(void) {
-    add_mesh_object_from_path("assets/cube.gltf", 16.0f, (Vec3f){128.0f, 100.0f, 90.0f});
+    /* Z-up (2026-08-19, see vec3.h's coordinate-convention note): was
+     * (128,100,90) back when Y was vertical -- same real position, just
+     * relabeled onto the new axis roles. */
+    add_mesh_object_from_path("assets/cube.gltf", 16.0f, (Vec3f){128.0f, 90.0f, 100.0f});
 }
 
 /* Frees obj's GPU-side mesh/physics body and removes it from the scene
@@ -310,12 +315,15 @@ static void rebuild_mesh_render(MeshObject *obj, const char *op_name, int tris_b
  * gizmo are the scene content that exists now. */
 
 /* Ground-aligned reference grid -- centered/sized to match
- * g_ground_phys_body exactly (position (128,40,90), half-extents
- * (200,10,200), so its top surface -- and this grid -- sit at y=50), so
+ * g_ground_phys_body exactly (position (128,90,40), half-extents
+ * (200,200,10), so its top surface -- and this grid -- sit at z=50), so
  * the one visual reference plane in the scene is the same plane the test
- * object actually lands on, not an arbitrary unrelated y=0. Always drawn
+ * object actually lands on, not an arbitrary unrelated z=0. Always drawn
  * (no toggle) -- a plain "is there a ground reference" ask, not a
- * feature that needs to be turned off. */
+ * feature that needs to be turned off. Z-up (2026-08-19, see vec3.h's
+ * coordinate-convention note): this used to be y=50/(200,10,200)/z=90
+ * back when Y was vertical -- the scene's real layout is unchanged, just
+ * relabeled onto the new axis roles. */
 static void draw_scene_grid(void) {
     /* Thin + light grey per an explicit request. Width is a real world-
      * space quad (see renderer_draw_grid's own comment on why: solid
@@ -325,7 +333,7 @@ static void draw_scene_grid(void) {
      * 0.3) rather than switched to an actual 1px GL_LINES draw, which
      * would reintroduce that exact bug -- a hairline via solid geometry,
      * not a literal device-pixel line. */
-    renderer_draw_grid(g_renderer, (Vec3f){128.0f, 50.0f, 90.0f},
+    renderer_draw_grid(g_renderer, (Vec3f){128.0f, 90.0f, 50.0f},
                         200.0f, 10.0f, 0.05f, 0.65f, 0.65f, 0.65f);
 }
 
@@ -546,13 +554,15 @@ static int anim_list_clips(char out_names[][64], float *out_durations, int max_c
 /* fwd/right/up basis matched EXACTLY against compute_scene_ray/
  * renderer.c's build_vp/mat4_look_dir -- every camera-navigation
  * function below (zoom/orbit/pan) reuses this same one, so none of them
- * can silently drift from what's actually rendered or from each other. */
+ * can silently drift from what's actually rendered or from each other.
+ * Z-up (2026-08-19, see vec3.h's coordinate-convention note): the same
+ * formula mat4_look_dir carries, kept in exact lockstep with it. */
 static void cam_basis(float yaw, float pitch, Vec3f *fwd, Vec3f *right, Vec3f *up) {
     float sy = sinf(yaw),   cy = cosf(yaw);
     float sp = sinf(pitch), cp = cosf(pitch);
-    if (fwd)   *fwd   = (Vec3f){ -sy*cp, sp, -cy*cp };
-    if (right) *right = (Vec3f){  cy,    0.0f, -sy   };
-    if (up)    *up    = (Vec3f){  sy*sp, cp,   cy*sp };
+    if (fwd)   *fwd   = (Vec3f){ -sy*cp,  cy*cp, sp   };
+    if (right) *right = (Vec3f){  cy,     sy,    0.0f };
+    if (up)    *up    = (Vec3f){  sy*sp, -cy*sp, cp   };
 }
 
 /* Recomputes g_cam_pos from pivot/distance/yaw/pitch and pushes it to
@@ -2132,16 +2142,19 @@ int main(void) {
      * context menu) something to actually land on -- there's no other
      * collidable scene geometry (the octree world is gone, see the
      * Client/server model note in phi.md's Phase 1 status). Ground top
-     * surface sits at y=50 (center 40, half-extent 10), well below the
-     * test object's y=100 default spawn height, so enabling physics on
-     * it is an actually-visible fall, not an instant no-op. Created
-     * BEFORE phi_mp_register_targets below, since that hands the world
-     * pointer off for phi.enable_physics/apply_impulse/etc. to use. */
+     * surface sits at z=50 (center 40, half-extent 10), well below the
+     * test object's z=100 default spawn height, so enabling physics on
+     * it is an actually-visible fall, not an instant no-op. Z-up
+     * (2026-08-19, see vec3.h's coordinate-convention note): this used to
+     * be y=50/y=100 back when Y was vertical -- same real layout, just
+     * relabeled onto the new axis roles. Created BEFORE phi_mp_register_
+     * targets below, since that hands the world pointer off for phi.
+     * enable_physics/apply_impulse/etc. to use. */
     g_phys_world = phi_physics_world_create();
     {
         float identity_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-        Vec3f ground_half = {200.0f, 10.0f, 200.0f};
-        Vec3f ground_pos  = {128.0f, 40.0f, 90.0f};
+        Vec3f ground_half = {200.0f, 200.0f, 10.0f};
+        Vec3f ground_pos  = {128.0f, 90.0f, 40.0f};
         g_ground_phys_body = phi_physics_add_box_body(g_phys_world, ground_half, ground_pos, identity_quat, 0.0f, 0.3f);
     }
 
@@ -2182,8 +2195,11 @@ int main(void) {
     /* Phase 4's GPU-skinning + Timeline demonstration object (see
      * g_skinned_test_obj's own comment) -- loaded once at startup, same
      * "auto-load a real fixture" precedent spawn_test_mesh_object()
-     * already established for g_test_mesh_object, just a separate slot. */
-    g_skinned_test_loaded = skinned_mesh_object_load("assets/test/armature_test.gltf", (Vec3f){170.0f, 55.0f, 90.0f}, &g_skinned_test_obj);
+     * already established for g_test_mesh_object, just a separate slot.
+     * Z-up (2026-08-19, see vec3.h's coordinate-convention note): was
+     * (170,55,90) back when Y was vertical -- same real position, just
+     * relabeled onto the new axis roles. */
+    g_skinned_test_loaded = skinned_mesh_object_load("assets/test/armature_test.gltf", (Vec3f){170.0f, 90.0f, 55.0f}, &g_skinned_test_obj);
     /* skinned_mesh_object_load itself deliberately auto-starts playback
      * (looped) -- a real, tested library-level default (skinned_mesh_
      * object_test's own "first clip auto-starts playing" check), the

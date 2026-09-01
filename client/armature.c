@@ -28,6 +28,33 @@ static void mat4_from_trs(Vec3f t, Quat r, Vec3f s, float *out) {
     out[12] = t.x; out[13] = t.y; out[14] = t.z; out[15] = 1.0f;
 }
 
+/* Conjugates a raw column-major 4x4 matrix by the same fixed +90-degree-
+ * about-X rotation vec3.h's vec3_y_up_to_z_up/meshobject.h's quat_y_up_
+ * to_z_up apply to positions/rotations (2026-08-19, see vec3.h's
+ * coordinate-convention note) -- M' = R*M*R^-1, the general form for
+ * re-expressing ANY affine transform (not just a clean TRS one) in a
+ * rotated coordinate frame. Used below for inverseBindMatrices
+ * specifically, which this loader reads as a raw matrix straight off the
+ * glTF accessor (see the read call right below) rather than through
+ * mat4_from_trs/mat4_decompose_trs -- conjugating the matrix directly
+ * sidesteps decomposing it at all, avoiding a second, unrelated source
+ * of numerical error on top of the real, already-verified quat_y_up_to_
+ * z_up conversion (see client/quat_axis_convert_test_main.c) this
+ * function's own R/R^-1 constants are built from. Load-time only (once
+ * per skin, not the real per-frame armature_compute_world_transforms/
+ * _skinning_matrices hot path below), so building R/R^-1 fresh via
+ * mat4_from_trs here rather than caching them is a real, deliberate,
+ * zero-cost-that-matters simplicity choice. */
+static void convert_mat4_y_up_to_z_up(float *m) {
+    Quat r_quat = { 0.70710678f, 0.0f, 0.0f, 0.70710678f };
+    Quat r_inv_quat = { -0.70710678f, 0.0f, 0.0f, 0.70710678f };
+    float r_mat[16], r_inv_mat[16], tmp[16];
+    mat4_from_trs((Vec3f){0,0,0}, r_quat, (Vec3f){1,1,1}, r_mat);
+    mat4_from_trs((Vec3f){0,0,0}, r_inv_quat, (Vec3f){1,1,1}, r_inv_mat);
+    phi_mat4_mul(tmp, r_mat, m);
+    phi_mat4_mul(m, tmp, r_inv_mat);
+}
+
 /* Decomposes a column-major TRS-only 4x4 matrix (no shear -- every
  * matrix this is ever called on is either cgltf_node_transform_world's
  * own output, itself a product of pure TRS node transforms, or an
@@ -211,6 +238,18 @@ int armature_load_from_skin(const cgltf_skin *skin, Armature *out) {
             mat4_decompose_trs(composed, &b->rest_translation, &b->rest_rotation, &b->rest_scale);
         }
 
+        /* Z-up (2026-08-19, see vec3.h's coordinate-convention note):
+         * everything above this point is still expressed in the glTF
+         * file's own Y-up space (including the ancestor-composition
+         * branch just above, which reads real glTF node data) -- convert
+         * to Phi's Z-up engine space here, once, after that's settled.
+         * rest_scale uses the separate, non-negating vec3_swap_yz_for_
+         * scale (see its own comment on why it's not the same operation
+         * as translation/rotation's). */
+        b->rest_translation = vec3_y_up_to_z_up(b->rest_translation);
+        b->rest_rotation = quat_y_up_to_z_up(b->rest_rotation);
+        b->rest_scale = vec3_swap_yz_for_scale(b->rest_scale);
+
         /* cgltf_accessor_read_float, not raw buffer_view pointer math --
          * correctly handles a non-default stride/sparse accessor, same
          * established precedent halfedge_gltf.c's own accessor reads
@@ -219,6 +258,13 @@ int armature_load_from_skin(const cgltf_skin *skin, Armature *out) {
             printf("[armature] load failed: could not read inverseBindMatrices[%d]\n", orig_i);
             return 0;
         }
+        /* inverseBindMatrices maps a mesh vertex FROM world space back
+         * INTO this bone's own local bind space -- also real glTF-file
+         * (Y-up) data, needing the identical axis conversion, just
+         * applied to a raw matrix (see convert_mat4_y_up_to_z_up's own
+         * comment on why a direct conjugation, not decompose-convert-
+         * recompose, is used here specifically). */
+        convert_mat4_y_up_to_z_up(b->inverse_bind);
     }
 
     return 1;

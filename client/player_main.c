@@ -144,13 +144,15 @@ static char *read_whole_file(const char *path) {
  * yaw/cam_pitch via the identical basis formula editor_main.c's own
  * cam_basis uses (renderer.c's build_vp/mat4_look_dir), so panning is
  * consistent with whatever's actually rendered, not a separately-
- * invented convention. */
+ * invented convention. Z-up (2026-08-19, see vec3.h's coordinate-
+ * convention note): kept in exact lockstep with mat4_look_dir/cam_basis's
+ * own formula, same as always. */
 static void update_audio_listener(void) {
     float yaw = g_renderer->cam_yaw, pitch = g_renderer->cam_pitch;
     float sy = sinf(yaw), cy = cosf(yaw);
     float sp = sinf(pitch), cp = cosf(pitch);
-    Vec3f fwd   = { -sy*cp, sp, -cy*cp };
-    Vec3f right = { cy, 0.0f, -sy };
+    Vec3f fwd   = { -sy*cp, cy*cp, sp };
+    Vec3f right = { cy, sy, 0.0f };
     Vec3f pos = { g_renderer->cam_pos[0], g_renderer->cam_pos[1], g_renderer->cam_pos[2] };
     phi_audio_set_listener(pos, fwd, right);
 }
@@ -420,8 +422,10 @@ int main(void) {
      * frame. Values chosen to echo editor_main.c's own initial vantage
      * (g_cam_pivot/g_cam_distance's starting values there), not derived
      * from them -- the player has no cam_recompute_pos orbit state to
-     * share. */
-    renderer_set_camera(g_renderer, (Vec3f){128.0f, 120.0f, 40.0f}, 0.0f, -0.4f);
+     * share. Z-up (2026-08-19, see vec3.h's coordinate-convention note):
+     * was (128,120,40) back when Y was vertical -- same real vantage
+     * point, just relabeled onto the new axis roles. */
+    renderer_set_camera(g_renderer, (Vec3f){128.0f, 40.0f, 120.0f}, 0.0f, -0.4f);
 
     scene_objects_init();
     skinned_scene_objects_init();

@@ -42,7 +42,9 @@
 static Renderer        *g_renderer;
 static const InputState *g_input;
 
-static Vec3f g_cam_pos = { 0.0f, EYE_HEIGHT, 8.0f };
+/* Z-up (2026-08-19, see vec3.h's coordinate-convention note): eye height
+ * moved from Y to Z; was (0, EYE_HEIGHT, 8) back when Y was vertical. */
+static Vec3f g_cam_pos = { 0.0f, 8.0f, EYE_HEIGHT };
 static float g_yaw = 0.0f, g_pitch = 0.0f;
 /* Clamped just shy of +/-90 degrees (see game_tick) -- straight up/down
  * puts cam_basis's fwd vector on the vertical axis, which degenerates
@@ -56,15 +58,26 @@ static MeshObject        *g_cyberdemon; /* red: Rushab notfreedom, static (no sk
 static float g_cyberdemon_base_yaw;
 static float g_sway_t = 0.0f;
 
+/* Z-up (2026-08-19, see vec3.h's coordinate-convention note): kept in
+ * exact lockstep with renderer.c's mat4_look_dir/editor_main.c's own
+ * cam_basis. */
 static void cam_basis(float yaw, float pitch, Vec3f *fwd, Vec3f *right) {
     float sy = sinf(yaw), cy = cosf(yaw);
     float sp = sinf(pitch), cp = cosf(pitch);
-    if (fwd)   *fwd   = (Vec3f){ -sy*cp, sp, -cy*cp };
-    if (right) *right = (Vec3f){ cy, 0.0f, -sy };
+    if (fwd)   *fwd   = (Vec3f){ -sy*cp, cy*cp, sp };
+    if (right) *right = (Vec3f){ cy, sy, 0.0f };
 }
 
-static MeshObject *make_ground(float hx, float hz) {
-    float hy = 1.0f;
+/* Z-up (2026-08-19, see vec3.h's coordinate-convention note): the thin
+ * dimension is now Z, not Y -- hx/hy are both horizontal half-extents
+ * now (the caller's own two args are unchanged, still 30x30). Same
+ * vertex-order/index pattern as before (already verified to wind every
+ * face outward -- see game/main.py's own git history note on a real,
+ * live winding bug found and fixed there earlier in this project), so
+ * winding correctness carries over unchanged: only which VALUE lands in
+ * the y vs. z slot moved, not the vertex order itself. */
+static MeshObject *make_ground(float hx, float hy) {
+    float hz = 1.0f;
     float positions[24] = {
         -hx,-hy,-hz,  hx,-hy,-hz,  hx,hy,-hz,  -hx,hy,-hz,
         -hx,-hy, hz,  hx,-hy, hz,  hx,hy, hz,  -hx,hy, hz,
@@ -79,7 +92,7 @@ static MeshObject *make_ground(float hx, float hz) {
     };
     HalfEdgeMesh *hem = halfedge_build_from_triangles(positions, 8, indices, 36);
     MeshObject *obj = scene_object_add();
-    obj->position = (Vec3f){0.0f, -1.0f, 0.0f};
+    obj->position = (Vec3f){0.0f, 0.0f, -1.0f};
     obj->orientation = quat_identity();
     obj->scale = (Vec3f){1.0f, 1.0f, 1.0f};
     obj->hem = hem;
@@ -150,19 +163,26 @@ void game_init(Renderer *renderer, PhiPhysicsWorld *phys_world, const InputState
 
     make_ground(30.0f, 30.0f);
 
-    /* Ground's own top surface is at world Y=0 (position.y=-1, half-
-     * extent 1 -- see make_ground above), NOT position.y=-1 itself -- both
+    /* Ground's own top surface is at world Z=0 (position.z=-1, half-
+     * extent 1 -- see make_ground above), NOT position.z=-1 itself -- both
      * characters below are placed with that in mind: their own local
      * lowest vertex (not their local origin, which a Sketchfab export can
      * put anywhere -- hips, pelvis, world origin, wherever the original
-     * scene had it) is what actually gets planted at world Y=0, via
-     * min_y*scale below. Placing them at a flat "position.y=-1" instead
-     * (an earlier, real bug in this file) silently assumed local-origin-
-     * at-feet and sank both characters up to a meter into the ground --
-     * caught after a live run put the noclip camera (no collision, no
-     * back-face culling -- see renderer_create's own comment) inside the
-     * exposed geometry, which reads as "the view is stuck inside solid
-     * mesh" from the player's side. */
+     * scene had it) is what actually gets planted at world Z=0, via
+     * min_z*scale below. Placing them at a flat "position.z=-1" instead
+     * (an earlier, real bug in this file, back when this used Y as
+     * vertical) silently assumed local-origin-at-feet and sank both
+     * characters up to a meter into the ground -- caught after a live run
+     * put the noclip camera (no collision, no back-face culling -- see
+     * renderer_create's own comment) inside the exposed geometry, which
+     * reads as "the view is stuck inside solid mesh" from the player's
+     * side. Z-up (2026-08-19, see vec3.h's coordinate-convention note):
+     * this whole section used Y for vertical placement/height before --
+     * skinned_mesh.c's own vertex loading and armature.c's own bone
+     * loading are both real, verified Z-up conversions now (see their
+     * own comments and client/quat_axis_convert_test_main.c), so the
+     * skinned pose's AABB below is genuinely Z-up data, not just
+     * relabeled. */
 
     /* ---- Blue: DISA swat_operator, real skin + animation ---- */
     g_swat = skinned_scene_object_add();
@@ -172,16 +192,16 @@ void game_init(Renderer *renderer, PhiPhysicsWorld *phys_world, const InputState
          * comment on why a raw scan would be wrong here. */
         Vec3f mn, mx;
         float scale = 1.0f;
-        float min_y = 0.0f;
-        if (skinned_mesh_object_local_aabb(g_swat, &mn, &mx) && (mx.y - mn.y) > 1e-4f) {
-            scale = TARGET_HEIGHT_M / (mx.y - mn.y);
-            min_y = mn.y;
+        float min_z = 0.0f;
+        if (skinned_mesh_object_local_aabb(g_swat, &mn, &mx) && (mx.z - mn.z) > 1e-4f) {
+            scale = TARGET_HEIGHT_M / (mx.z - mn.z);
+            min_z = mn.z;
         }
         g_swat->scale = (Vec3f){scale, scale, scale};
-        g_swat->position.y = -min_y * scale;
+        g_swat->position.z = -min_z * scale;
         g_swat->orientation = quat_identity();
-        printf("[game] blue: swat_operator loaded, %d bones, %d clip(s), scaled x%.3f, feet at y=%.3f\n",
-               g_swat->arm.bone_count, g_swat->clip_count, scale, g_swat->position.y);
+        printf("[game] blue: swat_operator loaded, %d bones, %d clip(s), scaled x%.3f, feet at z=%.3f\n",
+               g_swat->arm.bone_count, g_swat->clip_count, scale, g_swat->position.z);
     } else {
         printf("[game] blue: FAILED to load swat_operator\n");
         g_swat = NULL;
@@ -192,16 +212,16 @@ void game_init(Renderer *renderer, PhiPhysicsWorld *phys_world, const InputState
     if (cyber_hem) {
         Vec3f half;
         float scale = 1.0f;
-        float min_y = 0.0f;
-        if (meshobject_local_aabb_half_extents(cyber_hem, &half) && half.y > 1e-4f) {
-            scale = TARGET_HEIGHT_M / (half.y * 2.0f);
-            min_y = cyber_hem->verts[0].pos[1];
+        float min_z = 0.0f;
+        if (meshobject_local_aabb_half_extents(cyber_hem, &half) && half.z > 1e-4f) {
+            scale = TARGET_HEIGHT_M / (half.z * 2.0f);
+            min_z = cyber_hem->verts[0].pos[2];
             for (int i = 1; i < cyber_hem->vert_count; i++)
-                if (cyber_hem->verts[i].pos[1] < min_y) min_y = cyber_hem->verts[i].pos[1];
+                if (cyber_hem->verts[i].pos[2] < min_z) min_z = cyber_hem->verts[i].pos[2];
         }
 
         g_cyberdemon = scene_object_add();
-        g_cyberdemon->position = (Vec3f){3.0f, -min_y * scale, 0.0f};
+        g_cyberdemon->position = (Vec3f){3.0f, 0.0f, -min_z * scale};
         /* Both characters spawn at their own file's neutral orientation
          * (yaw 0, no extra rotation on top of it) rather than turned to
          * face each other -- the request is "facing the camera", and the
@@ -218,8 +238,8 @@ void game_init(Renderer *renderer, PhiPhysicsWorld *phys_world, const InputState
         g_cyberdemon->hem = cyber_hem;
         g_cyberdemon->render_mesh = (RenderMesh *)calloc(1, sizeof(RenderMesh));
         meshobject_build_render_mesh_from_halfedge(g_cyberdemon->render_mesh, cyber_hem);
-        printf("[game] red: notfreedom (cyberdemon) loaded, no skin in source -- using idle sway, scaled x%.3f, feet at y=%.3f\n",
-               scale, g_cyberdemon->position.y);
+        printf("[game] red: notfreedom (cyberdemon) loaded, no skin in source -- using idle sway, scaled x%.3f, feet at z=%.3f\n",
+               scale, g_cyberdemon->position.z);
     } else {
         printf("[game] red: FAILED to load notfreedom\n");
         g_cyberdemon = NULL;
@@ -230,16 +250,21 @@ void game_init(Renderer *renderer, PhiPhysicsWorld *phys_world, const InputState
      * direction -- see player_main.c's own light-gathering comment), a
      * bit higher and more front-on than the engine's previous hardcoded
      * default so it actually rakes across both characters' faces instead
-     * of grazing them from directly behind. */
+     * of grazing them from directly behind. Z-up (2026-08-19, see vec3.h's
+     * coordinate-convention note): was (0.3,0.8,0.5) back when Y was
+     * vertical -- same real direction (mostly-overhead, a bit front-on),
+     * just relabeled onto the new axis roles. */
     PhiLight *sun = light_spawn(LIGHT_TYPE_SUN, (Vec3f){0.0f, 0.0f, 0.0f});
-    if (sun) sun->direction = (Vec3f){0.3f, 0.8f, 0.5f};
+    if (sun) sun->direction = (Vec3f){0.3f, 0.5f, 0.8f};
 
     /* A small emissive cube between the two characters (x=0, the midpoint
      * of their x=-3/x=3 spawn points), roughly chest-height, paired with
      * a real point light at the same spot -- see make_emissive_cube's own
      * comment on why both are needed for it to actually "light them both
-     * up" rather than just glow on its own. */
-    make_emissive_cube((Vec3f){0.0f, 1.0f, 0.0f}, 0.15f, (Vec3f){1.0f, 0.75f, 0.35f}, 900.0f);
+     * up" rather than just glow on its own. Z-up (2026-08-19, see vec3.h's
+     * coordinate-convention note): was (0,1,0) back when Y was vertical --
+     * same real chest-height position, just relabeled. */
+    make_emissive_cube((Vec3f){0.0f, 0.0f, 1.0f}, 0.15f, (Vec3f){1.0f, 0.75f, 0.35f}, 900.0f);
 
     printf("[game] Tour De Force II -- WASD to move, mouse to look\n");
 }
@@ -257,29 +282,35 @@ void game_tick(float dt) {
     /* WASD movement stays on the flat ground plane regardless of pitch
      * (cam_basis(g_yaw, 0.0f, ...) below, not g_pitch) -- standard FPS
      * convention: looking up/down doesn't slow or tilt horizontal
-     * walking. */
+     * walking. Z-up (2026-08-19, see vec3.h's coordinate-convention
+     * note): the flat ground plane is X/Y now, not X/Z -- fwd_flat.z/
+     * right.z are always 0 at pitch=0 with the new cam_basis, matching
+     * Z now being purely vertical. */
     Vec3f fwd_flat, right;
     cam_basis(g_yaw, 0.0f, &fwd_flat, &right);
-    float mx = 0.0f, mz = 0.0f;
-    if (g_input->keys_down[PHI_KEY_W]) { mx += fwd_flat.x; mz += fwd_flat.z; }
-    if (g_input->keys_down[PHI_KEY_S]) { mx -= fwd_flat.x; mz -= fwd_flat.z; }
-    if (g_input->keys_down[PHI_KEY_D]) { mx += right.x;    mz += right.z; }
-    if (g_input->keys_down[PHI_KEY_A]) { mx -= right.x;    mz -= right.z; }
-    float mlen = sqrtf(mx*mx + mz*mz);
+    float mx = 0.0f, my = 0.0f;
+    if (g_input->keys_down[PHI_KEY_W]) { mx += fwd_flat.x; my += fwd_flat.y; }
+    if (g_input->keys_down[PHI_KEY_S]) { mx -= fwd_flat.x; my -= fwd_flat.y; }
+    if (g_input->keys_down[PHI_KEY_D]) { mx += right.x;    my += right.y; }
+    if (g_input->keys_down[PHI_KEY_A]) { mx -= right.x;    my -= right.y; }
+    float mlen = sqrtf(mx*mx + my*my);
     if (mlen > 1e-5f) {
         g_cam_pos.x += (mx / mlen) * MOVE_SPEED * dt;
-        g_cam_pos.z += (mz / mlen) * MOVE_SPEED * dt;
+        g_cam_pos.y += (my / mlen) * MOVE_SPEED * dt;
     }
     renderer_set_camera(g_renderer, g_cam_pos, g_yaw, g_pitch);
 
     /* ---- The cyberdemon's idle sway (see this file's own top comment on
      * why this exists instead of real skeletal animation) -- a slow,
      * honest yaw oscillation around its base facing, real per-frame
-     * motion, not a static prop. ---- */
+     * motion, not a static prop. Z-up (2026-08-19): a "yaw" turn rotates
+     * about the vertical axis, which is Z now -- was a Quat with only
+     * the Y component set (rotation about Y) back when Y was vertical;
+     * now it's the Z component. ---- */
     if (g_cyberdemon) {
         g_sway_t += dt;
         float yaw = g_cyberdemon_base_yaw + sinf(g_sway_t * CYBERDEMON_SWAY_SPEED) * CYBERDEMON_SWAY_AMPLITUDE;
-        g_cyberdemon->orientation = (Quat){0.0f, sinf(yaw * 0.5f), 0.0f, cosf(yaw * 0.5f)};
+        g_cyberdemon->orientation = (Quat){0.0f, 0.0f, sinf(yaw * 0.5f), cosf(yaw * 0.5f)};
     }
     /* g_swat's own animation clip advances automatically every frame via
      * player_main.c's skinned_scene_object_get_all/skinned_mesh_object_

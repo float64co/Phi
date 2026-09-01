@@ -120,7 +120,17 @@ static void append_primitive(HalfEdgeMesh *hem, const cgltf_primitive *prim,
     for (int v = 0; v < pos_count; v++) {
         float p[3]; cgltf_accessor_read_float(pos_acc, (cgltf_size)v, p, 3);
         float wp[3]; phi_mat4_transform_point(world, p, wp);
-        int idx = halfedge_add_vertex(hem, wp[0], wp[1], wp[2]);
+        /* Z-up (2026-08-19, see vec3.h's coordinate-convention note):
+         * glTF's own spec convention is Y-up; Phi's internal engine space
+         * is Z-up. This is the exact +90-degree-about-X rotation vec3.h's
+         * vec3_y_up_to_z_up documents (inlined here on raw floats rather
+         * than pulling Vec3f/vec3.h into this translation unit just for
+         * one call) -- files on disk stay spec-compliant Y-up (see
+         * halfedge_save_glb_buffer's own matching inverse), only the
+         * live, in-memory HalfEdgeMesh is Z-up. Applied AFTER the node's
+         * own world transform above, which is still expressed in the
+         * file's own Y-up space. */
+        int idx = halfedge_add_vertex(hem, wp[0], -wp[2], wp[1]);
         if (uv_acc) {
             float uv[2]; cgltf_accessor_read_float(uv_acc, (cgltf_size)v, uv, 2);
             halfedge_set_vertex_uv(hem, idx, uv[0], uv[1]);
@@ -215,6 +225,20 @@ static void compute_pos_bounds(const float *positions, int pos_count, float pmin
     }
 }
 
+/* Inverse of the load-side conversion in append_primitive above (see its
+ * own comment, and vec3.h's coordinate-convention note) -- Phi's
+ * in-memory HalfEdgeMesh is Z-up; both save paths below write spec-
+ * compliant Y-up glTF, so this runs once on the flattened position array
+ * right after halfedge_flatten_triangles, before it's used for bounds or
+ * written to disk. In-place: (x,y,z) -> (x,z,-y). */
+static void convert_positions_z_up_to_y_up(float *positions, int pos_count) {
+    for (int i = 0; i < pos_count; i++) {
+        float y = positions[i*3+1], z = positions[i*3+2];
+        positions[i*3+1] = z;
+        positions[i*3+2] = -y;
+    }
+}
+
 /* Derives "<dir>/<base>.bin" from a "<dir>/<base>.gltf"-shaped path (or
  * just appends ".bin" if there's no recognizable extension) — used to
  * name the sibling binary buffer file halfedge_save_gltf writes. Caller
@@ -233,6 +257,7 @@ int halfedge_save_gltf(const HalfEdgeMesh *hem, const char *gltf_path) {
     float *positions; unsigned short *indices;
     int pos_count, index_count;
     halfedge_flatten_triangles(hem, &positions, &pos_count, &indices, &index_count);
+    convert_positions_z_up_to_y_up(positions, pos_count);
 
     char *bin_path = bin_path_for(gltf_path);
     const char *bin_basename = strrchr(bin_path, '/');
@@ -301,6 +326,7 @@ int halfedge_save_glb_buffer(const HalfEdgeMesh *hem, uint8_t **out_data, int *o
         free(positions); free(indices);
         return 0;
     }
+    convert_positions_z_up_to_y_up(positions, pos_count);
 
     size_t pos_bytes = sizeof(float) * 3 * (size_t)pos_count;
     size_t idx_bytes = sizeof(unsigned short) * (size_t)index_count;

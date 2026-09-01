@@ -94,6 +94,17 @@ Quat quat_normalize(Quat q);
  * channel keyframe interpolation (see phi.md's "Animation Editor"). */
 Quat quat_slerp(Quat a, Quat b, float t);
 
+/* Rotation counterparts of vec3.h's vec3_y_up_to_z_up/vec3_z_up_to_y_up
+ * (2026-08-19, see that header's own coordinate-convention note) --
+ * conjugates q by the identical fixed +/-90-degree-about-X rotation, so
+ * a rotation authored/read in glTF's Y-up space is correctly re-expressed
+ * in Phi's own Z-up engine space (and back again on save). Used by
+ * armature.c's bone rest_rotation and animation.c's rotation animation
+ * channels; see meshobject.c's own comment on these two for the real,
+ * numerically-verified derivation. */
+Quat quat_y_up_to_z_up(Quat q);
+Quat quat_z_up_to_y_up(Quat q);
+
 /* Computes a local-space AABB half-extent (for phi_physics_add_box_body's
  * box shape) from hem's actual vertex bounds -- see meshobject.c for the
  * "assumes roughly centered on local origin" caveat. Returns 0 (out

@@ -127,6 +127,18 @@ static void append_primitive(SkinnedMesh *out_mesh, int *vert_cap, int *index_ca
         if (world) phi_mat4_transform_point(world, p, sv->pos);
         else { sv->pos[0] = p[0]; sv->pos[1] = p[1]; sv->pos[2] = p[2]; }
         cgltf_accessor_read_float(norm_acc, (cgltf_size)v, sv->normal, 3);
+        /* Z-up (2026-08-19, see vec3.h's coordinate-convention note):
+         * both branches above still leave real glTF-file (Y-up) data in
+         * sv->pos -- world-baked or not, neither one has been through an
+         * axis conversion yet. sv->normal is a real per-vertex direction
+         * (read straight from the file, never recomputed later the way
+         * halfedge_gltf.c's mesh normals are) -- vec3_y_up_to_z_up is a
+         * pure rotation, so it converts a direction exactly like a
+         * position, no separate inverse-transpose handling needed. */
+        Vec3f pos_conv = vec3_y_up_to_z_up((Vec3f){sv->pos[0], sv->pos[1], sv->pos[2]});
+        sv->pos[0] = pos_conv.x; sv->pos[1] = pos_conv.y; sv->pos[2] = pos_conv.z;
+        Vec3f norm_conv = vec3_y_up_to_z_up((Vec3f){sv->normal[0], sv->normal[1], sv->normal[2]});
+        sv->normal[0] = norm_conv.x; sv->normal[1] = norm_conv.y; sv->normal[2] = norm_conv.z;
         if (uv_acc) cgltf_accessor_read_float(uv_acc, (cgltf_size)v, sv->uv, 2);
 
         if (rigid_bone_idx >= 0) {
